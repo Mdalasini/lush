@@ -235,13 +235,13 @@ pub enum Token {
     Bang,
 }
 
-/// Lex `source` into tokens, normalizing `\r\n` to `\n` first.
+/// Lex `source` into tokens. `\r` is skipped as whitespace, so CRLF keeps
+/// original byte offsets for diagnostics.
 pub fn lex(source: &str) -> Result<Vec<TokenSpan>, Vec<SyntaxError>> {
-    let normalized = source.replace("\r\n", "\n");
-    lex_normalized(&normalized)
+    lex_normalized(source)
 }
 
-/// Lex already-normalized `\n`-only source.
+/// Lex source text (same as [`lex`]; name kept for call sites).
 pub fn lex_normalized(source: &str) -> Result<Vec<TokenSpan>, Vec<SyntaxError>> {
     let mut lexer = Token::lexer(source);
     let mut tokens = Vec::new();

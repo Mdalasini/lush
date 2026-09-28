@@ -2,17 +2,19 @@
 
 use crate::ast::*;
 use crate::error::SyntaxError;
-use crate::lexer::{lex_normalized, Token, TokenSpan};
+use crate::lexer::{Token, TokenSpan};
 use crate::span::Span;
 
 /// Parse a complete module from source text.
+///
+/// Spans refer to the caller's `source`. `\r` is treated as whitespace by the
+/// lexer, so CRLF files keep correct byte offsets (no rewrite to `\n`).
 pub fn parse_module(source: &str) -> Result<Module, Vec<SyntaxError>> {
-    let normalized = source.replace("\r\n", "\n");
-    let tokens = match lex_normalized(&normalized) {
+    let tokens = match crate::lexer::lex(source) {
         Ok(t) => t,
         Err(errors) => return Err(errors),
     };
-    let mut parser = Parser::new(&normalized, tokens);
+    let mut parser = Parser::new(source, tokens);
     match parser.parse_module() {
         Ok(module) => {
             if parser.errors.is_empty() {
@@ -129,10 +131,10 @@ impl<'a> Parser<'a> {
 
     fn parse_import(&mut self) -> Result<Import, ()> {
         let start = self.expect(Token::Import, "expected `import`")?.span.start;
-        let mut path = vec![self.expect_ident_text()?];
+        // First segment uses path-segment rules so `github.com/...` is accepted (§12).
+        let mut path = vec![self.expect_path_segment()?];
         while self.at(Token::Slash) {
             self.bump();
-            // Path segments may be idents or domain-like pieces; allow Ident/UIdent/Int for versions? Spec: module components. Use Ident primarily; also allow dotted domains as idents like github.com via Ident Dot Ident — actually path is slash-separated. `github.com/user/repo` has dots inside a segment.
             path.push(self.expect_path_segment()?);
         }
 
@@ -293,9 +295,22 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_param(&mut self) -> Result<Param, ()> {
-        let first = self.expect(Token::Ident, "expected parameter name")?;
+        // `_` is a valid ignored parameter name (`Token::Discard`).
+        let first = match self.peek_kind() {
+            Some(Token::Ident) | Some(Token::Discard) => self.bump().unwrap(),
+            _ => {
+                let span = self
+                    .peek()
+                    .map(|t| t.span)
+                    .unwrap_or(Span::point(self.source.len()));
+                self.error(span, "expected parameter name");
+                return Err(());
+            }
+        };
         let start = first.span.start;
-        let (label, name) = if self.at(Token::Ident) {
+        let (label, name) = if matches!(first.kind, Token::Ident)
+            && matches!(self.peek_kind(), Some(Token::Ident) | Some(Token::Discard))
+        {
             let second = self.bump().unwrap();
             (Some(self.text(first.span)), self.text(second.span))
         } else {
@@ -471,17 +486,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> Result<Statement, ()> {
-        if self.at(Token::Fn) {
-            // Local function: no pub, no trailing semicolon.
+        // `fn name` is a local function; `fn (` is an anonymous function expression.
+        if self.at(Token::Fn) && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(Token::Ident)
+        {
             Ok(Statement::Fn(self.parse_fn_def(false)?))
         } else if self.at(Token::Let) {
             let stmt = self.parse_let_stmt()?;
             self.expect(Token::Semicolon, "expected `;` after let")?;
             Ok(Statement::Let(stmt))
         } else if self.at(Token::Use) {
-            // Core parser rejects use for now? PR4 adds it — but AST has it.
-            // For PR3, parse use as error or implement basic use.
-            // Implement basic use here so structure is ready.
             let stmt = self.parse_use_stmt()?;
             self.expect(Token::Semicolon, "expected `;` after use")?;
             Ok(Statement::Use(stmt))
@@ -801,6 +814,10 @@ impl<'a> Parser<'a> {
                     if self.at(Token::DotDot) {
                         self.bump();
                         rest = Some(Box::new(self.parse_optional_rest_pattern()?));
+                        // Trailing comma after leading spread: `[..rest,]`
+                        if self.at(Token::Comma) {
+                            self.bump();
+                        }
                     } else {
                         loop {
                             if self.at(Token::DotDot) {
@@ -1045,12 +1062,19 @@ impl<'a> Parser<'a> {
                 if l_bp < min_bp {
                     break;
                 }
-                if non_assoc && l_bp == min_bp {
-                    self.error(
-                        op_tok.span,
-                        "chained comparisons/equality require parentheses",
-                    );
-                    return Err(());
+                // Non-associative ops cannot chain at the same precedence on either side.
+                // Do not use `l_bp == min_bp` alone: that falsely rejects `a == b && c == d`
+                // when `&&`'s right binding power equals `==`'s left binding power.
+                if non_assoc {
+                    if let ExprKind::Binary { op: prev_op, .. } = &lhs.kind {
+                        if non_assoc_bp(*prev_op) == Some(l_bp) {
+                            self.error(
+                                op_tok.span,
+                                "chained comparisons/equality require parentheses",
+                            );
+                            return Err(());
+                        }
+                    }
                 }
                 self.bump();
                 if op_tok.kind == Token::Pipe {
@@ -1064,7 +1088,9 @@ impl<'a> Parser<'a> {
                         span,
                     };
                 } else {
-                    let right = self.parse_expr(r_bp)?;
+                    // Parse non-assoc rights at bp+1 so `a == b == c` cannot nest on the right.
+                    let right_bp = if non_assoc { l_bp + 1 } else { r_bp };
+                    let right = self.parse_expr(right_bp)?;
                     let span = Span::new(lhs.span.start, right.span.end);
                     lhs = Expr {
                         kind: ExprKind::Binary {
@@ -1131,6 +1157,21 @@ impl<'a> Parser<'a> {
                 })
             }
             Token::Ident => {
+                // Qualified record update: `mod.Ctor(..base, ...)`
+                if self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(Token::Dot)
+                    && self.tokens.get(self.pos + 2).map(|t| t.kind) == Some(Token::UIdent)
+                    && self.tokens.get(self.pos + 3).map(|t| t.kind) == Some(Token::LParen)
+                    && self.tokens.get(self.pos + 4).map(|t| t.kind) == Some(Token::DotDot)
+                {
+                    let module_tok = self.bump().unwrap();
+                    self.bump(); // dot
+                    let ctor_tok = self.bump().unwrap();
+                    return self.parse_record_update(
+                        Some(self.text(module_tok.span)),
+                        self.text(ctor_tok.span),
+                        module_tok.span.start,
+                    );
+                }
                 self.bump();
                 Ok(Expr {
                     kind: ExprKind::Ident(self.text(tok.span)),
@@ -1143,7 +1184,7 @@ impl<'a> Parser<'a> {
                 if self.at(Token::LParen) {
                     // Lookahead for `..`
                     if self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(Token::DotDot) {
-                        return self.parse_record_update(self.text(tok.span), tok.span.start);
+                        return self.parse_record_update(None, self.text(tok.span), tok.span.start);
                     }
                 }
                 Ok(Expr {
@@ -1152,10 +1193,13 @@ impl<'a> Parser<'a> {
                 })
             }
             Token::LParen => {
-                self.bump();
+                let start = self.bump().unwrap().span.start;
                 let expr = self.parse_expr(0)?;
-                self.expect(Token::RParen, "expected `)`")?;
-                Ok(expr)
+                let end = self.expect(Token::RParen, "expected `)`")?.span.end;
+                Ok(Expr {
+                    kind: ExprKind::Group(Box::new(expr)),
+                    span: Span::new(start, end),
+                })
             }
             Token::LBrace => {
                 let block = self.parse_block()?;
@@ -1282,6 +1326,10 @@ impl<'a> Parser<'a> {
             if self.at(Token::DotDot) {
                 self.bump();
                 spread = Some(Box::new(self.parse_expr(0)?));
+                // Trailing comma after leading spread: `[..xs,]`
+                if self.at(Token::Comma) {
+                    self.bump();
+                }
             } else {
                 loop {
                     if self.at(Token::DotDot) {
@@ -1382,7 +1430,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_record_update(&mut self, constructor: String, start: usize) -> Result<Expr, ()> {
+    fn parse_record_update(
+        &mut self,
+        module: Option<String>,
+        constructor: String,
+        start: usize,
+    ) -> Result<Expr, ()> {
         self.expect(Token::LParen, "expected `(`")?;
         self.expect(Token::DotDot, "expected `..` in record update")?;
         let base = self.parse_expr(0)?;
@@ -1403,6 +1456,7 @@ impl<'a> Parser<'a> {
             .end;
         Ok(Expr {
             kind: ExprKind::RecordUpdate {
+                module,
                 constructor,
                 base: Box::new(base),
                 fields,
@@ -1617,6 +1671,16 @@ fn bin_info(kind: Token) -> Option<(u8, u8, BinOp, bool)> {
     }
 }
 
+/// Binding power for non-associative operators, used to reject `a == b == c`.
+fn non_assoc_bp(op: BinOp) -> Option<u8> {
+    match op {
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(7),
+        BinOp::LtFloat | BinOp::LeFloat | BinOp::GtFloat | BinOp::GeFloat => Some(7),
+        BinOp::Eq | BinOp::NotEq => Some(6),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1730,6 +1794,83 @@ pub fn main() -> Bool {
         )
         .unwrap_err();
         assert!(err.iter().any(|e| e.to_string().contains("parentheses")));
+    }
+
+    #[test]
+    fn parses_equality_with_and() {
+        parse_ok(
+            r#"
+pub fn main() -> Bool {
+  a == b && c == d;
+  x && a == b;
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn parses_github_domain_import() {
+        let m = parse_ok("import github.com/user/repo;\n");
+        assert_eq!(m.imports[0].path, vec!["github.com", "user", "repo"]);
+    }
+
+    #[test]
+    fn parses_discard_parameter() {
+        parse_ok(
+            r#"
+pub fn main() -> Int {
+  list.map(xs, fn(_) { 0; });
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn parses_anonymous_fn_expression_statement() {
+        parse_ok(
+            r#"
+pub fn main() -> Nil {
+  fn(x) { x; };
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn parses_leading_spread_with_trailing_comma() {
+        parse_ok(
+            r#"
+pub fn main() -> Nil {
+  let xs = [..ys,];
+  case xs {
+    [..rest,] -> Nil;
+    _ -> Nil;
+  };
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn parses_qualified_record_update() {
+        parse_ok(
+            r#"
+pub fn main() -> Nil {
+  models.User(..user, age: 31);
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn crlf_spans_match_original_source() {
+        let source = "pub fn main() -> Int {\r\n  1;\r\n}\r\n";
+        let module = parse_ok(source);
+        let Definition::Fn(f) = &module.definitions[0] else {
+            panic!();
+        };
+        // Span text from the original source must be valid and contain `main`.
+        assert!(f.span.slice(source).contains("main"));
     }
 
     #[test]

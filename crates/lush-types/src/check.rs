@@ -442,6 +442,7 @@ impl Checker {
                 Type::nil()
             }
             ExprKind::Echo { value } => self.infer_expr(value),
+            ExprKind::Group(inner) => self.infer_expr(inner),
             ExprKind::Block(b) => self.infer_block_scoped(b),
             ExprKind::List { items, spread } => {
                 let elem = self.fresh();

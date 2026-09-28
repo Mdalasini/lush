@@ -15,9 +15,8 @@ const SOFT_COLUMN: usize = 80;
 
 /// Format `source` into canonical Lush text.
 pub fn format_source(source: &str) -> Result<String, Vec<SyntaxError>> {
-    let normalized = source.replace("\r\n", "\n");
-    let module = parse_module(&normalized)?;
-    let comments = collect_comments(&normalized)?;
+    let module = parse_module(source)?;
+    let comments = collect_comments(source)?;
     let mut printer = Printer::new(comments);
     printer.module(&module);
     printer.emit_remaining_comments();
@@ -126,6 +125,14 @@ impl Printer {
         self.at_line_start = true;
     }
 
+    fn blank_line(&mut self) {
+        self.newline();
+        if !self.buffer.ends_with("\n\n") {
+            self.buffer.push('\n');
+        }
+        self.at_line_start = true;
+    }
+
     fn module(&mut self, module: &Module) {
         for import in &module.imports {
             self.emit_comments_before(import.span);
@@ -133,14 +140,14 @@ impl Printer {
             self.newline();
         }
         if !module.imports.is_empty() && !module.definitions.is_empty() {
-            self.newline();
+            self.blank_line();
         }
         for (i, def) in module.definitions.iter().enumerate() {
             let span = def_span(def);
             self.emit_comments_before(span);
             self.definition(def);
             if i + 1 != module.definitions.len() {
-                self.newline();
+                self.blank_line();
             }
         }
     }
@@ -243,6 +250,7 @@ impl Printer {
                 self.newline();
                 self.indent += 1;
                 for v in variants {
+                    self.emit_comments_before(v.span);
                     self.write_indent();
                     self.push(&v.name);
                     if !v.fields.is_empty() {
@@ -288,6 +296,8 @@ impl Printer {
     fn block(&mut self, block: &Block) {
         self.push("{");
         if block.statements.is_empty() {
+            // Emit any comments that belong inside an empty/near-empty block.
+            self.emit_comments_before(Span::point(block.span.end.saturating_sub(1)));
             self.push("}");
             return;
         }
@@ -296,6 +306,8 @@ impl Printer {
         for stmt in &block.statements {
             self.statement(stmt);
         }
+        // Comments after the last statement stay inside the block.
+        self.emit_comments_before(Span::point(block.span.end.saturating_sub(1)));
         self.indent -= 1;
         self.write_indent();
         self.push("}");
@@ -449,15 +461,41 @@ impl Printer {
                 self.push(")");
             }
             ExprKind::Unary { op, expr } => {
+                // Parenthesize when used as a higher-precedence postfix base (`(-f)(x)`).
+                let need_paren = parent_bp > 10;
+                if need_paren {
+                    self.push("(");
+                }
                 self.push(match op {
                     UnaryOp::Neg => "-",
                     UnaryOp::Not => "!",
                 });
                 self.expr_prec(expr, 10);
+                if need_paren {
+                    self.push(")");
+                }
             }
             ExprKind::Binary { left, op, right } => {
                 let (l_bp, r_bp) = bin_bp(*op);
-                let need_paren = l_bp < parent_bp;
+                let non_assoc = matches!(
+                    op,
+                    BinOp::Lt
+                        | BinOp::Le
+                        | BinOp::Gt
+                        | BinOp::Ge
+                        | BinOp::LtFloat
+                        | BinOp::LeFloat
+                        | BinOp::GtFloat
+                        | BinOp::GeFloat
+                        | BinOp::Eq
+                        | BinOp::NotEq
+                );
+                // Non-assoc children at the same level still need parentheses.
+                let need_paren = if non_assoc {
+                    l_bp <= parent_bp
+                } else {
+                    l_bp < parent_bp
+                };
                 if need_paren {
                     self.push("(");
                 }
@@ -465,7 +503,7 @@ impl Printer {
                 self.space();
                 self.push(bin_str(*op));
                 self.space();
-                self.expr_prec(right, r_bp);
+                self.expr_prec(right, if non_assoc { l_bp + 1 } else { r_bp });
                 if need_paren {
                     self.push(")");
                 }
@@ -515,6 +553,7 @@ impl Printer {
                 self.newline();
                 self.indent += 1;
                 for clause in clauses {
+                    self.emit_comments_before(clause.span);
                     self.write_indent();
                     for (i, row) in clause.patterns.iter().enumerate() {
                         if i > 0 {
@@ -541,30 +580,64 @@ impl Printer {
                 self.push("}");
             }
             ExprKind::Todo { message } => {
+                let need_paren = parent_bp > 0;
+                if need_paren {
+                    self.push("(");
+                }
                 self.push("todo");
                 if let Some(msg) = message {
                     self.push(" as ");
                     self.expr(msg);
                 }
+                if need_paren {
+                    self.push(")");
+                }
             }
             ExprKind::Panic { message } => {
+                let need_paren = parent_bp > 0;
+                if need_paren {
+                    self.push("(");
+                }
                 self.push("panic");
                 if let Some(msg) = message {
                     self.push(" as ");
                     self.expr(msg);
                 }
+                if need_paren {
+                    self.push(")");
+                }
             }
             ExprKind::Assert { condition, message } => {
+                let need_paren = parent_bp > 0;
+                if need_paren {
+                    self.push("(");
+                }
                 self.push("assert ");
                 self.expr(condition);
                 if let Some(msg) = message {
                     self.push(" as ");
                     self.expr(msg);
                 }
+                if need_paren {
+                    self.push(")");
+                }
             }
             ExprKind::Echo { value } => {
+                // `echo` binds a full expression; parenthesize in operator position.
+                let need_paren = parent_bp > 0;
+                if need_paren {
+                    self.push("(");
+                }
                 self.push("echo ");
                 self.expr(value);
+                if need_paren {
+                    self.push(")");
+                }
+            }
+            ExprKind::Group(inner) => {
+                self.push("(");
+                self.expr(inner);
+                self.push(")");
             }
             ExprKind::Block(b) => self.block(b),
             ExprKind::List { items, spread } => {
@@ -605,10 +678,15 @@ impl Printer {
                 self.push(">>");
             }
             ExprKind::RecordUpdate {
+                module,
                 constructor,
                 base,
                 fields,
             } => {
+                if let Some(m) = module {
+                    self.push(m);
+                    self.push(".");
+                }
                 self.push(constructor);
                 self.push("(..");
                 self.expr(base);
@@ -827,5 +905,34 @@ pub fn main() -> Int {
         let module = parse_module(&formatted).expect("formatted source must parse");
         assert_eq!(module.definitions.len(), 2);
         assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn preserves_non_assoc_parens() {
+        let src = "pub fn main() -> Bool {\n  (a == b) == c;\n}\n";
+        let formatted = format_source(src).unwrap();
+        parse_module(&formatted).expect("formatted non-assoc must reparse");
+        assert!(
+            formatted.contains('('),
+            "expected parentheses kept: {formatted}"
+        );
+    }
+
+    #[test]
+    fn preserves_unary_callee_parens() {
+        let src = "pub fn main() -> Int {\n  (-f)(x);\n}\n";
+        let formatted = format_source(src).unwrap();
+        let again = parse_module(&formatted).expect("formatted unary call must reparse");
+        let Definition::Fn(f) = &again.definitions[0] else {
+            panic!();
+        };
+        let Statement::Expr(e) = &f.body.statements[0] else {
+            panic!();
+        };
+        assert!(
+            matches!(e.kind, ExprKind::Call { .. }),
+            "expected call of negated fn, got {:?}",
+            e.kind
+        );
     }
 }

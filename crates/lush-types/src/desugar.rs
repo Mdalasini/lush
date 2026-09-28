@@ -72,6 +72,7 @@ fn desugar_expr(expr: &mut Expr) {
         }
         ExprKind::Unary { expr, .. }
         | ExprKind::Echo { value: expr }
+        | ExprKind::Group(expr)
         | ExprKind::Field { base: expr, .. } => desugar_expr(expr),
         ExprKind::Assert { condition, message } => {
             desugar_expr(condition);

@@ -294,6 +294,8 @@ pub enum ExprKind {
         /// Value to print.
         value: Box<Expr>,
     },
+    /// Explicit parentheses `(expr)` — preserved so non-associative re-association stays valid.
+    Group(Box<Expr>),
     /// Nested block.
     Block(Block),
     /// List literal.
@@ -307,8 +309,10 @@ pub enum ExprKind {
     Tuple(Vec<Expr>),
     /// Bit array `<< segments >>`.
     BitArray(Vec<BitSegment>),
-    /// Record update `Ctor(..base, field: value, ...)`.
+    /// Record update `Ctor(..base, field: value, ...)` or `mod.Ctor(..base, ...)`.
     RecordUpdate {
+        /// Optional module qualifier.
+        module: Option<String>,
         /// Constructor name.
         constructor: String,
         /// Base record.
