@@ -1,14 +1,19 @@
 //! Opinionated formatter (§11.5): 2-space indent, 80-column soft limit, no options.
 //! Emits required semicolons and preserves comments from the original token stream.
+//!
+//! Comparisons and equality are parenthesised only when nested under another
+//! comparison or equality (not under `&&` / `||` / arithmetic).
+
+use std::collections::HashSet;
 
 use crate::ast::*;
 use crate::span::Span;
-use crate::token::{SpannedToken, TriviaKind};
+use crate::token::{SpannedToken, TokenKind, TriviaKind};
 
 const INDENT: &str = "  ";
 const SOFT_LIMIT: usize = 80;
 
-pub fn format_module(module: &Module, source: &str, tokens: &[SpannedToken]) -> String {
+pub fn format_module(module: &Module, tokens: &[SpannedToken], source: &str) -> String {
     let mut f = Formatter::new(source, tokens);
     f.fmt_module(module);
     f.finish()
@@ -17,8 +22,10 @@ pub fn format_module(module: &Module, source: &str, tokens: &[SpannedToken]) -> 
 struct Formatter<'a> {
     source: &'a str,
     tokens: &'a [SpannedToken],
-    /// Index of the next token whose leading trivia has not been emitted.
+    /// Index of the next token whose leading trivia has not been walked yet.
     trivia_idx: usize,
+    /// Trivia spans already emitted as trailing or before-`}` comments.
+    consumed: HashSet<(usize, usize)>,
     out: String,
     indent: usize,
     at_line_start: bool,
@@ -31,6 +38,7 @@ impl<'a> Formatter<'a> {
             source,
             tokens,
             trivia_idx: 0,
+            consumed: HashSet::new(),
             out: String::new(),
             indent: 0,
             at_line_start: true,
@@ -39,7 +47,6 @@ impl<'a> Formatter<'a> {
     }
 
     fn finish(mut self) -> String {
-        // Emit any remaining trailing comments (attached to EOF).
         while self.trivia_idx < self.tokens.len() {
             let tok = &self.tokens[self.trivia_idx];
             self.emit_token_comments(tok);
@@ -54,13 +61,16 @@ impl<'a> Formatter<'a> {
         self.out
     }
 
+    fn trivia_key(span: Span) -> (usize, usize) {
+        (span.start.as_usize(), span.end.as_usize())
+    }
+
     fn emit_trivia_before(&mut self, span: Span) {
         while self.trivia_idx < self.tokens.len() {
             let tok = &self.tokens[self.trivia_idx];
             if tok.span.start.as_usize() > span.start.as_usize() {
                 break;
             }
-            // Emit comments from this token's leading trivia once, then advance.
             self.emit_token_comments(tok);
             self.trivia_idx += 1;
             if tok.span.start.as_usize() == span.start.as_usize() {
@@ -72,6 +82,10 @@ impl<'a> Formatter<'a> {
     fn emit_token_comments(&mut self, tok: &SpannedToken) {
         let mut pending_blank = false;
         for tr in &tok.leading {
+            let key = Self::trivia_key(tr.span);
+            if self.consumed.contains(&key) {
+                continue;
+            }
             let text = &self.source[tr.span.range()];
             match tr.kind {
                 TriviaKind::Whitespace => {
@@ -81,16 +95,100 @@ impl<'a> Formatter<'a> {
                     }
                 }
                 TriviaKind::LineComment | TriviaKind::DocComment | TriviaKind::ModuleDocComment => {
-                    if !self.at_line_start {
-                        self.newline();
-                    } else if pending_blank && !self.out.is_empty() && !self.out.ends_with("\n\n") {
+                    if !self.at_line_start
+                        || (pending_blank && !self.out.is_empty() && !self.out.ends_with("\n\n"))
+                    {
                         self.newline();
                     }
                     pending_blank = false;
-                    self.push_raw(text);
+                    self.push(text);
                     self.newline();
+                    self.consumed.insert(key);
                 }
             }
+        }
+    }
+
+    /// After `;`, emit same-line trailing comments from the following token.
+    fn emit_trailing_comments(&mut self) {
+        let mut idx = self.trivia_idx;
+        while idx < self.tokens.len() {
+            if matches!(self.tokens[idx].kind, TokenKind::Semicolon) {
+                if idx + 1 < self.tokens.len() {
+                    self.emit_trailing_from_token(idx + 1);
+                }
+                return;
+            }
+            idx += 1;
+        }
+    }
+
+    fn emit_trailing_from_token(&mut self, tok_idx: usize) {
+        let leading: Vec<_> = self.tokens[tok_idx]
+            .leading
+            .iter()
+            .map(|tr| (tr.kind, tr.span))
+            .collect();
+        for (kind, span) in leading {
+            let key = Self::trivia_key(span);
+            if self.consumed.contains(&key) {
+                continue;
+            }
+            let text = &self.source[span.range()];
+            match kind {
+                TriviaKind::Whitespace => {
+                    if text.contains('\n') {
+                        return;
+                    }
+                }
+                TriviaKind::LineComment | TriviaKind::DocComment | TriviaKind::ModuleDocComment => {
+                    if !self.at_line_start && !self.out.ends_with(' ') {
+                        self.out.push(' ');
+                        self.col += 1;
+                    }
+                    self.out.push_str(text);
+                    self.col += text.chars().count();
+                    self.at_line_start = false;
+                    self.consumed.insert(key);
+                }
+            }
+        }
+    }
+
+    /// Before `}`, emit remaining leading comments on that brace at the current indent.
+    fn emit_leading_comments_for_rbrace(&mut self) {
+        let mut idx = self.trivia_idx;
+        while idx < self.tokens.len() {
+            if matches!(self.tokens[idx].kind, TokenKind::RBrace) {
+                let leading: Vec<_> = self.tokens[idx]
+                    .leading
+                    .iter()
+                    .map(|tr| (tr.kind, tr.span))
+                    .collect();
+                for (kind, span) in leading {
+                    let key = Self::trivia_key(span);
+                    if self.consumed.contains(&key) {
+                        continue;
+                    }
+                    match kind {
+                        TriviaKind::Whitespace => {}
+                        TriviaKind::LineComment
+                        | TriviaKind::DocComment
+                        | TriviaKind::ModuleDocComment => {
+                            if !self.at_line_start {
+                                self.newline();
+                            }
+                            let text = &self.source[span.range()];
+                            self.push(text);
+                            self.newline();
+                            self.consumed.insert(key);
+                        }
+                    }
+                }
+                self.trivia_idx = idx + 1;
+                return;
+            }
+            idx += 1;
         }
     }
 
@@ -116,22 +214,10 @@ impl<'a> Formatter<'a> {
         self.col += s.chars().count();
     }
 
-    fn push_raw(&mut self, s: &str) {
-        self.write_indent();
-        self.out.push_str(s);
-        self.col += s.chars().count();
-    }
-
     fn space(&mut self) {
         if !self.at_line_start && !self.out.ends_with(' ') && !self.out.ends_with('\n') {
             self.out.push(' ');
             self.col += 1;
-        }
-    }
-
-    fn soft_break_if_needed(&mut self, upcoming_len: usize) {
-        if self.col + upcoming_len > SOFT_LIMIT && !self.at_line_start {
-            self.newline();
         }
     }
 
@@ -143,7 +229,6 @@ impl<'a> Formatter<'a> {
                 if !self.at_line_start {
                     self.newline();
                 }
-                // One blank line between non-import items / after an import group.
                 if !(prev_import && cur_import) {
                     self.newline();
                 }
@@ -153,7 +238,6 @@ impl<'a> Formatter<'a> {
                 self.newline();
             }
         }
-        // Single trailing newline.
         while self.out.ends_with("\n\n") {
             self.out.pop();
         }
@@ -197,6 +281,7 @@ impl<'a> Formatter<'a> {
             self.push(&alias.text);
         }
         self.push(";");
+        self.emit_trailing_comments();
     }
 
     fn push_name_or_uname(&mut self, n: &NameOrUName) {
@@ -220,6 +305,7 @@ impl<'a> Formatter<'a> {
         self.push(" = ");
         self.fmt_expr(&c.value, 0);
         self.push(";");
+        self.emit_trailing_comments();
     }
 
     fn fmt_fn(&mut self, f: &FnDef) {
@@ -306,15 +392,29 @@ impl<'a> Formatter<'a> {
                     }
                     self.newline();
                 }
+                self.emit_leading_comments_for_rbrace();
                 self.indent -= 1;
+                self.ensure_line_for_rbrace();
                 self.push("}");
             }
         }
     }
 
+    fn ensure_line_for_rbrace(&mut self) {
+        while self.out.ends_with("\n\n") {
+            self.out.pop();
+        }
+        if !self.out.ends_with('\n') {
+            self.newline();
+        }
+        self.at_line_start = true;
+        self.col = 0;
+    }
+
     fn fmt_block(&mut self, block: &Block) {
         self.push("{");
         if block.statements.is_empty() {
+            self.emit_leading_comments_for_rbrace();
             self.push("}");
             return;
         }
@@ -326,16 +426,9 @@ impl<'a> Formatter<'a> {
                 self.newline();
             }
         }
+        self.emit_leading_comments_for_rbrace();
         self.indent -= 1;
-        // Avoid a blank line before `}`.
-        while self.out.ends_with("\n\n") {
-            self.out.pop();
-        }
-        if !self.out.ends_with('\n') {
-            self.newline();
-        }
-        self.at_line_start = true;
-        self.col = 0;
+        self.ensure_line_for_rbrace();
         self.push("}");
     }
 
@@ -360,6 +453,7 @@ impl<'a> Formatter<'a> {
                     self.push(&msg.raw);
                 }
                 self.push(";");
+                self.emit_trailing_comments();
             }
             Statement::Use(u) => {
                 self.emit_trivia_before(u.span);
@@ -376,11 +470,13 @@ impl<'a> Formatter<'a> {
                 self.push(" <- ");
                 self.fmt_expr(&u.value, 0);
                 self.push(";");
+                self.emit_trailing_comments();
             }
             Statement::Expr(e) => {
                 self.emit_trivia_before(e.span);
                 self.fmt_expr(e, 0);
                 self.push(";");
+                self.emit_trailing_comments();
             }
         }
     }
@@ -391,8 +487,8 @@ impl<'a> Formatter<'a> {
         let wrap = match &expr.kind {
             ExprKind::Paren(_) => false,
             ExprKind::Binary { op, .. } if op.is_comparison_or_eq() => {
-                // Non-associative: always parenthesise when nested under any operator.
-                parent_prec > 0
+                // Only parenthesise under another comparison/equality (levels 6–7).
+                matches!(parent_prec, 6 | 7)
             }
             _ => prec < parent_prec,
         };
@@ -400,7 +496,6 @@ impl<'a> Formatter<'a> {
             self.push("(");
         }
         match &expr.kind {
-            // Preserve explicit parentheses from the source AST.
             ExprKind::Paren(inner) => {
                 self.push("(");
                 self.fmt_expr(inner, 0);
@@ -422,21 +517,42 @@ impl<'a> Formatter<'a> {
                 self.push(")");
             }
             ExprKind::List { items, spread } => {
+                let flat = approx_list_width(items, spread.as_deref());
+                let multiline =
+                    (!items.is_empty() || spread.is_some()) && self.col + flat > SOFT_LIMIT;
                 self.push("[");
-                for (i, e) in items.iter().enumerate() {
-                    if i > 0 {
-                        self.push(", ");
+                if multiline {
+                    self.newline();
+                    self.indent += 1;
+                    for e in items {
+                        self.fmt_expr(e, 0);
+                        self.push(",");
+                        self.newline();
                     }
-                    self.fmt_expr(e, 0);
-                }
-                if let Some(s) = spread {
-                    if !items.is_empty() {
-                        self.push(", ");
+                    if let Some(s) = spread {
+                        self.push("..");
+                        self.fmt_expr(s, 0);
+                        self.push(",");
+                        self.newline();
                     }
-                    self.push("..");
-                    self.fmt_expr(s, 0);
+                    self.indent -= 1;
+                    self.push("]");
+                } else {
+                    for (i, e) in items.iter().enumerate() {
+                        if i > 0 {
+                            self.push(", ");
+                        }
+                        self.fmt_expr(e, 0);
+                    }
+                    if let Some(s) = spread {
+                        if !items.is_empty() {
+                            self.push(", ");
+                        }
+                        self.push("..");
+                        self.fmt_expr(s, 0);
+                    }
+                    self.push("]");
                 }
-                self.push("]");
             }
             ExprKind::BitArray(segs) => {
                 self.push("<<");
@@ -474,22 +590,43 @@ impl<'a> Formatter<'a> {
                 self.push(")");
             }
             ExprKind::Call { callee, args } => {
+                let flat = approx_call_width(callee, args);
+                let multiline = !args.is_empty() && self.col + flat > SOFT_LIMIT;
                 self.fmt_expr(callee, 11);
                 self.push("(");
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        self.push(", ");
+                if multiline {
+                    self.newline();
+                    self.indent += 1;
+                    for arg in args {
+                        if let Some(label) = &arg.label {
+                            self.push(&label.text);
+                            self.push(": ");
+                        }
+                        match &arg.value {
+                            ArgValue::Hole => self.push("_"),
+                            ArgValue::Expr(e) => self.fmt_expr(e, 0),
+                        }
+                        self.push(",");
+                        self.newline();
                     }
-                    if let Some(label) = &arg.label {
-                        self.push(&label.text);
-                        self.push(": ");
+                    self.indent -= 1;
+                    self.push(")");
+                } else {
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            self.push(", ");
+                        }
+                        if let Some(label) = &arg.label {
+                            self.push(&label.text);
+                            self.push(": ");
+                        }
+                        match &arg.value {
+                            ArgValue::Hole => self.push("_"),
+                            ArgValue::Expr(e) => self.fmt_expr(e, 0),
+                        }
                     }
-                    match &arg.value {
-                        ArgValue::Hole => self.push("_"),
-                        ArgValue::Expr(e) => self.fmt_expr(e, 0),
-                    }
+                    self.push(")");
                 }
-                self.push(")");
             }
             ExprKind::Field { base, field } => {
                 self.fmt_expr(base, 12);
@@ -501,16 +638,24 @@ impl<'a> Formatter<'a> {
             }
             ExprKind::Binary { left, op, right } => {
                 let p = prec;
-                // For non-associative ops, children must be parenthesised if they are
-                // also comparisons/equality at the same level — enforced via parent_prec.
-                let child_prec = if op.is_comparison_or_eq() { p } else { p };
-                self.fmt_expr(left, child_prec);
-                self.push(" ");
-                self.push(op.as_str());
-                self.push(" ");
-                self.soft_break_if_needed(8);
                 let right_prec = if op.is_comparison_or_eq() { p } else { p + 1 };
-                self.fmt_expr(right, right_prec);
+                self.fmt_expr(left, p);
+                let op_str = op.as_str();
+                let right_w = approx_expr_width(right);
+                let needed = 1 + op_str.len() + 1 + right_w;
+                if self.col + needed > SOFT_LIMIT && !self.at_line_start {
+                    self.newline();
+                    self.indent += 1;
+                    self.push(op_str);
+                    self.push(" ");
+                    self.fmt_expr(right, right_prec);
+                    self.indent -= 1;
+                } else {
+                    self.push(" ");
+                    self.push(op_str);
+                    self.push(" ");
+                    self.fmt_expr(right, right_prec);
+                }
             }
             ExprKind::Unary { op, expr } => {
                 match op {
@@ -520,10 +665,19 @@ impl<'a> Formatter<'a> {
                 self.fmt_expr(expr, 10);
             }
             ExprKind::Pipe { left, right } => {
-                self.fmt_expr(left, 2);
-                self.push(" |> ");
-                self.soft_break_if_needed(8);
-                self.fmt_expr(right, 2);
+                self.fmt_expr(left, 1);
+                let right_w = approx_expr_width(right);
+                let needed = 4 + right_w;
+                if self.col + needed > SOFT_LIMIT && !self.at_line_start {
+                    self.newline();
+                    self.indent += 1;
+                    self.push("|> ");
+                    self.fmt_expr(right, 2);
+                    self.indent -= 1;
+                } else {
+                    self.push(" |> ");
+                    self.fmt_expr(right, 2);
+                }
             }
             ExprKind::Fn {
                 params,
@@ -555,7 +709,9 @@ impl<'a> Formatter<'a> {
                     self.fmt_clause(clause);
                     self.newline();
                 }
+                self.emit_leading_comments_for_rbrace();
                 self.indent -= 1;
+                self.ensure_line_for_rbrace();
                 self.push("}");
             }
             ExprKind::Todo { message } => {
@@ -611,6 +767,7 @@ impl<'a> Formatter<'a> {
         self.push(" -> ");
         self.fmt_expr(&clause.body, 0);
         self.push(";");
+        self.emit_trailing_comments();
     }
 
     fn fmt_ctor(&mut self, c: &ConstructorRef) {
@@ -792,5 +949,123 @@ fn expr_prec(expr: &Expr) -> u8 {
         ExprKind::Field { .. } => 12,
         ExprKind::Paren(inner) => expr_prec(inner),
         _ => 100,
+    }
+}
+
+/// Approximate flat width of a simple expression (idents, literals, short calls).
+fn approx_expr_width(expr: &Expr) -> usize {
+    match &expr.kind {
+        ExprKind::Paren(inner) => 2 + approx_expr_width(inner),
+        ExprKind::Int(i) => i.raw.len(),
+        ExprKind::Float(f) => f.raw.len(),
+        ExprKind::String(s) => s.raw.len(),
+        ExprKind::Var(n) => n.text.len(),
+        ExprKind::Constructor(c) => {
+            let mut w = c.name.text.len();
+            if let Some(m) = &c.module {
+                w += m.text.len() + 1;
+            }
+            w
+        }
+        ExprKind::Call { callee, args } => approx_call_width(callee, args),
+        ExprKind::List { items, spread } => approx_list_width(items, spread.as_deref()),
+        ExprKind::Tuple(elems) => {
+            let mut w = 3; // #()
+            for (i, e) in elems.iter().enumerate() {
+                if i > 0 {
+                    w += 2;
+                }
+                w += approx_expr_width(e);
+            }
+            w
+        }
+        ExprKind::Binary { left, op, right } => {
+            approx_expr_width(left) + 1 + op.as_str().len() + 1 + approx_expr_width(right)
+        }
+        ExprKind::Pipe { left, right } => approx_expr_width(left) + 4 + approx_expr_width(right),
+        ExprKind::Unary { expr, .. } => 1 + approx_expr_width(expr),
+        ExprKind::Field { base, field } => {
+            let flen = match field {
+                FieldName::Name(n) => n.text.len(),
+                FieldName::UName(n) => n.text.len(),
+            };
+            approx_expr_width(base) + 1 + flen
+        }
+        ExprKind::Todo { message } | ExprKind::Panic { message } => {
+            4 + message.as_ref().map(|m| 4 + m.raw.len()).unwrap_or(0)
+        }
+        ExprKind::Assert { expr, message } => {
+            7 + approx_expr_width(expr) + message.as_ref().map(|m| 4 + m.raw.len()).unwrap_or(0)
+        }
+        ExprKind::Echo(e) => 5 + approx_expr_width(e),
+        _ => 40,
+    }
+}
+
+fn approx_call_width(callee: &Expr, args: &[Arg]) -> usize {
+    let mut w = approx_expr_width(callee) + 2; // ()
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            w += 2;
+        }
+        if let Some(label) = &arg.label {
+            w += label.text.len() + 2;
+        }
+        match &arg.value {
+            ArgValue::Hole => w += 1,
+            ArgValue::Expr(e) => w += approx_expr_width(e),
+        }
+    }
+    w
+}
+
+fn approx_list_width(items: &[Expr], spread: Option<&Expr>) -> usize {
+    let mut w = 2; // []
+    for (i, e) in items.iter().enumerate() {
+        if i > 0 {
+            w += 2;
+        }
+        w += approx_expr_width(e);
+    }
+    if let Some(s) = spread {
+        if !items.is_empty() {
+            w += 2;
+        }
+        w += 2 + approx_expr_width(s);
+    }
+    w
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use crate::{format_source, parse_module};
+
+    #[test]
+    fn trailing_and_before_close_comments() {
+        let src = r#"fn f() {
+  let x = 1; // trailing
+  case x {
+    _ -> 3; // after arm
+  };
+  // before close
+}
+"#;
+        let formatted = format_source(src).expect("format");
+        assert!(
+            formatted.contains("; // trailing") || formatted.contains("1; // trailing"),
+            "trailing comment should stay on same line:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("// after arm"),
+            "arm comment missing:\n{formatted}"
+        );
+        // Comment before close must remain inside the function.
+        let close = formatted.rfind('}').unwrap();
+        let before_close = formatted[..close].rfind("// before close");
+        assert!(
+            before_close.is_some(),
+            "comment before close escaped the function:\n{formatted}"
+        );
+        let _ = parse_module(&formatted);
     }
 }
