@@ -26,3 +26,11 @@ cargo install cargo-insta
 cargo insta review
 # or: cargo insta accept
 ```
+
+## Agent skills
+
+Repeatable workflows live in `.claude/skills/`:
+
+- `create-issue`: write a spec-grounded issue for a build step, where every checkbox is required and testable.
+- `implement-issue`: implement an issue, open the PR, and address review comments and CI until merge.
+- `review-pr`: a strict review loop (performance, security, maintainability, functionality) using `review-pr/probe.sh`, re-verifying each push before resolving threads and merging.
