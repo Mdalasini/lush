@@ -50,8 +50,10 @@ struct Checker {
     aliases: HashMap<String, (Vec<String>, TypeExpr)>,
     /// Scoped annotation type variables (`a`, `b`, …) → unification vars.
     type_vars: HashMap<String, Type>,
-    /// Function parameter labels for labelled-argument reordering.
+    /// Function/constructor parameter labels for labelled-argument reordering.
     fn_labels: HashMap<String, Vec<Option<String>>>,
+    /// Alias expansion stack for cycle detection.
+    alias_stack: Vec<String>,
 }
 
 impl Checker {
@@ -65,6 +67,7 @@ impl Checker {
             aliases: HashMap::new(),
             type_vars: HashMap::new(),
             fn_labels: HashMap::new(),
+            alias_stack: Vec::new(),
         }
     }
 
@@ -99,15 +102,29 @@ impl Checker {
             }
         }
 
+        // Register aliases before ADT schemes so field types expand correctly.
         for def in &module.definitions {
             if let Definition::Type(t) = def {
-                self.register_type_def(t);
+                self.env.types.insert(t.name.clone(), t.params.len());
+                if let TypeDefBody::Alias(alias) = &t.body {
+                    self.aliases
+                        .insert(t.name.clone(), (t.params.clone(), alias.clone()));
+                }
+            }
+        }
+        for def in &module.definitions {
+            if let Definition::Type(t) = def {
+                if matches!(t.body, TypeDefBody::Adt(_)) {
+                    self.register_adt(t);
+                }
             }
         }
 
         // Pre-bind functions/consts with fresh placeholders (shared with check).
+        let mut fn_names = Vec::new();
         for def in &module.definitions {
             if let Definition::Fn(f) = def {
+                fn_names.push(f.name.clone());
                 let params: Vec<Type> = f.params.iter().map(|_| self.fresh()).collect();
                 let ret = self.fresh();
                 self.fn_labels.insert(
@@ -128,67 +145,81 @@ impl Checker {
             }
         }
 
+        // Check each function against the shared placeholders (mutual recursion),
+        // then generalize it before later definitions see it. Remaining unchecked
+        // siblings stay monomorphic placeholders until their turn.
         for def in &module.definitions {
             match def {
-                Definition::Fn(f) => self.check_fn(f),
+                Definition::Fn(f) => {
+                    self.check_fn(f, false);
+                    self.generalize_fn_group(std::slice::from_ref(&f.name));
+                }
                 Definition::Const(c) => self.check_const(c),
                 Definition::Type(_) => {}
             }
         }
+        let _ = fn_names;
     }
 
-    fn register_type_def(&mut self, t: &TypeDef) {
-        self.env.types.insert(t.name.clone(), t.params.len());
-        match &t.body {
-            TypeDefBody::Alias(alias) => {
-                self.aliases
-                    .insert(t.name.clone(), (t.params.clone(), alias.clone()));
-            }
-            TypeDefBody::Adt(variants) => {
-                let saved_tvars = self.type_vars.clone();
-                self.type_vars.clear();
-                let param_vars: Vec<Type> = t
-                    .params
-                    .iter()
-                    .map(|p| {
-                        let v = self.fresh();
-                        self.type_vars.insert(p.clone(), v.clone());
-                        v
-                    })
-                    .collect();
-                let ret = Type::Named {
-                    module: None,
-                    name: t.name.clone(),
-                    args: param_vars.clone(),
+    fn register_adt(&mut self, t: &TypeDef) {
+        let TypeDefBody::Adt(variants) = &t.body else {
+            return;
+        };
+        let saved_tvars = self.type_vars.clone();
+        self.type_vars.clear();
+        let param_vars: Vec<Type> = t
+            .params
+            .iter()
+            .map(|p| {
+                let v = self.fresh();
+                self.type_vars.insert(p.clone(), v.clone());
+                v
+            })
+            .collect();
+        let ret = Type::Named {
+            module: None,
+            name: t.name.clone(),
+            args: param_vars,
+        };
+        for v in variants {
+            self.fn_labels.insert(
+                v.name.clone(),
+                v.fields.iter().map(|f| f.label.clone()).collect(),
+            );
+            let param_tys: Vec<Type> = v.fields.iter().map(|f| self.ast_type(&f.ty)).collect();
+            if param_tys.is_empty() {
+                let scheme = Scheme {
+                    vars: free_vars(&ret),
+                    body: ret.clone(),
                 };
-                for v in variants {
-                    let param_tys: Vec<Type> =
-                        v.fields.iter().map(|f| self.ast_type(&f.ty)).collect();
-                    let scheme_vars = free_vars(&ret);
-                    if param_tys.is_empty() {
-                        let scheme = Scheme {
-                            vars: scheme_vars,
-                            body: ret.clone(),
-                        };
-                        self.ctors.insert(v.name.clone(), scheme.clone());
-                        self.env.insert_scheme(v.name.clone(), scheme);
-                    } else {
-                        let body = Type::Fn {
-                            params: param_tys,
-                            ret: Box::new(ret.clone()),
-                        };
-                        let mut vars = free_vars(&body);
-                        vars.retain(|x| scheme_vars.contains(x) || free_vars(&body).contains(x));
-                        let scheme = Scheme {
-                            vars: free_vars(&body),
-                            body,
-                        };
-                        self.ctors.insert(v.name.clone(), scheme.clone());
-                        self.env.insert_scheme(v.name.clone(), scheme);
-                    }
-                }
-                self.type_vars = saved_tvars;
+                self.ctors.insert(v.name.clone(), scheme.clone());
+                self.env.insert_scheme(v.name.clone(), scheme);
+            } else {
+                let body = Type::Fn {
+                    params: param_tys,
+                    ret: Box::new(ret.clone()),
+                };
+                let scheme = Scheme {
+                    vars: free_vars(&body),
+                    body,
+                };
+                self.ctors.insert(v.name.clone(), scheme.clone());
+                self.env.insert_scheme(v.name.clone(), scheme);
             }
+        }
+        self.type_vars = saved_tvars;
+    }
+
+    fn generalize_fn_group(&mut self, names: &[String]) {
+        let mut tys = HashMap::new();
+        for name in names {
+            if let Some(scheme) = self.env.values.remove(name) {
+                tys.insert(name.clone(), apply(&self.subst, &scheme.body));
+            }
+        }
+        for (name, ty) in tys {
+            let scheme = self.generalize(&ty);
+            self.env.insert_scheme(name, scheme);
         }
     }
 
@@ -216,9 +247,12 @@ impl Checker {
         self.env.insert_mono(c.name.clone(), final_ty);
     }
 
-    fn check_fn(&mut self, f: &FnDef) {
+    /// Check a function body. When `generalize_now` is false, leave a monomorphic
+    /// binding so a recursive group can be generalized together afterward.
+    fn check_fn(&mut self, f: &FnDef, generalize_now: bool) {
         let saved_env = self.env.clone();
         let saved_tvars = self.type_vars.clone();
+        let saved_labels = self.fn_labels.clone();
         self.type_vars.clear();
 
         let placeholder = self
@@ -261,17 +295,27 @@ impl Checker {
             }
         }
 
-        let fn_ty = Type::Fn {
-            params: param_tys,
-            ret: Box::new(ret_ty),
-        };
-        // Restore the outer env without this function's monomorphic placeholder so
-        // its parameter/return vars are eligible for generalization.
+        let fn_ty = apply(
+            &self.subst,
+            &Type::Fn {
+                params: param_tys,
+                ret: Box::new(ret_ty),
+            },
+        );
         self.env = saved_env;
-        self.env.values.remove(&f.name);
         self.type_vars = saved_tvars;
-        let scheme = self.generalize(&fn_ty);
-        self.env.insert_scheme(f.name.clone(), scheme);
+        self.fn_labels = saved_labels;
+        self.fn_labels.insert(
+            f.name.clone(),
+            f.params.iter().map(|p| p.label.clone()).collect(),
+        );
+        if generalize_now {
+            self.env.values.remove(&f.name);
+            let scheme = self.generalize(&fn_ty);
+            self.env.insert_scheme(f.name.clone(), scheme);
+        } else {
+            self.env.insert_mono(f.name.clone(), fn_ty);
+        }
     }
 
     fn generalize(&self, ty: &Type) -> Scheme {
@@ -388,7 +432,9 @@ impl Checker {
                     if let Err(e) = unify(&mut self.subst, &ctor_ty, &expected, pattern.span) {
                         self.errors.push(e);
                     }
-                    for (f, ft) in fields.iter().zip(field_tys.iter()) {
+                    let labels = self.fn_labels.get(name).cloned();
+                    let ordered = reorder_pattern_fields(fields, labels.as_deref());
+                    for (f, ft) in ordered.iter().zip(field_tys.iter()) {
                         self.bind_pattern(&f.pattern, ft);
                     }
                 }
@@ -431,8 +477,18 @@ impl Checker {
 
     fn infer_expr(&mut self, expr: &Expr) -> Type {
         match &expr.kind {
-            ExprKind::Int(_) => Type::int(),
-            ExprKind::Float(_) => Type::float(),
+            ExprKind::Int(lit) => {
+                if let Err(e) = validate_int_literal(lit, expr.span) {
+                    self.errors.push(e);
+                }
+                Type::int()
+            }
+            ExprKind::Float(lit) => {
+                if let Err(e) = validate_float_literal(lit, expr.span) {
+                    self.errors.push(e);
+                }
+                Type::float()
+            }
             ExprKind::String(_) => Type::string(),
             ExprKind::Ident(name) => self.lookup_value(name, expr.span),
             ExprKind::Constructor(name) => self.lookup_value(name, expr.span),
@@ -481,12 +537,20 @@ impl Checker {
                 let left_ty = self.infer_expr(left);
                 match &right.kind {
                     ExprKind::Call { callee, args } => {
-                        let has_hole = args.iter().any(|a| matches!(a.value, ArgValue::Hole));
+                        let labels = match &callee.kind {
+                            ExprKind::Ident(name) | ExprKind::Constructor(name) => {
+                                self.fn_labels.get(name).cloned()
+                            }
+                            ExprKind::Field { field, .. } => self.fn_labels.get(field).cloned(),
+                            _ => None,
+                        };
+                        let ordered = reorder_args(args, labels.as_deref());
+                        let has_hole = ordered.iter().any(|a| matches!(a.value, ArgValue::Hole));
                         let mut arg_tys = Vec::new();
                         if !has_hole {
                             arg_tys.push(left_ty.clone());
                         }
-                        for arg in args {
+                        for arg in &ordered {
                             match &arg.value {
                                 ArgValue::Hole => arg_tys.push(left_ty.clone()),
                                 ArgValue::Expr(e) => arg_tys.push(self.infer_expr(e)),
@@ -553,9 +617,43 @@ impl Checker {
                 let result = self.fresh();
                 for clause in clauses {
                     let saved = self.env.clone();
+                    // Each alternative is checked in isolation; only names bound by
+                    // every alternative are visible in the clause body.
+                    let mut common: Option<HashMap<String, Type>> = None;
                     for row in &clause.patterns {
+                        self.env = saved.clone();
                         for (p, st) in row.patterns.iter().zip(subject_tys.iter()) {
                             self.bind_pattern(p, st);
+                        }
+                        let mut bound = HashMap::new();
+                        for (name, scheme) in &self.env.values {
+                            if !saved.values.contains_key(name) {
+                                bound.insert(name.clone(), apply(&self.subst, &scheme.body));
+                            }
+                        }
+                        match &mut common {
+                            None => common = Some(bound),
+                            Some(shared) => {
+                                shared.retain(|name, ty| {
+                                    if let Some(other) = bound.get(name) {
+                                        if let Err(e) =
+                                            unify(&mut self.subst, ty, other, clause.span)
+                                        {
+                                            self.errors.push(e);
+                                        }
+                                        *ty = apply(&self.subst, ty);
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    self.env = saved.clone();
+                    if let Some(shared) = common {
+                        for (name, ty) in shared {
+                            self.env.insert_mono(name, ty);
                         }
                     }
                     if let Some(g) = &clause.guard {
@@ -569,6 +667,7 @@ impl Checker {
                         self.errors.push(e);
                     }
                     self.env = saved;
+                    // Note: exhaustiveness is intentionally deferred in this prototype.
                 }
                 result
             }
@@ -584,8 +683,10 @@ impl Checker {
             ExprKind::Group(inner) => self.infer_expr(inner),
             ExprKind::Block(b) => {
                 let saved = self.env.clone();
+                let saved_labels = self.fn_labels.clone();
                 let t = self.infer_block_scoped(b);
                 self.env = saved;
+                self.fn_labels = saved_labels;
                 t
             }
             ExprKind::List { items, spread } => {
@@ -607,7 +708,20 @@ impl Checker {
             ExprKind::Tuple(elems) => {
                 Type::Tuple(elems.iter().map(|e| self.infer_expr(e)).collect())
             }
-            ExprKind::BitArray(_) => Type::bit_array(),
+            ExprKind::BitArray(segs) => {
+                for seg in segs {
+                    match &seg.value {
+                        BitSegmentValue::Expr(e) => {
+                            let _ = self.infer_expr(e);
+                        }
+                        BitSegmentValue::Pattern(p) => {
+                            let t = self.fresh();
+                            self.bind_pattern(p, &t);
+                        }
+                    }
+                }
+                Type::bit_array()
+            }
             ExprKind::RecordUpdate { base, fields, .. } => {
                 let base_ty = self.infer_expr(base);
                 for (_, v) in fields {
@@ -668,25 +782,42 @@ impl Checker {
         }
         let last_idx = block.statements.len() - 1;
         let mut result = Type::nil();
-        for (i, stmt) in block.statements.iter().enumerate() {
-            match stmt {
-                Statement::Fn(f) => {
-                    // Local functions: fresh placeholder then check + generalize.
-                    let params: Vec<Type> = f.params.iter().map(|_| self.fresh()).collect();
-                    let ret = self.fresh();
-                    self.fn_labels.insert(
-                        f.name.clone(),
-                        f.params.iter().map(|p| p.label.clone()).collect(),
-                    );
-                    self.env.insert_mono(
-                        f.name.clone(),
-                        Type::Fn {
-                            params,
-                            ret: Box::new(ret),
-                        },
-                    );
-                    self.check_fn(f);
-                    if i == last_idx {
+        let mut i = 0;
+        while i < block.statements.len() {
+            match &block.statements[i] {
+                Statement::Fn(_) => {
+                    let start = i;
+                    while i < block.statements.len()
+                        && matches!(block.statements[i], Statement::Fn(_))
+                    {
+                        i += 1;
+                    }
+                    let mut names = Vec::new();
+                    for stmt in &block.statements[start..i] {
+                        if let Statement::Fn(f) = stmt {
+                            names.push(f.name.clone());
+                            let params: Vec<Type> = f.params.iter().map(|_| self.fresh()).collect();
+                            let ret = self.fresh();
+                            self.fn_labels.insert(
+                                f.name.clone(),
+                                f.params.iter().map(|p| p.label.clone()).collect(),
+                            );
+                            self.env.insert_mono(
+                                f.name.clone(),
+                                Type::Fn {
+                                    params,
+                                    ret: Box::new(ret),
+                                },
+                            );
+                        }
+                    }
+                    for stmt in &block.statements[start..i] {
+                        if let Statement::Fn(f) = stmt {
+                            self.check_fn(f, false);
+                        }
+                    }
+                    self.generalize_fn_group(&names);
+                    if i - 1 == last_idx {
                         result = Type::nil();
                     }
                 }
@@ -698,22 +829,36 @@ impl Checker {
                             self.errors.push(e);
                         }
                     }
+                    if !l.is_assert && !is_irrefutable(&l.pattern) {
+                        self.errors.push(TypeError::Other {
+                            span: l.pattern.span,
+                            message: "refutable pattern requires `let assert`".into(),
+                        });
+                    }
+                    if let Some(msg) = &l.message {
+                        let mt = self.infer_expr(msg);
+                        if let Err(e) = unify(&mut self.subst, &mt, &Type::string(), msg.span) {
+                            self.errors.push(e);
+                        }
+                    }
                     self.bind_pattern(&l.pattern, &value_ty);
                     if i == last_idx {
                         result = Type::nil();
                     }
+                    i += 1;
                 }
                 Statement::Expr(e) => {
                     let t = self.infer_expr(e);
                     if i == last_idx {
                         result = t;
                     }
+                    i += 1;
                 }
                 Statement::Use(_) => {
-                    // Should have been desugared; treat as Nil if lingering.
                     if i == last_idx {
                         result = Type::nil();
                     }
+                    i += 1;
                 }
             }
         }
@@ -808,6 +953,34 @@ impl Checker {
         apply_map(&map, &scheme.body)
     }
 
+    fn expand_alias(&mut self, name: &str, args: &[TypeExpr], span: Span) -> Option<Type> {
+        let (params, body) = self.aliases.get(name)?.clone();
+        if params.len() != args.len() {
+            return None;
+        }
+        if self.alias_stack.iter().any(|n| n == name) {
+            self.errors.push(TypeError::Other {
+                span,
+                message: format!("cyclic type alias `{name}`"),
+            });
+            return Some(Type::Named {
+                module: None,
+                name: name.into(),
+                args: args.iter().map(|a| self.ast_type(a)).collect(),
+            });
+        }
+        self.alias_stack.push(name.into());
+        let saved = self.type_vars.clone();
+        for (p, a) in params.iter().zip(args.iter()) {
+            let at = self.ast_type(a);
+            self.type_vars.insert(p.clone(), at);
+        }
+        let expanded = self.ast_type(&body);
+        self.type_vars = saved;
+        self.alias_stack.pop();
+        Some(expanded)
+    }
+
     fn ast_type(&mut self, ty: &TypeExpr) -> Type {
         match &ty.kind {
             TypeKind::Var(name) => {
@@ -819,16 +992,8 @@ impl Checker {
                     let v = self.fresh();
                     self.type_vars.insert(name.clone(), v.clone());
                     v
-                } else if let Some((params, body)) = self.aliases.get(name).cloned() {
-                    if params.is_empty() {
-                        self.ast_type(&body)
-                    } else {
-                        Type::Named {
-                            module: None,
-                            name: name.clone(),
-                            args: vec![],
-                        }
-                    }
+                } else if let Some(expanded) = self.expand_alias(name, &[], ty.span) {
+                    expanded
                 } else {
                     Type::Named {
                         module: None,
@@ -839,17 +1004,8 @@ impl Checker {
             }
             TypeKind::Named { module, name, args } => {
                 if module.is_none() {
-                    if let Some((params, body)) = self.aliases.get(name).cloned() {
-                        if params.len() == args.len() {
-                            let saved = self.type_vars.clone();
-                            for (p, a) in params.iter().zip(args.iter()) {
-                                let at = self.ast_type(a);
-                                self.type_vars.insert(p.clone(), at);
-                            }
-                            let expanded = self.ast_type(&body);
-                            self.type_vars = saved;
-                            return expanded;
-                        }
+                    if let Some(expanded) = self.expand_alias(name, args, ty.span) {
+                        return expanded;
                     }
                 }
                 Type::Named {
@@ -865,6 +1021,93 @@ impl Checker {
             TypeKind::Tuple(elems) => Type::Tuple(elems.iter().map(|e| self.ast_type(e)).collect()),
         }
     }
+}
+
+fn is_irrefutable(pattern: &Pattern) -> bool {
+    match &pattern.kind {
+        PatternKind::Var(_) | PatternKind::Discard => true,
+        PatternKind::As { pattern, .. } => is_irrefutable(pattern),
+        PatternKind::Tuple(elems) => elems.iter().all(is_irrefutable),
+        _ => false,
+    }
+}
+
+fn validate_int_literal(lit: &str, span: Span) -> Result<(), TypeError> {
+    let cleaned: String = lit.chars().filter(|c| *c != '_').collect();
+    let parsed = if let Some(rest) = cleaned
+        .strip_prefix("0x")
+        .or_else(|| cleaned.strip_prefix("0X"))
+    {
+        i64::from_str_radix(rest, 16)
+    } else if let Some(rest) = cleaned
+        .strip_prefix("0o")
+        .or_else(|| cleaned.strip_prefix("0O"))
+    {
+        i64::from_str_radix(rest, 8)
+    } else if let Some(rest) = cleaned
+        .strip_prefix("0b")
+        .or_else(|| cleaned.strip_prefix("0B"))
+    {
+        i64::from_str_radix(rest, 2)
+    } else {
+        cleaned.parse::<i64>()
+    };
+    parsed.map(|_| ()).map_err(|_| TypeError::Other {
+        span,
+        message: format!("integer literal `{lit}` out of Int range"),
+    })
+}
+
+fn validate_float_literal(lit: &str, span: Span) -> Result<(), TypeError> {
+    let cleaned = lit.replace('_', "");
+    match cleaned.parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(()),
+        _ => Err(TypeError::Other {
+            span,
+            message: format!("float literal `{lit}` is not a finite binary64 value"),
+        }),
+    }
+}
+
+fn reorder_pattern_fields(
+    fields: &[PatternField],
+    labels: Option<&[Option<String>]>,
+) -> Vec<PatternField> {
+    let Some(labels) = labels else {
+        return fields.to_vec();
+    };
+    if labels.iter().all(|l| l.is_none()) || fields.iter().all(|f| f.label.is_none()) {
+        return fields.to_vec();
+    }
+    let mut slots: Vec<Option<PatternField>> = vec![None; labels.len().max(fields.len())];
+    let mut unlabelled = Vec::new();
+    for field in fields {
+        if let Some(label) = &field.label {
+            if let Some(idx) = labels.iter().position(|l| l.as_ref() == Some(label)) {
+                if idx < slots.len() {
+                    slots[idx] = Some(field.clone());
+                    continue;
+                }
+            }
+            unlabelled.push(field.clone());
+        } else {
+            unlabelled.push(field.clone());
+        }
+    }
+    let mut ui = 0;
+    for slot in &mut slots {
+        if slot.is_none() {
+            if let Some(f) = unlabelled.get(ui) {
+                *slot = Some(f.clone());
+                ui += 1;
+            }
+        }
+    }
+    while ui < unlabelled.len() {
+        slots.push(Some(unlabelled[ui].clone()));
+        ui += 1;
+    }
+    slots.into_iter().flatten().collect()
 }
 
 /// Reorder labelled arguments to match declaration label order.

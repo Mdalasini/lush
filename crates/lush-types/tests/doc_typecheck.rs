@@ -106,3 +106,58 @@ pub fn main() {
     )
     .expect("polymorphic id should typecheck at Int and String");
 }
+
+#[test]
+fn rejects_cyclic_alias() {
+    let err = typecheck_source(
+        r#"
+type A = A
+pub fn main(x: A) { x; }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter()
+            .any(|e| matches!(e, TypeError::Other { message, .. } if message.contains("cyclic"))),
+        "expected cyclic alias error, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_refutable_let() {
+    let err = typecheck_source(
+        r#"
+pub fn main(x: Option(Int)) {
+  let Some(y) = x;
+  y;
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("let assert")
+        )),
+        "expected refutable let error, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_out_of_range_int() {
+    let err = typecheck_source(
+        r#"
+pub fn main() {
+  999999999999999999999999999999;
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("Int range")
+        )),
+        "expected Int range error, got {err:?}"
+    );
+}
