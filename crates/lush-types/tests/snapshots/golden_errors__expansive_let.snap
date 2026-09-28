@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/golden_errors.rs
+expression: rendered
+---
+error: type mismatch at bytes N..N: cannot unify Int with String

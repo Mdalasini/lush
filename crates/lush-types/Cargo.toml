@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Early type-checker prototype for Lush documentation fixtures"
+description = "Type checker for Lush (HM inference, constraints, exhaustiveness)"
 
 [dependencies]
 lush-syntax = { path = "../lush-syntax" }
@@ -12,3 +12,4 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 lush-syntax = { path = "../lush-syntax" }
+insta = { workspace = true }

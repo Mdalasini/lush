@@ -1,0 +1,8 @@
+import lush/process;
+pub fn as_int(s: Subject(Int)) -> Subject(Int) { s; }
+pub fn as_str(s: Subject(String)) -> Subject(String) { s; }
+pub fn main() {
+  let s = process.new_subject();
+  as_int(s);
+  as_str(s);
+}

@@ -1,0 +1,7 @@
+pub fn main(x: Option(Int)) -> Int {
+  case x {
+    Some(n) -> n;
+    None -> 0;
+    Some(_) -> 1;
+  };
+}

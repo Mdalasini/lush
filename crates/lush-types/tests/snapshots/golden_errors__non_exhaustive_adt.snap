@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/golden_errors.rs
+expression: rendered
+---
+error: type error at bytes N..N: non-exhaustive case: missing patterns for Rectangle

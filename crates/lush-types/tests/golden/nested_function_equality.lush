@@ -1,0 +1,4 @@
+pub fn main() {
+  let xs = [fn(x) { x; }];
+  xs == xs;
+}

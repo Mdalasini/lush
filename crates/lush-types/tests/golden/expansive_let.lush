@@ -1,0 +1,8 @@
+pub fn id(x) { x; }
+pub fn wrap(f) { f; }
+pub fn main() {
+  let f = wrap(id);
+  let a = f(1);
+  let b = f("hi");
+  a;
+}

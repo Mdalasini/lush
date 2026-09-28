@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/golden_errors.rs
+expression: rendered
+---
+error: unknown name `missing` at bytes N..N
