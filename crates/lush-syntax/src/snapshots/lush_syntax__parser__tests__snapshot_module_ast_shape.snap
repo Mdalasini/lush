@@ -1,5 +1,0 @@
----
-source: crates/lush-syntax/src/parser.rs
-expression: m.definitions.len()
----
-1
