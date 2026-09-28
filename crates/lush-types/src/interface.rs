@@ -192,10 +192,7 @@ mod tests {
             "f".into(),
             ExportedValue {
                 name: "f".into(),
-                scheme: Scheme::mono(Type::Fun {
-                    params: vec![Type::Int],
-                    ret: Box::new(Type::Int),
-                }),
+                scheme: Scheme::mono(Type::fun(vec![Type::Int], Type::Int)),
                 constructor_of: None,
                 labels: vec![None],
                 is_const: false,

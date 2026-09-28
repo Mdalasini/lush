@@ -215,10 +215,7 @@ fn parse_stub(
                         scheme: Scheme {
                             vars,
                             constraints,
-                            body: Type::Fun {
-                                params: param_tys,
-                                ret: Box::new(ret_ty),
-                            },
+                            body: Type::fun(param_tys, ret_ty),
                         },
                         constructor_of: None,
                         labels,
@@ -273,17 +270,11 @@ fn register_adt(
             .iter()
             .filter_map(|p| tvar_rigids.get(p).cloned())
             .collect();
-        let ret = Type::App {
-            def: id,
-            args: app_args,
-        };
+        let ret = Type::app(id, app_args);
         let body_ty = if param_tys.is_empty() {
             ret
         } else {
-            Type::Fun {
-                params: param_tys.clone(),
-                ret: Box::new(ret),
-            }
+            Type::fun(param_tys.clone(), ret)
         };
         let pairs: Vec<_> = tvar_rigids
             .values()
@@ -461,7 +452,7 @@ fn parse_type_rigids(
             .strip_prefix("->")
             .map(|r| r.trim())
             .unwrap_or("Nil");
-        let ps = split_top_level(params, ',')
+        let ps: Vec<Type> = split_top_level(params, ',')
             .into_iter()
             .filter(|p| !p.trim().is_empty())
             .map(|p| {
@@ -469,18 +460,15 @@ fn parse_type_rigids(
                 parse_type_rigids(ty, store, type_env, rigids, tvars)
             })
             .collect();
-        return Type::Fun {
-            params: ps,
-            ret: Box::new(parse_type_rigids(ret, store, type_env, rigids, tvars)),
-        };
+        return Type::fun(ps, parse_type_rigids(ret, store, type_env, rigids, tvars));
     }
     if let Some(inner) = s.strip_prefix("#(").and_then(|r| r.strip_suffix(')')) {
-        let ts = split_top_level(inner, ',')
+        let ts: Vec<Type> = split_top_level(inner, ',')
             .into_iter()
             .filter(|p| !p.trim().is_empty())
             .map(|p| parse_type_rigids(p, store, type_env, rigids, tvars))
             .collect();
-        return Type::Tuple(ts);
+        return Type::tuple(ts);
     }
     match s {
         "Int" => return Type::Int,
@@ -500,10 +488,10 @@ fn parse_type_rigids(
             .map(|p| parse_type_rigids(p, store, type_env, rigids, tvars))
             .collect();
         if name == "List" {
-            return Type::List(Box::new(args.into_iter().next().unwrap_or(Type::Error)));
+            return Type::list(args.into_iter().next().unwrap_or(Type::Error));
         }
         if let Some(id) = resolve_type_name(name, type_env) {
-            return Type::App { def: id, args };
+            return Type::app(id, args);
         }
         return Type::Error;
     }
@@ -520,10 +508,7 @@ fn parse_type_rigids(
         return Type::Var(id);
     }
     if let Some(id) = resolve_type_name(s, type_env) {
-        return Type::App {
-            def: id,
-            args: vec![],
-        };
+        return Type::app(id, vec![]);
     }
     Type::Error
 }
@@ -745,13 +730,10 @@ pub fn install_prelude_builtins(store: &mut TypeStore) -> ModuleInterface {
             Scheme {
                 vars: vec![a, e],
                 constraints: HashMap::new(),
-                body: Type::Fun {
-                    params: vec![Type::Var(a)],
-                    ret: Box::new(Type::App {
-                        def: result_id,
-                        args: vec![Type::Var(a), Type::Var(e)],
-                    }),
-                },
+                body: Type::fun(
+                    vec![Type::Var(a)],
+                    Type::app(result_id, vec![Type::Var(a), Type::Var(e)]),
+                ),
             }
         },
     );
@@ -768,13 +750,10 @@ pub fn install_prelude_builtins(store: &mut TypeStore) -> ModuleInterface {
             Scheme {
                 vars: vec![a, e],
                 constraints: HashMap::new(),
-                body: Type::Fun {
-                    params: vec![Type::Var(e)],
-                    ret: Box::new(Type::App {
-                        def: result_id,
-                        args: vec![Type::Var(a), Type::Var(e)],
-                    }),
-                },
+                body: Type::fun(
+                    vec![Type::Var(e)],
+                    Type::app(result_id, vec![Type::Var(a), Type::Var(e)]),
+                ),
             }
         },
     );
@@ -790,13 +769,7 @@ pub fn install_prelude_builtins(store: &mut TypeStore) -> ModuleInterface {
             Scheme {
                 vars: vec![a],
                 constraints: HashMap::new(),
-                body: Type::Fun {
-                    params: vec![Type::Var(a)],
-                    ret: Box::new(Type::App {
-                        def: opt_id,
-                        args: vec![Type::Var(a)],
-                    }),
-                },
+                body: Type::fun(vec![Type::Var(a)], Type::app(opt_id, vec![Type::Var(a)])),
             }
         },
     );
@@ -805,10 +778,7 @@ pub fn install_prelude_builtins(store: &mut TypeStore) -> ModuleInterface {
         Scheme {
             vars: vec![a],
             constraints: HashMap::new(),
-            body: Type::App {
-                def: opt_id,
-                args: vec![Type::Var(a)],
-            },
+            body: Type::app(opt_id, vec![Type::Var(a)]),
         }
     });
     for (n, ty) in [

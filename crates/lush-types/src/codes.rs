@@ -98,6 +98,7 @@ pub const W1003_UNUSED_PRIVATE: &str = "W1003";
 pub const W1004_REDUNDANT_PATTERN: &str = "W1004";
 pub const W1005_TODO: &str = "W1005";
 pub const W1006_UNANNOTATED_PUB: &str = "W1006";
+pub const W1500_TOO_MANY_WARNINGS: &str = "W1500";
 
 /// Every type-stage code that must appear in at least one fixture.
 pub fn all_codes() -> &'static [&'static str] {
@@ -170,5 +171,6 @@ pub fn all_codes() -> &'static [&'static str] {
         W1004_REDUNDANT_PATTERN,
         W1005_TODO,
         W1006_UNANNOTATED_PUB,
+        W1500_TOO_MANY_WARNINGS,
     ]
 }
