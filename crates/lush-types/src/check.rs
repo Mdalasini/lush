@@ -145,6 +145,8 @@ impl Checker {
             }
         }
 
+        self.check_const_cycles(module);
+
         // Check each function against the shared placeholders (mutual recursion),
         // then generalize it before later definitions see it. Remaining unchecked
         // siblings stay monomorphic placeholders until their turn.
@@ -159,6 +161,74 @@ impl Checker {
             }
         }
         let _ = fn_names;
+    }
+
+    /// Reject constant-reference cycles (`spec.md` §5.7).
+    fn check_const_cycles(&mut self, module: &Module) {
+        let mut const_names = HashSet::new();
+        let mut defs: Vec<(&str, Span, &Expr)> = Vec::new();
+        for def in &module.definitions {
+            if let Definition::Const(c) = def {
+                const_names.insert(c.name.clone());
+                defs.push((c.name.as_str(), c.span, &c.value));
+            }
+        }
+        if const_names.is_empty() {
+            return;
+        }
+        let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+        for (name, _, value) in &defs {
+            let mut refs = HashSet::new();
+            collect_const_refs(value, &const_names, &mut refs);
+            deps.insert((*name).to_string(), refs);
+        }
+        // 0 = unvisited, 1 = visiting, 2 = done
+        let mut state: HashMap<String, u8> = HashMap::new();
+        let mut stack = Vec::new();
+        let mut cyclic = HashSet::new();
+        for (name, _, _) in &defs {
+            if state.get(*name).copied().unwrap_or(0) == 0 {
+                self.dfs_const_cycle(name, &deps, &mut state, &mut stack, &mut cyclic);
+            }
+        }
+        for (name, span, _) in defs {
+            if cyclic.contains(name) {
+                self.errors.push(TypeError::Other {
+                    span,
+                    message: format!("constant `{name}` participates in a reference cycle"),
+                });
+            }
+        }
+    }
+
+    fn dfs_const_cycle(
+        &self,
+        name: &str,
+        deps: &HashMap<String, HashSet<String>>,
+        state: &mut HashMap<String, u8>,
+        stack: &mut Vec<String>,
+        cyclic: &mut HashSet<String>,
+    ) {
+        state.insert(name.to_string(), 1);
+        stack.push(name.to_string());
+        if let Some(refs) = deps.get(name) {
+            for next in refs {
+                match state.get(next).copied().unwrap_or(0) {
+                    0 => self.dfs_const_cycle(next, deps, state, stack, cyclic),
+                    1 => {
+                        // Mark the cycle members from `next` through the top of the stack.
+                        if let Some(start) = stack.iter().position(|n| n == next) {
+                            for n in &stack[start..] {
+                                cyclic.insert(n.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        stack.pop();
+        state.insert(name.to_string(), 2);
     }
 
     fn register_adt(&mut self, t: &TypeDef) {
@@ -182,6 +252,13 @@ impl Checker {
             args: param_vars,
         };
         for v in variants {
+            if self.ctors.contains_key(&v.name) || self.env.get(&v.name).is_some() {
+                self.errors.push(TypeError::Other {
+                    span: t.span,
+                    message: format!("duplicate constructor `{}`", v.name),
+                });
+                continue;
+            }
             self.fn_labels.insert(
                 v.name.clone(),
                 v.fields.iter().map(|f| f.label.clone()).collect(),
@@ -644,6 +721,13 @@ impl Checker {
                     let mut common: Option<HashMap<String, Type>> = None;
                     for row in &clause.patterns {
                         self.env = saved.clone();
+                        if row.patterns.len() != subject_tys.len() {
+                            self.errors.push(TypeError::Other {
+                                span: clause.span,
+                                message: "case pattern count must match subject count".into(),
+                            });
+                            continue;
+                        }
                         let mut introduced = Vec::new();
                         for (p, st) in row.patterns.iter().zip(subject_tys.iter()) {
                             pattern_bound_names(p, &mut introduced);
@@ -1142,6 +1226,59 @@ fn validate_float_literal(lit: &str, span: Span) -> Result<(), TypeError> {
             span,
             message: format!("float literal `{lit}` is not a finite binary64 value"),
         }),
+    }
+}
+
+/// Collect identifiers in a constant expression that refer to other constants.
+fn collect_const_refs(expr: &Expr, const_names: &HashSet<String>, out: &mut HashSet<String>) {
+    match &expr.kind {
+        ExprKind::Ident(name) => {
+            if const_names.contains(name) {
+                out.insert(name.clone());
+            }
+        }
+        ExprKind::Group(inner)
+        | ExprKind::Unary { expr: inner, .. }
+        | ExprKind::Echo { value: inner } => collect_const_refs(inner, const_names, out),
+        ExprKind::Binary { left, right, .. } => {
+            collect_const_refs(left, const_names, out);
+            collect_const_refs(right, const_names, out);
+        }
+        ExprKind::Tuple(elems) => {
+            for e in elems {
+                collect_const_refs(e, const_names, out);
+            }
+        }
+        ExprKind::List { items, spread } => {
+            for e in items {
+                collect_const_refs(e, const_names, out);
+            }
+            if let Some(s) = spread {
+                collect_const_refs(s, const_names, out);
+            }
+        }
+        ExprKind::Call { callee, args } => {
+            collect_const_refs(callee, const_names, out);
+            for a in args {
+                if let ArgValue::Expr(e) = &a.value {
+                    collect_const_refs(e, const_names, out);
+                }
+            }
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Constructor(_)
+        | ExprKind::Fn { .. }
+        | ExprKind::Pipe { .. }
+        | ExprKind::Case { .. }
+        | ExprKind::Block(_)
+        | ExprKind::Todo { .. }
+        | ExprKind::Panic { .. }
+        | ExprKind::Assert { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::RecordUpdate { .. }
+        | ExprKind::BitArray(_) => {}
     }
 }
 

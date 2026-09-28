@@ -1,7 +1,9 @@
 //! Type-check documentation fixtures classified for parse checking (`spec.md` §11.4 / §15.4).
 
+use lush_syntax::ast::*;
 use lush_syntax::doc::{extract_fences, spec_inventory, FenceClass};
-use lush_types::{typecheck_source, TypeError};
+use lush_syntax::Span;
+use lush_types::{typecheck_module, typecheck_source, TypeError};
 use std::path::PathBuf;
 
 fn spec_path() -> PathBuf {
@@ -233,6 +235,104 @@ pub fn main(x: String) -> Int {
 "#,
     )
     .expect("pattern x should shadow parameter x");
+}
+
+#[test]
+fn rejects_case_pattern_count_mismatch() {
+    // Parser already rejects this shape; exercise the typechecker path on a
+    // hand-built AST where subjects and pattern arity disagree.
+    let s = Span { start: 0, end: 1 };
+    let mut module = Module {
+        module_docs: vec![],
+        imports: vec![],
+        definitions: vec![Definition::Fn(FnDef {
+            is_pub: true,
+            name: "main".into(),
+            params: vec![],
+            return_type: None,
+            body: Block {
+                statements: vec![Statement::Expr(Expr {
+                    kind: ExprKind::Case {
+                        subjects: vec![
+                            Expr {
+                                kind: ExprKind::Int("1".into()),
+                                span: s,
+                            },
+                            Expr {
+                                kind: ExprKind::Int("2".into()),
+                                span: s,
+                            },
+                        ],
+                        clauses: vec![Clause {
+                            patterns: vec![PatternRow {
+                                patterns: vec![Pattern {
+                                    kind: PatternKind::Var("a".into()),
+                                    span: s,
+                                }],
+                                span: s,
+                            }],
+                            guard: None,
+                            body: Expr {
+                                kind: ExprKind::Ident("a".into()),
+                                span: s,
+                            },
+                            span: s,
+                        }],
+                    },
+                    span: s,
+                })],
+                span: s,
+            },
+            span: s,
+        })],
+        span: s,
+    };
+    let err = typecheck_module(&mut module).unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("pattern count")
+        )),
+        "expected pattern count error, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_constructor() {
+    let err = typecheck_source(
+        r#"
+pub type First { Value }
+pub type Second { Value }
+pub fn main() { Nil; }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("duplicate constructor")
+        )),
+        "expected duplicate constructor error, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_cyclic_constants() {
+    let err = typecheck_source(
+        r#"
+const a = b;
+const b = a;
+pub fn main() { Nil; }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("reference cycle")
+        )),
+        "expected constant cycle error, got {err:?}"
+    );
 }
 
 #[test]
