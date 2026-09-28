@@ -14,7 +14,10 @@ mod exhaust;
 mod ty;
 mod unify;
 
-pub use check::{typecheck_module, typecheck_source, typecheck_source_with_warnings};
+pub use check::{
+    typecheck_module, typecheck_module_with_warnings, typecheck_source,
+    typecheck_source_with_warnings,
+};
 pub use error::{TypeError, TypeWarning};
 pub use ty::Type;
 

@@ -62,10 +62,14 @@ struct Checker {
     warnings: Vec<TypeWarning>,
     /// Local ADT constructors: name -> scheme.
     ctors: HashMap<String, Scheme>,
-    /// ADT type name -> parameter indices required for `Eq` (least fixed point).
-    adt_eq_params: HashMap<String, Vec<usize>>,
+    /// ADT type name -> parameter var ids used when the ADT was registered.
+    adt_param_vars: HashMap<String, Vec<u32>>,
+    /// ADT type name -> all stored component types across variants (with param vars).
+    adt_components: HashMap<String, Vec<Type>>,
     /// ADT type name -> variant constructor names (declaration order).
     adt_variants: HashMap<String, Vec<String>>,
+    /// Constructor name -> field types (with ADT param vars).
+    ctor_fields: HashMap<String, Vec<Type>>,
     /// Type aliases: name -> (params, body).
     aliases: HashMap<String, (Vec<String>, TypeExpr)>,
     /// Scoped annotation type variables (`a`, `b`, …) → unification vars.
@@ -78,8 +82,9 @@ struct Checker {
     const_names: HashSet<String>,
     /// Folded values of module-level constants (dependency order).
     const_vals: HashMap<String, ConstVal>,
-    /// Pending sealed constraints accumulated during inference.
-    pending: Vec<Constraint>,
+    /// Pending sealed constraints accumulated during inference, with the
+    /// use-site span that introduced them (for diagnostics on later failure).
+    pending: Vec<(Constraint, Span)>,
 }
 
 impl Checker {
@@ -91,8 +96,10 @@ impl Checker {
             errors: Vec::new(),
             warnings: Vec::new(),
             ctors: HashMap::new(),
-            adt_eq_params: HashMap::new(),
+            adt_param_vars: HashMap::new(),
+            adt_components: HashMap::new(),
             adt_variants: HashMap::new(),
+            ctor_fields: HashMap::new(),
             aliases: HashMap::new(),
             type_vars: HashMap::new(),
             fn_labels: HashMap::new(),
@@ -342,8 +349,8 @@ impl Checker {
                 .collect(),
             _ => Vec::new(),
         };
-        let mut needed = HashSet::new();
         let mut variant_names = Vec::new();
+        let mut components = Vec::new();
         for v in variants {
             if self.ctors.contains_key(&v.name) || self.env.get(&v.name).is_some() {
                 self.errors.push(TypeError::Other {
@@ -358,13 +365,8 @@ impl Checker {
                 v.fields.iter().map(|f| f.label.clone()).collect(),
             );
             let param_tys: Vec<Type> = v.fields.iter().map(|f| self.ast_type(&f.ty)).collect();
-            for ft in &param_tys {
-                for fv in free_vars(ft) {
-                    if let Some(idx) = param_ids.iter().position(|id| *id == fv) {
-                        needed.insert(idx);
-                    }
-                }
-            }
+            components.extend(param_tys.iter().cloned());
+            self.ctor_fields.insert(v.name.clone(), param_tys.clone());
             if param_tys.is_empty() {
                 let scheme = Scheme {
                     vars: free_vars(&ret),
@@ -387,9 +389,8 @@ impl Checker {
                 self.env.insert_scheme(v.name.clone(), scheme);
             }
         }
-        let mut idxs: Vec<usize> = needed.into_iter().collect();
-        idxs.sort_unstable();
-        self.adt_eq_params.insert(t.name.clone(), idxs);
+        self.adt_param_vars.insert(t.name.clone(), param_ids);
+        self.adt_components.insert(t.name.clone(), components);
         self.adt_variants.insert(t.name.clone(), variant_names);
         self.type_vars = saved_tvars;
     }
@@ -535,7 +536,7 @@ impl Checker {
         let var_set: HashSet<u32> = vars.iter().copied().collect();
         let mut constraints = Vec::new();
         let mut keep_pending = Vec::new();
-        for c in std::mem::take(&mut self.pending) {
+        for (c, span) in std::mem::take(&mut self.pending) {
             let c = apply_constraint(&self.subst, &c);
             let mentions_quantified = constraint_free_vars(&c).iter().any(|v| var_set.contains(v));
             if mentions_quantified {
@@ -543,7 +544,7 @@ impl Checker {
                     constraints.push(c);
                 }
             } else {
-                keep_pending.push(c);
+                keep_pending.push((c, span));
             }
         }
         self.pending = keep_pending;
@@ -576,11 +577,23 @@ impl Checker {
                 pattern: inner,
                 name,
             } => {
-                self.bind_pattern_restricted(inner, &ty, generalize);
+                // Generalize the scrutinee type once so `as` aliases share
+                // constraints (e.g. `Eq`) with the inner binding.
                 if generalize {
-                    let scheme = self.generalize(&apply(&self.subst, &ty));
+                    let scheme = self.generalize(&ty);
+                    match &inner.kind {
+                        PatternKind::Var(inner_name) => {
+                            self.env.insert_scheme(inner_name.clone(), scheme.clone());
+                        }
+                        PatternKind::Discard => {}
+                        _ => {
+                            // Nested non-var patterns stay monomorphic at components.
+                            self.bind_pattern_restricted(inner, &ty, false);
+                        }
+                    }
                     self.env.insert_scheme(name.clone(), scheme);
                 } else {
+                    self.bind_pattern_restricted(inner, &ty, false);
                     self.env.insert_mono(name.clone(), apply(&self.subst, &ty));
                 }
             }
@@ -625,9 +638,9 @@ impl Checker {
                     }
                 } else {
                     let ctor_ty = if let Some(scheme) = self.ctors.get(name).cloned() {
-                        self.instantiate(&scheme)
+                        self.instantiate(&scheme, pattern.span)
                     } else if let Some(scheme) = self.env.get(name).cloned() {
-                        self.instantiate(&scheme)
+                        self.instantiate(&scheme, pattern.span)
                     } else {
                         self.errors.push(TypeError::Unbound {
                             span: pattern.span,
@@ -721,17 +734,16 @@ impl Checker {
     }
 
     /// Known imported-module member stubs used by §4.3 / §15.4 regressions.
-    fn module_member_stub(&mut self, field: &str) -> Type {
-        match field {
-            "new_subject" => {
-                let msg = self.fresh();
-                Type::Fn {
-                    params: vec![],
-                    ret: Box::new(Type::subject(msg)),
-                }
-            }
-            _ => self.fresh(),
+    fn module_member_stub(&mut self, module_ty_name: &str, field: &str) -> Type {
+        // Only `lush/process` provides `new_subject`; other modules stay unconstrained.
+        if field == "new_subject" && module_ty_name == "Module_process" {
+            let msg = self.fresh();
+            return Type::Fn {
+                params: vec![],
+                ret: Box::new(Type::subject(msg)),
+            };
         }
+        self.fresh()
     }
 
     fn infer_expr(&mut self, expr: &Expr) -> Type {
@@ -756,7 +768,7 @@ impl Checker {
                 let base_ty = apply(&self.subst, &inferred);
                 if let Type::Named { name, .. } = &base_ty {
                     if name.starts_with("Module_") {
-                        return self.module_member_stub(field);
+                        return self.module_member_stub(name, field);
                     }
                 }
                 let _ = field;
@@ -994,8 +1006,14 @@ impl Checker {
                 }
                 let applied: Vec<Type> =
                     subject_tys.iter().map(|t| apply(&self.subst, t)).collect();
+                let exhaust_env = exhaust::ExhaustEnv {
+                    adt_variants: self.adt_variants.clone(),
+                    ctor_fields: self.ctor_fields.clone(),
+                    ctor_labels: self.fn_labels.clone(),
+                    adt_param_vars: self.adt_param_vars.clone(),
+                };
                 let (ex_errs, ex_warns) =
-                    exhaust::check_case(&applied, clauses, &self.adt_variants, expr.span);
+                    exhaust::check_case(&applied, clauses, &exhaust_env, expr.span);
                 self.errors.extend(ex_errs);
                 self.warnings.extend(ex_warns);
                 result
@@ -1099,6 +1117,8 @@ impl Checker {
         if let Err(e) = unify(&mut self.subst, &callee_ty, &expected, span) {
             self.errors.push(e);
         }
+        // Instantiated scheme constraints may now be concrete.
+        self.refresh_pending();
         if let Some(h) = hole_ty {
             Type::Fn {
                 params: vec![h],
@@ -1272,10 +1292,10 @@ impl Checker {
 
     fn lookup_value(&mut self, name: &str, span: Span) -> Type {
         if let Some(scheme) = self.env.get(name).cloned() {
-            return self.instantiate(&scheme);
+            return self.instantiate(&scheme, span);
         }
         if let Some(scheme) = self.ctors.get(name).cloned() {
-            return self.instantiate(&scheme);
+            return self.instantiate(&scheme, span);
         }
         // Do not invent a binding — that created cyclic types for `x(x)`.
         self.errors.push(TypeError::Unbound {
@@ -1285,7 +1305,7 @@ impl Checker {
         self.fresh()
     }
 
-    fn instantiate(&mut self, scheme: &Scheme) -> Type {
+    fn instantiate(&mut self, scheme: &Scheme, span: Span) -> Type {
         let mut map = HashMap::new();
         for v in &scheme.vars {
             map.insert(*v, self.fresh());
@@ -1297,7 +1317,7 @@ impl Checker {
             };
             // Concrete instances are discharged immediately; polymorphic ones
             // stay pending until generalization or end of module.
-            self.require_constraint(remapped, Span { start: 0, end: 0 });
+            self.require_constraint(remapped, span);
         }
         apply_map(&map, &scheme.body)
     }
@@ -1307,13 +1327,21 @@ impl Checker {
         match self.try_discharge(&constraint) {
             Ok(true) => {}
             Ok(false) => {
-                if !self.pending.contains(&constraint) {
-                    self.pending.push(constraint);
+                if !self.pending.iter().any(|(c, _)| c == &constraint) {
+                    self.pending.push((constraint, span));
                 }
             }
             Err(message) => {
                 self.errors.push(TypeError::Other { span, message });
             }
+        }
+    }
+
+    /// Re-attempt pending constraints after unification may have concretized them.
+    fn refresh_pending(&mut self) {
+        let pending = std::mem::take(&mut self.pending);
+        for (c, span) in pending {
+            self.require_constraint(c, span);
         }
     }
 
@@ -1323,11 +1351,12 @@ impl Checker {
         match constraint {
             Constraint::Eq(ty) => self.eq_status(ty, &mut HashSet::new()),
             Constraint::Neg(ty) => match apply(&self.subst, ty) {
-                Type::Named { name, args, .. }
-                    if (name == "Int" || name == "Float") && args.is_empty() =>
-                {
-                    Ok(true)
-                }
+                Type::Named {
+                    module: None,
+                    name,
+                    args,
+                    ..
+                } if (name == "Int" || name == "Float") && args.is_empty() => Ok(true),
                 Type::Var(_) => Ok(false),
                 other => Err(format!(
                     "Neg constraint unsatisfied for {}",
@@ -1353,62 +1382,78 @@ impl Checker {
                 Ok(!polymorphic)
             }
             Type::Named { module, name, args } => {
-                if module.is_some() {
-                    // Imported nominal types: treat as Eq unless known otherwise.
-                    return Ok(true);
-                }
-                match name.as_str() {
+                // Built-ins apply whether or not they are qualified.
+                let base = name.as_str();
+                match base {
                     "Int" | "Float" | "String" | "Bool" | "Nil" | "BitArray" | "Pid"
-                    | "Monitor" | "Timer" => Ok(true),
-                    "Subject" => {
-                        // Equality compares identity; payload type is irrelevant.
-                        Ok(true)
+                    | "Monitor" | "Timer" => return Ok(true),
+                    "Subject" => return Ok(true),
+                    "Selector" | "Task" => {
+                        return Err(format!(
+                            "Eq constraint unsatisfied for {}",
+                            type_display(&Type::Named {
+                                module: module.clone(),
+                                name: name.clone(),
+                                args: args.clone()
+                            })
+                        ));
                     }
-                    "Selector" | "Task" => Err(format!(
-                        "Eq constraint unsatisfied for {}",
-                        type_display(&Type::Named {
-                            module: None,
-                            name,
-                            args
-                        })
-                    )),
                     "List" | "Option" | "Vector" | "Set" if args.len() == 1 => {
-                        self.eq_status(&args[0], visiting)
+                        return self.eq_status(&args[0], visiting);
                     }
                     "Result" if args.len() == 2 => {
                         let a = self.eq_status(&args[0], visiting)?;
                         let b = self.eq_status(&args[1], visiting)?;
-                        Ok(a && b)
+                        return Ok(a && b);
                     }
                     "Dict" if args.len() == 2 => {
-                        // Keys require Eq; values do too for structural Dict equality.
                         let a = self.eq_status(&args[0], visiting)?;
                         let b = self.eq_status(&args[1], visiting)?;
-                        Ok(a && b)
+                        return Ok(a && b);
                     }
-                    other => {
-                        if !visiting.insert(other.to_string()) {
-                            // Recursive ADT: assume Eq while checking parameters.
-                            return Ok(true);
-                        }
-                        let needed = self
-                            .adt_eq_params
-                            .get(other)
-                            .cloned()
-                            .unwrap_or_else(|| (0..args.len()).collect());
-                        let mut polymorphic = false;
-                        for idx in needed {
-                            if let Some(a) = args.get(idx) {
-                                match self.eq_status(a, visiting)? {
-                                    true => {}
-                                    false => polymorphic = true,
-                                }
-                            }
-                        }
-                        visiting.remove(other);
-                        Ok(!polymorphic)
-                    }
+                    _ => {}
                 }
+                if module.is_some() {
+                    // No exported equality metadata yet for arbitrary imports:
+                    // reject rather than silently accepting non-Eq payloads.
+                    return Err(format!(
+                        "Eq constraint unsatisfied for {}",
+                        type_display(&Type::Named { module, name, args })
+                    ));
+                }
+                if !visiting.insert(name.clone()) {
+                    return Ok(true);
+                }
+                let result = if let (Some(param_vars), Some(components)) = (
+                    self.adt_param_vars.get(&name).cloned(),
+                    self.adt_components.get(&name).cloned(),
+                ) {
+                    let mut subst = HashMap::new();
+                    for (pv, arg) in param_vars.iter().zip(args.iter()) {
+                        subst.insert(*pv, arg.clone());
+                    }
+                    let mut polymorphic = false;
+                    for comp in components {
+                        let comp = apply(&subst, &comp);
+                        match self.eq_status(&comp, visiting)? {
+                            true => {}
+                            false => polymorphic = true,
+                        }
+                    }
+                    Ok(!polymorphic)
+                } else {
+                    // Unknown nominal: conservative reject when args mention non-Eq.
+                    let mut polymorphic = false;
+                    for a in &args {
+                        match self.eq_status(a, visiting)? {
+                            true => {}
+                            false => polymorphic = true,
+                        }
+                    }
+                    Ok(!polymorphic)
+                };
+                visiting.remove(&name);
+                result
             }
         }
     }
@@ -1416,23 +1461,24 @@ impl Checker {
     fn discharge_pending(&mut self, span: Option<Span>) {
         let pending = std::mem::take(&mut self.pending);
         let mut keep = Vec::new();
-        for c in pending {
+        for (c, c_span) in pending {
             let c = apply_constraint(&self.subst, &c);
+            let err_span = span.unwrap_or(c_span);
             match self.try_discharge(&c) {
                 Ok(true) => {}
-                Ok(false) => keep.push(c),
+                Ok(false) => keep.push((c, c_span)),
                 Err(message) => {
                     self.errors.push(TypeError::Other {
-                        span: span.unwrap_or(Span { start: 0, end: 0 }),
+                        span: err_span,
                         message,
                     });
                 }
             }
         }
         // Unresolved constraints escaping the module interface are errors.
-        for c in keep {
+        for (c, c_span) in keep {
             self.errors.push(TypeError::Other {
-                span: span.unwrap_or(Span { start: 0, end: 0 }),
+                span: span.unwrap_or(c_span),
                 message: format!(
                     "unresolved constraint {} escapes module interface",
                     c.display()
@@ -1594,7 +1640,7 @@ fn is_non_expansive(expr: &Expr, ctors: &HashMap<String, Scheme>, env: &Env) -> 
     }
 }
 
-fn is_constructor_callee(expr: &Expr, ctors: &HashMap<String, Scheme>, env: &Env) -> bool {
+fn is_constructor_callee(expr: &Expr, ctors: &HashMap<String, Scheme>, _env: &Env) -> bool {
     match &expr.kind {
         ExprKind::Constructor(name) => {
             ctors.contains_key(name)
@@ -1602,13 +1648,14 @@ fn is_constructor_callee(expr: &Expr, ctors: &HashMap<String, Scheme>, env: &Env
                     name.as_str(),
                     "Ok" | "Error" | "Some" | "None" | "True" | "False" | "Nil"
                 )
-                || env.get(name).is_some_and(|_| {
-                    // Prelude / local constructors live in the value env.
-                    name.chars().next().is_some_and(|c| c.is_uppercase())
-                })
         }
         ExprKind::Ident(name) => ctors.contains_key(name),
-        ExprKind::Group(inner) => is_constructor_callee(inner, ctors, env),
+        // Qualified ADT construction (`module.Ctor(...)`) is non-expansive.
+        ExprKind::Field {
+            is_constructor: true,
+            ..
+        } => true,
+        ExprKind::Group(inner) => is_constructor_callee(inner, ctors, _env),
         _ => false,
     }
 }
