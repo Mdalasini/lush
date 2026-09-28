@@ -730,6 +730,14 @@ impl<'a> Parser<'a> {
                 })
             }
             Token::Ident => {
+                // Qualified constructor: `module.Ctor(...)`
+                if self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(Token::Dot)
+                    && self.tokens.get(self.pos + 2).map(|t| t.kind) == Some(Token::UIdent)
+                {
+                    let module_tok = self.bump().unwrap();
+                    self.bump(); // dot
+                    return self.parse_constructor_pattern(Some(self.text(module_tok.span)));
+                }
                 self.bump();
                 Ok(Pattern {
                     kind: PatternKind::Var(self.text(tok.span)),
@@ -838,10 +846,12 @@ impl<'a> Parser<'a> {
 
     fn parse_constructor_pattern(&mut self, module: Option<String>) -> Result<Pattern, ()> {
         let name_tok = self.expect(Token::UIdent, "expected constructor")?;
-        let start = module
-            .as_ref()
-            .map(|_| self.tokens[self.pos.saturating_sub(3)].span.start)
-            .unwrap_or(name_tok.span.start);
+        // When qualified, the module Ident was just consumed before `.` and this UIdent.
+        let start = if module.is_some() {
+            self.tokens[self.pos.saturating_sub(3)].span.start
+        } else {
+            name_tok.span.start
+        };
         let name = self.text(name_tok.span);
         if !self.at(Token::LParen) {
             return Ok(Pattern {
@@ -1746,5 +1756,117 @@ pub fn main() -> Nil {
         );
         insta::assert_debug_snapshot!(m.definitions.len());
         insta::assert_debug_snapshot!("import_path", m.imports[0].path.clone());
+    }
+
+    #[test]
+    fn parses_use_labelled_args_and_local_fn() {
+        let m = parse_ok(
+            r#"
+pub fn replace(in string: String, each pattern: String, with replacement: String) -> String {
+  string;
+}
+
+pub fn main() -> Result(Int, Nil) {
+  use n <- result.try(int.parse("1"));
+  fn double(x) { x * 2; }
+  Ok(double(n));
+}
+"#,
+        );
+        assert_eq!(m.definitions.len(), 2);
+        let Definition::Fn(main) = &m.definitions[1] else {
+            panic!();
+        };
+        assert!(matches!(main.body.statements[0], Statement::Use(_)));
+        assert!(matches!(main.body.statements[1], Statement::Fn(_)));
+    }
+
+    #[test]
+    fn parses_multi_subject_case_and_guards() {
+        let m = parse_ok(
+            r#"
+pub fn main() -> Bool {
+  case a, b {
+    1, 2 -> True;
+    n, m if n > m -> False;
+    _, _ -> False;
+  };
+}
+"#,
+        );
+        let Definition::Fn(f) = &m.definitions[0] else {
+            panic!();
+        };
+        let Statement::Expr(expr) = &f.body.statements[0] else {
+            panic!();
+        };
+        let ExprKind::Case { subjects, clauses } = &expr.kind else {
+            panic!();
+        };
+        assert_eq!(subjects.len(), 2);
+        assert_eq!(clauses.len(), 3);
+        assert!(clauses[1].guard.is_some());
+    }
+
+    #[test]
+    fn rejects_mismatched_case_pattern_arity() {
+        let err = parse_module(
+            r#"
+pub fn main() -> Bool {
+  case a, b {
+    1 -> True;
+    _, _ -> False;
+  };
+}
+"#,
+        )
+        .unwrap_err();
+        assert!(err.iter().any(|e| e.to_string().contains("subject")));
+    }
+
+    #[test]
+    fn parses_record_update_bit_array_and_qualified_pattern() {
+        let m = parse_ok(
+            r#"
+pub type User {
+  User(name: String, age: Int)
+}
+
+pub fn main() -> User {
+  let User(name: n, ..) = user;
+  let <<0x1, rest:bytes>> = bits;
+  case value {
+    result.Ok(x) -> User(..user, age: x);
+    _ -> user;
+  };
+}
+"#,
+        );
+        assert_eq!(m.definitions.len(), 2);
+    }
+
+    #[test]
+    fn parses_string_prefix_and_alternatives() {
+        let m = parse_ok(
+            r#"
+pub fn main() -> Int {
+  case s {
+    "hello " <> name -> 1;
+    1 | 2 | 3 -> 2;
+    _ -> 0;
+  };
+}
+"#,
+        );
+        let Definition::Fn(f) = &m.definitions[0] else {
+            panic!();
+        };
+        let Statement::Expr(expr) = &f.body.statements[0] else {
+            panic!();
+        };
+        let ExprKind::Case { clauses, .. } = &expr.kind else {
+            panic!();
+        };
+        assert_eq!(clauses[1].patterns.len(), 3);
     }
 }
