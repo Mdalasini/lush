@@ -1608,6 +1608,10 @@ fn is_irrefutable(pattern: &Pattern) -> bool {
         PatternKind::Var(_) | PatternKind::Discard => true,
         PatternKind::As { pattern, .. } => is_irrefutable(pattern),
         PatternKind::Tuple(elems) => elems.iter().all(is_irrefutable),
+        // `[..rest]` binds the whole list and is irrefutable.
+        PatternKind::List { items, rest } if items.is_empty() => {
+            rest.as_ref().is_some_and(|r| is_irrefutable(r))
+        }
         _ => false,
     }
 }
