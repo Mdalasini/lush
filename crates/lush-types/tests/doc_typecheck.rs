@@ -172,6 +172,79 @@ pub fn main() -> User {
 }
 
 #[test]
+fn accepts_min_int_literal() {
+    typecheck_source(
+        r#"
+pub fn main() -> Int {
+  -9223372036854775808;
+}
+"#,
+    )
+    .expect("direct negation of 2^63 is MIN_INT");
+}
+
+#[test]
+fn rejects_positive_min_int_magnitude() {
+    let err = typecheck_source(
+        r#"
+pub fn main() -> Int {
+  9223372036854775808;
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("Int range")
+        )),
+        "expected Int range error, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_closure_constant() {
+    let err = typecheck_source(
+        r#"
+const callback = fn() { Nil; };
+pub fn main() { Nil; }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("constant")
+        )),
+        "expected constant expression error, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_unknown_constructor_label() {
+    let err = typecheck_source(
+        r#"
+pub type User {
+  User(name: String, age: Int)
+}
+pub fn main(u: User) -> Int {
+  case u {
+    User(typo: x, name: y) -> 1;
+  };
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("unknown field label")
+        )),
+        "expected unknown field label error, got {err:?}"
+    );
+}
+
+#[test]
 fn rejects_out_of_range_int() {
     let err = typecheck_source(
         r#"

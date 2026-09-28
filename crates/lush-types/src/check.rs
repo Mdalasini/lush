@@ -224,6 +224,9 @@ impl Checker {
     }
 
     fn check_const(&mut self, c: &ConstDef) {
+        if let Err(e) = check_const_expr(&c.value) {
+            self.errors.push(e);
+        }
         let inferred = self.infer_expr(&c.value);
         let expected = self
             .env
@@ -433,9 +436,13 @@ impl Checker {
                         self.errors.push(e);
                     }
                     let labels = self.fn_labels.get(name).cloned();
-                    let ordered = reorder_pattern_fields(fields, labels.as_deref());
-                    for (f, ft) in ordered.iter().zip(field_tys.iter()) {
-                        self.bind_pattern(&f.pattern, ft);
+                    match reorder_pattern_fields(fields, labels.as_deref(), pattern.span) {
+                        Ok(ordered) => {
+                            for (f, ft) in ordered.iter().zip(field_tys.iter()) {
+                                self.bind_pattern(&f.pattern, ft);
+                            }
+                        }
+                        Err(e) => self.errors.push(e),
                     }
                 }
             }
@@ -512,9 +519,17 @@ impl Checker {
                 self.infer_binop(*op, lt, rt, expr.span)
             }
             ExprKind::Unary { op, expr: inner } => {
-                let t = self.infer_expr(inner);
                 match op {
                     UnaryOp::Neg => {
+                        // Spec §5.7: a directly negated integer literal may have magnitude
+                        // 2^63 and denotes MIN_INT; the same positive literal is invalid.
+                        if let ExprKind::Int(lit) = &inner.kind {
+                            let cleaned: String = lit.chars().filter(|c| *c != '_').collect();
+                            if cleaned == "9223372036854775808" {
+                                return Type::int();
+                            }
+                        }
+                        let t = self.infer_expr(inner);
                         if let Err(e) = unify(&mut self.subst, &t, &Type::int(), expr.span) {
                             if unify(&mut self.subst, &t, &Type::float(), expr.span).is_err() {
                                 self.errors.push(e);
@@ -525,6 +540,7 @@ impl Checker {
                         }
                     }
                     UnaryOp::Not => {
+                        let t = self.infer_expr(inner);
                         if let Err(e) = unify(&mut self.subst, &t, &Type::bool(), expr.span) {
                             self.errors.push(e);
                         }
@@ -544,7 +560,13 @@ impl Checker {
                             ExprKind::Field { field, .. } => self.fn_labels.get(field).cloned(),
                             _ => None,
                         };
-                        let ordered = reorder_args(args, labels.as_deref());
+                        let ordered = match reorder_args(args, labels.as_deref()) {
+                            Ok(o) => o,
+                            Err(e) => {
+                                self.errors.push(e);
+                                args.to_vec()
+                            }
+                        };
                         let has_hole = ordered.iter().any(|a| matches!(a.value, ArgValue::Hole));
                         let mut arg_tys = Vec::new();
                         if !has_hole {
@@ -741,7 +763,13 @@ impl Checker {
             ExprKind::Field { field, .. } => self.fn_labels.get(field).cloned(),
             _ => None,
         };
-        let ordered = reorder_args(args, labels.as_deref());
+        let ordered = match reorder_args(args, labels.as_deref()) {
+            Ok(o) => o,
+            Err(e) => {
+                self.errors.push(e);
+                args.to_vec()
+            }
+        };
 
         let mut arg_tys = Vec::new();
         let mut hole_ty = None;
@@ -1074,27 +1102,95 @@ fn validate_float_literal(lit: &str, span: Span) -> Result<(), TypeError> {
     }
 }
 
+/// Constant-expression check (`spec.md` §5.7 / constants).
+fn check_const_expr(expr: &Expr) -> Result<(), TypeError> {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Ident(_)
+        | ExprKind::Constructor(_) => Ok(()),
+        ExprKind::Group(inner) | ExprKind::Unary { expr: inner, .. } | ExprKind::Echo { value: inner } => {
+            check_const_expr(inner)
+        }
+        ExprKind::Binary { left, right, .. } => {
+            check_const_expr(left)?;
+            check_const_expr(right)
+        }
+        ExprKind::Tuple(elems) => {
+            for e in elems {
+                check_const_expr(e)?;
+            }
+            Ok(())
+        }
+        ExprKind::List { items, spread } => {
+            for e in items {
+                check_const_expr(e)?;
+            }
+            if let Some(s) = spread {
+                check_const_expr(s)?;
+            }
+            Ok(())
+        }
+        ExprKind::Call { callee, args } => {
+            // ADT construction only; no general function calls in constants.
+            if !matches!(callee.kind, ExprKind::Constructor(_)) {
+                return Err(TypeError::Other {
+                    span: expr.span,
+                    message: "function calls are not allowed in constants".into(),
+                });
+            }
+            for a in args {
+                if let ArgValue::Expr(e) = &a.value {
+                    check_const_expr(e)?;
+                }
+            }
+            Ok(())
+        }
+        ExprKind::Fn { .. }
+        | ExprKind::Pipe { .. }
+        | ExprKind::Case { .. }
+        | ExprKind::Block(_)
+        | ExprKind::Todo { .. }
+        | ExprKind::Panic { .. }
+        | ExprKind::Assert { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::RecordUpdate { .. }
+        | ExprKind::BitArray(_) => Err(TypeError::Other {
+            span: expr.span,
+            message: "expression is not allowed in a constant".into(),
+        }),
+    }
+}
+
 fn reorder_pattern_fields(
     fields: &[PatternField],
     labels: Option<&[Option<String>]>,
-) -> Vec<PatternField> {
+    span: Span,
+) -> Result<Vec<PatternField>, TypeError> {
     let Some(labels) = labels else {
-        return fields.to_vec();
+        return Ok(fields.to_vec());
     };
     if labels.iter().all(|l| l.is_none()) || fields.iter().all(|f| f.label.is_none()) {
-        return fields.to_vec();
+        return Ok(fields.to_vec());
     }
-    let mut slots: Vec<Option<PatternField>> = vec![None; labels.len().max(fields.len())];
+    let mut slots: Vec<Option<PatternField>> = vec![None; labels.len()];
     let mut unlabelled = Vec::new();
     for field in fields {
         if let Some(label) = &field.label {
-            if let Some(idx) = labels.iter().position(|l| l.as_ref() == Some(label)) {
-                if idx < slots.len() {
-                    slots[idx] = Some(field.clone());
-                    continue;
-                }
+            let Some(idx) = labels.iter().position(|l| l.as_ref() == Some(label)) else {
+                return Err(TypeError::Other {
+                    span: field.span,
+                    message: format!("unknown field label `{label}`"),
+                });
+            };
+            if slots[idx].is_some() {
+                return Err(TypeError::Other {
+                    span: field.span,
+                    message: format!("duplicate field label `{label}`"),
+                });
             }
-            unlabelled.push(field.clone());
+            slots[idx] = Some(field.clone());
         } else {
             unlabelled.push(field.clone());
         }
@@ -1108,36 +1204,43 @@ fn reorder_pattern_fields(
             }
         }
     }
-    while ui < unlabelled.len() {
-        slots.push(Some(unlabelled[ui].clone()));
-        ui += 1;
+    if ui < unlabelled.len() {
+        return Err(TypeError::Other {
+            span,
+            message: "too many fields in constructor pattern".into(),
+        });
     }
-    slots.into_iter().flatten().collect()
+    Ok(slots.into_iter().flatten().collect())
 }
 
 /// Reorder labelled arguments to match declaration label order.
 /// Unlabelled args keep relative order and fill remaining slots left-to-right.
-fn reorder_args(args: &[Arg], labels: Option<&[Option<String>]>) -> Vec<Arg> {
+fn reorder_args(args: &[Arg], labels: Option<&[Option<String>]>) -> Result<Vec<Arg>, TypeError> {
     let Some(labels) = labels else {
-        return args.to_vec();
+        return Ok(args.to_vec());
     };
     if labels.iter().all(|l| l.is_none()) || args.iter().all(|a| a.label.is_none()) {
-        return args.to_vec();
+        return Ok(args.to_vec());
     }
 
-    let mut slots: Vec<Option<Arg>> = vec![None; labels.len().max(args.len())];
+    let mut slots: Vec<Option<Arg>> = vec![None; labels.len()];
     let mut unlabelled = Vec::new();
 
     for arg in args {
         if let Some(label) = &arg.label {
-            if let Some(idx) = labels.iter().position(|l| l.as_ref() == Some(label)) {
-                if idx < slots.len() {
-                    slots[idx] = Some(arg.clone());
-                    continue;
-                }
+            let Some(idx) = labels.iter().position(|l| l.as_ref() == Some(label)) else {
+                return Err(TypeError::Other {
+                    span: arg.span,
+                    message: format!("unknown argument label `{label}`"),
+                });
+            };
+            if slots[idx].is_some() {
+                return Err(TypeError::Other {
+                    span: arg.span,
+                    message: format!("duplicate argument label `{label}`"),
+                });
             }
-            // Unknown label: keep at end in encounter order.
-            unlabelled.push(arg.clone());
+            slots[idx] = Some(arg.clone());
         } else {
             unlabelled.push(arg.clone());
         }
@@ -1152,12 +1255,15 @@ fn reorder_args(args: &[Arg], labels: Option<&[Option<String>]>) -> Vec<Arg> {
             }
         }
     }
-    while ui < unlabelled.len() {
-        slots.push(Some(unlabelled[ui].clone()));
-        ui += 1;
+    if ui < unlabelled.len() {
+        let span = unlabelled[ui].span;
+        return Err(TypeError::Other {
+            span,
+            message: "too many arguments for labelled call".into(),
+        });
     }
 
-    slots.into_iter().flatten().collect()
+    Ok(slots.into_iter().flatten().collect())
 }
 
 fn apply_map(map: &HashMap<u32, Type>, ty: &Type) -> Type {
