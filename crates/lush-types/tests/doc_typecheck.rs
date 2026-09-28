@@ -620,3 +620,176 @@ pub fn main(b: Bool) -> Int {
     )
     .expect("Bool True/False is exhaustive");
 }
+
+#[test]
+fn rejects_partial_constructor_fields() {
+    let err = typecheck_source(
+        r#"
+pub fn main(x: Option(Int)) -> Int {
+  case x {
+    Some(0) -> 0;
+    None -> 1;
+  };
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("non-exhaustive")
+        )),
+        "Some(0) must not cover all Some values, got {err:?}"
+    );
+}
+
+#[test]
+fn accepts_list_rest_only_pattern() {
+    typecheck_source(
+        r#"
+pub fn main(xs: List(Int)) -> List(Int) {
+  case xs {
+    [..rest] -> rest;
+  };
+}
+"#,
+    )
+    .expect("[..rest] covers every list");
+}
+
+#[test]
+fn warns_wildcard_after_exhaustive_bool() {
+    let warns = typecheck_source_with_warnings(
+        r#"
+pub fn main(b: Bool) -> Int {
+  case b {
+    True -> 1;
+    False -> 0;
+    _ -> 2;
+  };
+}
+"#,
+    )
+    .expect("exhaustive bool with extra wildcard");
+    assert!(
+        warns
+            .iter()
+            .any(|w| matches!(w, TypeWarning::RedundantPattern { .. })),
+        "expected unreachable wildcard warning, got {warns:?}"
+    );
+}
+
+#[test]
+fn warns_redundant_alternative_in_or_pattern() {
+    let warns = typecheck_source_with_warnings(
+        r#"
+pub fn main(b: Bool) -> Int {
+  case b {
+    True -> 1;
+    True | False -> 0;
+  };
+}
+"#,
+    )
+    .expect("or-pattern with redundant True alternative");
+    assert!(
+        warns
+            .iter()
+            .any(|w| matches!(w, TypeWarning::RedundantPattern { .. })),
+        "expected unreachable True alternative warning, got {warns:?}"
+    );
+}
+
+#[test]
+fn warns_identical_string_prefix() {
+    let warns = typecheck_source_with_warnings(
+        r#"
+pub fn main(s: String) -> Int {
+  case s {
+    "api/" <> rest -> 1;
+    "api/" <> other -> 2;
+    _ -> 0;
+  };
+}
+"#,
+    )
+    .expect("string prefix case");
+    assert!(
+        warns
+            .iter()
+            .any(|w| matches!(w, TypeWarning::RedundantPattern { .. })),
+        "expected unreachable second string-prefix warning, got {warns:?}"
+    );
+}
+
+#[test]
+fn warns_list_covered_by_shorter_rest() {
+    let warns = typecheck_source_with_warnings(
+        r#"
+pub fn main(xs: List(Int)) -> Int {
+  case xs {
+    [x, ..xs] -> 1;
+    [x, y, ..ys] -> 2;
+    _ -> 0;
+  };
+}
+"#,
+    )
+    .expect("list rest coverage");
+    assert!(
+        warns
+            .iter()
+            .any(|w| matches!(w, TypeWarning::RedundantPattern { .. })),
+        "expected unreachable longer list pattern warning, got {warns:?}"
+    );
+}
+
+#[test]
+fn labelled_field_reorder_is_not_redundant() {
+    let warns = typecheck_source_with_warnings(
+        r#"
+pub type User {
+  User(a: Int, b: Int)
+}
+pub fn main(u: User) -> Int {
+  case u {
+    User(a: 1, b: _) -> 1;
+    User(b: 1, a: _) -> 2;
+    _ -> 0;
+  };
+}
+"#,
+    )
+    .expect("labelled reorder case");
+    assert!(
+        !warns
+            .iter()
+            .any(|w| matches!(w, TypeWarning::RedundantPattern { .. })),
+        "reordered labels must not warn as unreachable, got {warns:?}"
+    );
+}
+
+#[test]
+fn spread_does_not_false_cover_different_field() {
+    let warns = typecheck_source_with_warnings(
+        r#"
+pub type User {
+  User(name: String, age: Int)
+}
+pub fn main(u: User) -> Int {
+  case u {
+    User(name: "a", ..) -> 1;
+    User(name: "b", ..) -> 2;
+    _ -> 0;
+  };
+}
+"#,
+    )
+    .expect("spread field cases");
+    assert!(
+        !warns
+            .iter()
+            .any(|w| matches!(w, TypeWarning::RedundantPattern { .. })),
+        "different spread field values must both be useful, got {warns:?}"
+    );
+}
