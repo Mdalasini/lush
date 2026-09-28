@@ -2,11 +2,16 @@
 
 ## Project Structure & Module Organization
 
-This repository currently contains the Lush language specification, not an implementation: `spec.md` is the normative source of truth and `README.md` is the project entry point. The Rust workspace, `crates/`, `stdlib/`, and `tests/` described in `spec.md` §15.1 are planned structure, not present directories. Keep specification changes in `spec.md`; add implementation files in the documented locations when those components are introduced. Avoid duplicating normative language behavior in separate documents.
+`spec.md` is the normative source of truth and `README.md` is the project entry point. The Rust workspace is rooted at `Cargo.toml` with crates under `crates/` (currently `lush-syntax`). Planned directories from `spec.md` §15.1 (`stdlib/`, `tests/`, and additional crates) are added as those stages land. Keep specification changes in `spec.md`; avoid duplicating normative language behavior in separate documents.
 
 ## Build, Test, and Development Commands
 
-There is no build system or executable in the current checkout. Consequently, commands such as `cargo test` and `lush test` are not yet available. When implementation begins, follow the staged build order in `spec.md` §15.3 and add the workspace manifest and test harness before documenting runnable commands here. For documentation-only edits, inspect the affected section and its cross-references before committing.
+```bash
+cargo test --workspace
+cargo fmt --all -- --check
+```
+
+Follow the staged build order in `spec.md` §15.3. For documentation-only edits, inspect the affected section and its cross-references before committing.
 
 ## Coding Style & Naming Conventions
 
@@ -14,7 +19,7 @@ Write concise Markdown with descriptive headings, fenced examples, and tables fo
 
 ## Testing Guidelines
 
-No automated tests currently exist. Specification edits should be checked for consistent terminology, valid examples, and accurate section references. The future implementation plan calls for syntax snapshots, type-checking and diagnostic fixtures, end-to-end `.lush` programs with expected output under `tests/`, and broader acceptance criteria in §15.4. Add regression fixtures alongside the feature they cover when that infrastructure exists.
+Run `cargo test --workspace` before opening a PR. Specification edits should be checked for consistent terminology, valid examples, and accurate section references. Syntax work uses unit and snapshot tests in `crates/lush-syntax`; later stages add type-checking fixtures, end-to-end `.lush` programs under `tests/`, and the acceptance criteria in §15.4. Add regression fixtures alongside the feature they cover.
 
 ## Commit & Pull Request Guidelines
 
