@@ -18,9 +18,11 @@ No automated tests currently exist. Specification edits should be checked for co
 
 ## Commit & Pull Request Guidelines
 
-Make all changes intended for `main` on a separate branch, then file a pull request targeting `main`; do not commit those changes directly to `main`. Name branches with a type prefix and a short, descriptive topic, using lowercase words separated by hyphens: `feat/<topic>`, `doc/<topic>`, `refactor/<topic>`, or `fix/<topic>` (for example, `doc/contributor-guide`).
+Never commit directly to `main`. Make changes on a separate branch and open a pull request targeting `main`. Follow the repository's branch naming convention: a type prefix plus a short, descriptive topic in lowercase, hyphen-separated words (for example, `feat/<topic>`, `doc/contributor-guide`, `refactor/<topic>`, `fix/<topic>`). These examples are illustrative, not exhaustive.
 
-The short Git history uses concise, imperative subjects (for example, “Add the Lush language specification”). Follow that pattern: capitalize the first word, describe one change, and omit a trailing period. Pull requests should summarize the specification or implementation change, explain its rationale, link related discussion when available, and call out affected normative sections. Include test or manual review evidence; screenshots are unnecessary for text-only changes.
+Write commit subjects in the concise, imperative style of the existing history: capitalize the first word, describe one change, and omit the trailing period (for example, "Add the Lush language specification").
+
+Pull requests should summarize the change, explain its rationale, link related discussion when available, and call out affected normative sections. Include test or manual review evidence; screenshots aren't needed for text-only changes.
 
 ## Specification and Security
 
