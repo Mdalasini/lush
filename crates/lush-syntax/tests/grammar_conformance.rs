@@ -91,6 +91,14 @@ fn comparison_associativity() {
         &wrap_expr("let x = (a < b) == True; Nil;"),
     );
     assert_rejects("chained comparison", &wrap_expr("let x = a < b < c; Nil;"));
+    assert_rejects(
+        "mixed comparison and equality",
+        &wrap_expr("let x = a < b == c; Nil;"),
+    );
+    assert_rejects(
+        "mixed equality and comparison",
+        &wrap_expr("let x = a == b < c; Nil;"),
+    );
 }
 
 #[test]

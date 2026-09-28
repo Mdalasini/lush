@@ -771,7 +771,7 @@ impl<'a> Parser<'a> {
             Token::String => {
                 self.bump();
                 Ok(Pattern {
-                    kind: PatternKind::String(self.text(tok.span)),
+                    kind: PatternKind::String(normalize_string_literal(&self.text(tok.span))),
                     span: tok.span,
                 })
             }
@@ -1059,12 +1059,13 @@ impl<'a> Parser<'a> {
                 if l_bp < min_bp {
                     break;
                 }
-                // Non-associative ops cannot chain at the same precedence on either side.
+                // Non-associative comparison/equality ops cannot chain with each other,
+                // even across precedence levels (`a < b == c` needs parentheses).
                 // Do not use `l_bp == min_bp` alone: that falsely rejects `a == b && c == d`
                 // when `&&`'s right binding power equals `==`'s left binding power.
                 if non_assoc {
                     if let ExprKind::Binary { op: prev_op, .. } = &lhs.kind {
-                        if non_assoc_bp(*prev_op) == Some(l_bp) {
+                        if non_assoc_class(*prev_op).is_some() {
                             self.error(
                                 op_tok.span,
                                 "chained comparisons/equality require parentheses",
@@ -1088,6 +1089,19 @@ impl<'a> Parser<'a> {
                     // Parse non-assoc rights at bp+1 so `a == b == c` cannot nest on the right.
                     let right_bp = if non_assoc { l_bp + 1 } else { r_bp };
                     let right = self.parse_expr(right_bp)?;
+                    // Also reject higher-precedence non-assoc nesting on the right
+                    // (`a == b < c` → `a == (b < c)` without parentheses).
+                    if non_assoc {
+                        if let ExprKind::Binary { op: right_op, .. } = &right.kind {
+                            if non_assoc_class(*right_op).is_some() {
+                                self.error(
+                                    op_tok.span,
+                                    "chained comparisons/equality require parentheses",
+                                );
+                                return Err(());
+                            }
+                        }
+                    }
                     let span = Span::new(lhs.span.start, right.span.end);
                     lhs = Expr {
                         kind: ExprKind::Binary {
@@ -1149,7 +1163,7 @@ impl<'a> Parser<'a> {
             Token::String => {
                 self.bump();
                 Ok(Expr {
-                    kind: ExprKind::String(self.text(tok.span)),
+                    kind: ExprKind::String(normalize_string_literal(&self.text(tok.span))),
                     span: tok.span,
                 })
             }
@@ -1668,14 +1682,29 @@ fn bin_info(kind: Token) -> Option<(u8, u8, BinOp, bool)> {
     }
 }
 
-/// Binding power for non-associative operators, used to reject `a == b == c`.
-fn non_assoc_bp(op: BinOp) -> Option<u8> {
+/// Shared class for all non-associative comparison/equality operators (§5.7).
+///
+/// Equality and relational ops have different binding powers, but chaining any
+/// mix (`a < b == c`, `a == b < c`, `a == b == c`) still requires parentheses.
+fn non_assoc_class(op: BinOp) -> Option<u8> {
     match op {
-        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(7),
-        BinOp::LtFloat | BinOp::LeFloat | BinOp::GtFloat | BinOp::GeFloat => Some(7),
-        BinOp::Eq | BinOp::NotEq => Some(6),
+        BinOp::Lt
+        | BinOp::Le
+        | BinOp::Gt
+        | BinOp::Ge
+        | BinOp::LtFloat
+        | BinOp::LeFloat
+        | BinOp::GtFloat
+        | BinOp::GeFloat
+        | BinOp::Eq
+        | BinOp::NotEq => Some(1),
         _ => None,
     }
+}
+
+/// Normalize newlines inside string literal text so LF and CRLF sources agree.
+fn normalize_string_literal(raw: &str) -> String {
+    raw.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 #[cfg(test)]
@@ -1794,6 +1823,23 @@ pub fn main() -> Bool {
     }
 
     #[test]
+    fn rejects_mixed_comparison_and_equality() {
+        for source in [
+            "pub fn main() -> Bool { a < b == c; }\n",
+            "pub fn main() -> Bool { a == b < c; }\n",
+            "pub fn main() -> Bool { a == b != c; }\n",
+        ] {
+            let err = parse_module(source).unwrap_err();
+            assert!(
+                err.iter().any(|e| e.to_string().contains("parentheses")),
+                "expected reject for {source:?}, got {err:?}"
+            );
+        }
+        // Explicit parentheses remain valid.
+        parse_ok("pub fn main() -> Bool { (a < b) == c; }\n");
+    }
+
+    #[test]
     fn parses_equality_with_and() {
         parse_ok(
             r#"
@@ -1868,6 +1914,20 @@ pub fn main() -> Nil {
         };
         // Span text from the original source must be valid and contain `main`.
         assert!(f.span.slice(source).contains("main"));
+    }
+
+    #[test]
+    fn crlf_string_literal_value_matches_lf() {
+        let lf = parse_ok("const s = \"a\nb\";\n");
+        let crlf = parse_ok("const s = \"a\r\nb\";\r\n");
+        let Definition::Const(lf_c) = &lf.definitions[0] else {
+            panic!();
+        };
+        let Definition::Const(crlf_c) = &crlf.definitions[0] else {
+            panic!();
+        };
+        assert_eq!(lf_c.value.kind, crlf_c.value.kind);
+        assert_eq!(lf_c.value.kind, ExprKind::String("\"a\nb\"".into()));
     }
 
     #[test]
