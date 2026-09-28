@@ -647,6 +647,22 @@ impl Checker {
                         let has_hole = ordered.iter().any(|a| matches!(a.value, ArgValue::Hole));
                         let mut arg_tys = Vec::new();
                         if !has_hole {
+                            // Pipe supplies the first parameter; reject an explicit
+                            // argument that uses that parameter's label.
+                            if let Some(Some(first_label)) =
+                                labels.as_deref().and_then(|ls| ls.first())
+                            {
+                                if let Some(arg) =
+                                    ordered.iter().find(|a| a.label.as_ref() == Some(first_label))
+                                {
+                                    self.errors.push(TypeError::Other {
+                                        span: arg.span,
+                                        message: format!(
+                                            "duplicate argument label `{first_label}`"
+                                        ),
+                                    });
+                                }
+                            }
                             arg_tys.push(left_ty.clone());
                         }
                         for arg in &ordered {

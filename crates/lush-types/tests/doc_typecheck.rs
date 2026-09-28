@@ -317,6 +317,26 @@ pub fn main() { Nil; }
 }
 
 #[test]
+fn rejects_pipe_duplicate_first_label() {
+    let err = typecheck_source(
+        r#"
+pub fn f(a x: Int, b y: Int) -> Int { x + y; }
+pub fn main() -> Int {
+  1 |> f(a: 2);
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("duplicate argument label")
+        )),
+        "expected duplicate pipe label error, got {err:?}"
+    );
+}
+
+#[test]
 fn rejects_cyclic_constants() {
     let err = typecheck_source(
         r#"
