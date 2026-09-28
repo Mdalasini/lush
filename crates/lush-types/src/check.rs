@@ -1,11 +1,12 @@
 //! Type checking entry points and inference.
 //!
-//! Implements the §4.3 syntactic value restriction and sealed `Eq`/`Neg`
-//! constraints.
+//! Implements the §4.3 syntactic value restriction, sealed `Eq`/`Neg`
+//! constraints, and case exhaustiveness / redundancy (§5.4).
 
 use crate::desugar::desugar_module;
 use crate::env::Env;
-use crate::error::TypeError;
+use crate::error::{TypeError, TypeWarning};
+use crate::exhaust;
 use crate::ty::{
     apply, apply_constraint, constraint_free_vars, free_vars, type_display, Constraint, Scheme,
     Subst, Type,
@@ -17,6 +18,11 @@ use std::collections::{HashMap, HashSet};
 
 /// Parse and type-check a source module.
 pub fn typecheck_source(source: &str) -> Result<(), Vec<TypeError>> {
+    typecheck_source_with_warnings(source).map(|_| ())
+}
+
+/// Parse and type-check a source module, returning warnings on success.
+pub fn typecheck_source_with_warnings(source: &str) -> Result<Vec<TypeWarning>, Vec<TypeError>> {
     let mut module = parse_module(source).map_err(|errors| {
         errors
             .into_iter()
@@ -26,16 +32,23 @@ pub fn typecheck_source(source: &str) -> Result<(), Vec<TypeError>> {
             })
             .collect::<Vec<_>>()
     })?;
-    typecheck_module(&mut module)
+    typecheck_module_with_warnings(&mut module)
 }
 
 /// Type-check a parsed module (mutates it to desugar `use`).
 pub fn typecheck_module(module: &mut Module) -> Result<(), Vec<TypeError>> {
+    typecheck_module_with_warnings(module).map(|_| ())
+}
+
+/// Type-check a parsed module, returning warnings on success.
+pub fn typecheck_module_with_warnings(
+    module: &mut Module,
+) -> Result<Vec<TypeWarning>, Vec<TypeError>> {
     desugar_module(module);
     let mut checker = Checker::new();
     checker.check_module(module);
     if checker.errors.is_empty() {
-        Ok(())
+        Ok(checker.warnings)
     } else {
         Err(checker.errors)
     }
@@ -46,10 +59,13 @@ struct Checker {
     subst: Subst,
     next_var: u32,
     errors: Vec<TypeError>,
+    warnings: Vec<TypeWarning>,
     /// Local ADT constructors: name -> scheme.
     ctors: HashMap<String, Scheme>,
     /// ADT type name -> parameter indices required for `Eq` (least fixed point).
     adt_eq_params: HashMap<String, Vec<usize>>,
+    /// ADT type name -> variant constructor names (declaration order).
+    adt_variants: HashMap<String, Vec<String>>,
     /// Type aliases: name -> (params, body).
     aliases: HashMap<String, (Vec<String>, TypeExpr)>,
     /// Scoped annotation type variables (`a`, `b`, …) → unification vars.
@@ -73,8 +89,10 @@ impl Checker {
             subst: HashMap::new(),
             next_var: 100,
             errors: Vec::new(),
+            warnings: Vec::new(),
             ctors: HashMap::new(),
             adt_eq_params: HashMap::new(),
+            adt_variants: HashMap::new(),
             aliases: HashMap::new(),
             type_vars: HashMap::new(),
             fn_labels: HashMap::new(),
@@ -325,6 +343,7 @@ impl Checker {
             _ => Vec::new(),
         };
         let mut needed = HashSet::new();
+        let mut variant_names = Vec::new();
         for v in variants {
             if self.ctors.contains_key(&v.name) || self.env.get(&v.name).is_some() {
                 self.errors.push(TypeError::Other {
@@ -333,6 +352,7 @@ impl Checker {
                 });
                 continue;
             }
+            variant_names.push(v.name.clone());
             self.fn_labels.insert(
                 v.name.clone(),
                 v.fields.iter().map(|f| f.label.clone()).collect(),
@@ -370,6 +390,7 @@ impl Checker {
         let mut idxs: Vec<usize> = needed.into_iter().collect();
         idxs.sort_unstable();
         self.adt_eq_params.insert(t.name.clone(), idxs);
+        self.adt_variants.insert(t.name.clone(), variant_names);
         self.type_vars = saved_tvars;
     }
 
@@ -970,8 +991,13 @@ impl Checker {
                         self.errors.push(e);
                     }
                     self.env = saved;
-                    // Note: exhaustiveness is intentionally deferred in this prototype.
                 }
+                let applied: Vec<Type> =
+                    subject_tys.iter().map(|t| apply(&self.subst, t)).collect();
+                let (ex_errs, ex_warns) =
+                    exhaust::check_case(&applied, clauses, &self.adt_variants, expr.span);
+                self.errors.extend(ex_errs);
+                self.warnings.extend(ex_warns);
                 result
             }
             ExprKind::Todo { .. } | ExprKind::Panic { .. } => self.fresh(),

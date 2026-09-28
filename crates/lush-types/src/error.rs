@@ -30,3 +30,16 @@ pub enum TypeError {
         message: String,
     },
 }
+
+/// A non-fatal type checker warning.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TypeWarning {
+    /// Unreachable / redundant pattern.
+    #[error("warning at bytes {}..{}: {message}", span.start, span.end)]
+    RedundantPattern {
+        /// Location.
+        span: Span,
+        /// Detail.
+        message: String,
+    },
+}
