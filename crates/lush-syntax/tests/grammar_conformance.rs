@@ -47,7 +47,10 @@ fn list_spread_accept() {
 #[test]
 fn list_spread_reject() {
     // Missing comma between element and spread.
-    assert_rejects("list spread without comma", &wrap_expr("let xs = [x ..ys]; Nil;"));
+    assert_rejects(
+        "list spread without comma",
+        &wrap_expr("let xs = [x ..ys]; Nil;"),
+    );
 }
 
 #[test]
@@ -93,7 +96,10 @@ fn comparison_associativity() {
 #[test]
 fn trailing_commas() {
     assert_parses("trailing comma call", &wrap_expr("f(a,);"));
-    assert_parses("trailing comma params", &wrap_block("  fn g(a,) { a; }\n  g(1);\n"));
+    assert_parses(
+        "trailing comma params",
+        &wrap_block("  fn g(a,) { a; }\n  g(1);\n"),
+    );
     assert_rejects(
         "comma instead of case-arm semicolon",
         &wrap_expr("case x { 1 -> True, _ -> False; };"),
@@ -117,10 +123,7 @@ pub fn main() -> User {
 
 #[test]
 fn semicolon_enforcement() {
-    assert_rejects(
-        "missing expr semicolon",
-        "pub fn main() -> Int {\n  1\n}\n",
-    );
+    assert_rejects("missing expr semicolon", "pub fn main() -> Int {\n  1\n}\n");
     assert_rejects(
         "missing import semicolon",
         "import lush/list\npub fn main() -> Nil { Nil; }\n",
@@ -137,10 +140,7 @@ fn semicolon_enforcement() {
 
 #[test]
 fn pipes_labels_captures() {
-    assert_parses(
-        "pipe with capture",
-        &wrap_expr("1 |> add(2, _);"),
-    );
+    assert_parses("pipe with capture", &wrap_expr("1 |> add(2, _);"));
     assert_parses(
         "labelled call",
         &wrap_expr(r#"replace(in: "a,b", each: ",", with: " ");"#),
