@@ -1,9 +1,12 @@
 //! Hand-written lexer for Lush (§3).
 //!
-//! Normalises `\r\n` to `\n`, preserves comments as trivia for the formatter,
-//! and attaches a span to every token.
+//! Normalises `\r\n` to `\n` (bare `\r` is left alone), preserves comments as
+//! trivia for the formatter, and attaches a span to every token.
 
-use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
+use std::borrow::Cow;
+
+use crate::codes;
+use crate::diagnostic::{escape_for_message, Diagnostic, DiagnosticKind, Severity};
 use crate::span::Span;
 use crate::token::{
     FloatLit, IntBase, IntLit, SpannedToken, StringLit, TokenKind, Trivia, TriviaKind,
@@ -18,7 +21,7 @@ pub fn lex(source: &str) -> LexResult {
         (tokens, lexer.diagnostics, lexer.casing_warnings)
     };
     LexResult {
-        source: normalised,
+        source: normalised.into_owned(),
         tokens,
         diagnostics,
         casing_warnings,
@@ -27,7 +30,7 @@ pub fn lex(source: &str) -> LexResult {
 
 #[derive(Debug)]
 pub struct LexResult {
-    /// Source after `\r\n` → `\n` normalisation.
+    /// Source after `\r\n` → `\n` normalisation (bare `\r` preserved).
     pub source: String,
     pub tokens: Vec<SpannedToken>,
     pub diagnostics: Vec<Diagnostic>,
@@ -35,19 +38,20 @@ pub struct LexResult {
     pub casing_warnings: Vec<Diagnostic>,
 }
 
-fn normalise_newlines(source: &str) -> String {
+/// Convert `\r\n` to `\n`. Bare `\r` is left unchanged.
+///
+/// Returns [`Cow::Borrowed`] when the source contains no `\r\n` sequences.
+fn normalise_newlines(source: &str) -> Cow<'_, str> {
+    if !source.contains("\r\n") {
+        return Cow::Borrowed(source);
+    }
     let mut out = String::with_capacity(source.len());
     let bytes = source.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\r' {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                out.push('\n');
-                i += 2;
-            } else {
-                out.push('\n');
-                i += 1;
-            }
+        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            out.push('\n');
+            i += 2;
         } else {
             // Safe: we only skip whole `\r\n` pairs; other bytes stay UTF-8 aligned.
             let ch = source[i..].chars().next().unwrap();
@@ -55,7 +59,7 @@ fn normalise_newlines(source: &str) -> String {
             i += ch.len_utf8();
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 struct Lexer<'a> {
@@ -108,20 +112,14 @@ impl<'a> Lexer<'a> {
                 break;
             }
             let b = self.bytes[self.pos];
-            if b == b' ' || b == b'\t' || b == b'\n' || b == 0x0c {
+            if is_whitespace_byte(b) {
                 let start = self.pos;
-                while self.pos < self.bytes.len() {
-                    let c = self.bytes[self.pos];
-                    if c == b' ' || c == b'\t' || c == b'\n' || c == 0x0c {
-                        self.pos += 1;
-                    } else {
-                        break;
-                    }
+                while self.pos < self.bytes.len() && is_whitespace_byte(self.bytes[self.pos]) {
+                    self.pos += 1;
                 }
                 trivia.push(Trivia {
                     kind: TriviaKind::Whitespace,
                     span: Span::new(start, self.pos),
-                    text: self.src[start..self.pos].to_string(),
                 });
                 continue;
             }
@@ -146,7 +144,6 @@ impl<'a> Lexer<'a> {
                 trivia.push(Trivia {
                     kind,
                     span: Span::new(start, self.pos),
-                    text: self.src[start..self.pos].to_string(),
                 });
                 continue;
             }
@@ -407,7 +404,6 @@ impl<'a> Lexer<'a> {
                     self.pos += 2;
                     let digits_start = self.pos;
                     self.consume_digits(|c| c.is_ascii_hexdigit() || c == b'_');
-                    let raw = self.src[start..self.pos].to_string();
                     let digits: String = self.src[digits_start..self.pos]
                         .chars()
                         .filter(|c| *c != '_')
@@ -415,11 +411,13 @@ impl<'a> Lexer<'a> {
                     if digits.is_empty() {
                         self.error(
                             Span::new(start, self.pos),
-                            "E0002",
+                            codes::E0002_BAD_NUMBER,
                             "hexadecimal literal needs at least one digit",
                             Some("write something like `0xFF`"),
                         );
                     }
+                    self.reject_number_suffix(start, false);
+                    let raw = self.src[start..self.pos].to_string();
                     return TokenKind::Int(IntLit {
                         digits,
                         base: IntBase::Hex,
@@ -430,7 +428,6 @@ impl<'a> Lexer<'a> {
                     self.pos += 2;
                     let digits_start = self.pos;
                     self.consume_digits(|c| matches!(c, b'0'..=b'7' | b'_'));
-                    let raw = self.src[start..self.pos].to_string();
                     let digits: String = self.src[digits_start..self.pos]
                         .chars()
                         .filter(|c| *c != '_')
@@ -438,11 +435,13 @@ impl<'a> Lexer<'a> {
                     if digits.is_empty() {
                         self.error(
                             Span::new(start, self.pos),
-                            "E0002",
+                            codes::E0002_BAD_NUMBER,
                             "octal literal needs at least one digit",
                             Some("write something like `0o17`"),
                         );
                     }
+                    self.reject_number_suffix(start, false);
+                    let raw = self.src[start..self.pos].to_string();
                     return TokenKind::Int(IntLit {
                         digits,
                         base: IntBase::Octal,
@@ -453,7 +452,6 @@ impl<'a> Lexer<'a> {
                     self.pos += 2;
                     let digits_start = self.pos;
                     self.consume_digits(|c| matches!(c, b'0' | b'1' | b'_'));
-                    let raw = self.src[start..self.pos].to_string();
                     let digits: String = self.src[digits_start..self.pos]
                         .chars()
                         .filter(|c| *c != '_')
@@ -461,11 +459,13 @@ impl<'a> Lexer<'a> {
                     if digits.is_empty() {
                         self.error(
                             Span::new(start, self.pos),
-                            "E0002",
+                            codes::E0002_BAD_NUMBER,
                             "binary literal needs at least one digit",
                             Some("write something like `0b1010`"),
                         );
                     }
+                    self.reject_number_suffix(start, false);
+                    let raw = self.src[start..self.pos].to_string();
                     return TokenKind::Int(IntLit {
                         digits,
                         base: IntBase::Binary,
@@ -493,23 +493,55 @@ impl<'a> Lexer<'a> {
                 if exp_start == self.pos {
                     self.error(
                         Span::new(start, self.pos),
-                        "E0003",
+                        codes::E0003_BAD_FLOAT,
                         "float exponent needs at least one digit",
                         Some("write something like `1.5e10`"),
                     );
                 }
             }
+            self.reject_number_suffix(start, true);
             let raw = self.src[start..self.pos].to_string();
             return TokenKind::Float(FloatLit { raw });
         }
 
+        let digits: String = self.src[start..self.pos]
+            .chars()
+            .filter(|c| *c != '_')
+            .collect();
+        self.reject_number_suffix(start, false);
         let raw = self.src[start..self.pos].to_string();
-        let digits: String = raw.chars().filter(|c| *c != '_').collect();
         TokenKind::Int(IntLit {
             digits,
             base: IntBase::Decimal,
             raw,
         })
+    }
+
+    /// After a number, reject a glued identifier run (`123abc`, `1e10`).
+    fn reject_number_suffix(&mut self, start: usize, is_float: bool) {
+        if self.pos >= self.bytes.len() || !is_ident_continue(self.bytes[self.pos]) {
+            return;
+        }
+        let hint = if !is_float && matches!(self.bytes[self.pos], b'e' | b'E') {
+            Some("float literals need a `.`, e.g. `1.0e10`")
+        } else {
+            Some("separate the number and the following name with whitespace or an operator")
+        };
+        while self.pos < self.bytes.len() && is_ident_continue(self.bytes[self.pos]) {
+            self.pos += 1;
+        }
+        let text = &self.src[start..self.pos];
+        let code = if is_float {
+            codes::E0003_BAD_FLOAT
+        } else {
+            codes::E0002_BAD_NUMBER
+        };
+        self.error(
+            Span::new(start, self.pos),
+            code,
+            format!("invalid numeric literal `{text}`"),
+            hint,
+        );
     }
 
     fn lex_string(&mut self) -> TokenKind {
@@ -555,7 +587,7 @@ impl<'a> Lexer<'a> {
                         if self.peek(0) != Some(b'{') {
                             self.error(
                                 Span::new(self.pos.saturating_sub(2), self.pos),
-                                "E0004",
+                                codes::E0004_BAD_ESCAPE,
                                 "invalid unicode escape; expected `\\u{...}`",
                                 Some("write a code point like `\\u{1F600}`"),
                             );
@@ -572,7 +604,7 @@ impl<'a> Lexer<'a> {
                         if self.peek(0) != Some(b'}') {
                             self.error(
                                 Span::new(hex_start.saturating_sub(3), self.pos),
-                                "E0004",
+                                codes::E0004_BAD_ESCAPE,
                                 "unterminated unicode escape",
                                 Some("close the escape with `}`"),
                             );
@@ -583,7 +615,7 @@ impl<'a> Lexer<'a> {
                             Some(c) => value.push(c),
                             None => self.error(
                                 Span::new(hex_start.saturating_sub(3), self.pos),
-                                "E0004",
+                                codes::E0004_BAD_ESCAPE,
                                 "invalid unicode code point in string escape",
                                 Some("use a valid scalar value such as `\\u{1F600}`"),
                             ),
@@ -592,7 +624,7 @@ impl<'a> Lexer<'a> {
                     other => {
                         self.error(
                             Span::new(self.pos - 1, self.pos + other.len_utf8()),
-                            "E0004",
+                            codes::E0004_BAD_ESCAPE,
                             format!("unknown string escape `\\{other}`"),
                             Some("supported escapes are `\\n \\r \\t \\\\ \\\" \\u{...}`"),
                         );
@@ -607,7 +639,7 @@ impl<'a> Lexer<'a> {
         }
         self.error(
             Span::new(start, self.pos),
-            "E0005",
+            codes::E0005_UNTERMINATED_STRING,
             "unterminated string literal",
             Some("add a closing `\"`"),
         );
@@ -626,11 +658,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn unexpected(&mut self, start: usize, len: usize) {
-        let slice = &self.src[start..start + len];
+        let ch = self.src[start..].chars().next().unwrap_or('\0');
         self.error(
             Span::new(start, start + len),
-            "E0001",
-            format!("unexpected character `{slice}`"),
+            codes::E0001_UNEXPECTED_CHAR,
+            format!("unexpected character `{}`", escape_for_message(ch)),
             Some("remove or escape this character"),
         );
     }
@@ -656,7 +688,7 @@ impl<'a> Lexer<'a> {
         // Conventional: snake_case — ASCII uppercase letters are wrong casing.
         if text.chars().any(|c| c.is_ascii_uppercase()) {
             self.casing_warnings.push(Diagnostic {
-                code: "W0001".into(),
+                code: codes::W0001_CASING.into(),
                 message: format!(
                     "identifier `{text}` should be `snake_case`; wrong casing is accepted but warned"
                 ),
@@ -672,7 +704,7 @@ impl<'a> Lexer<'a> {
         // Conventional PascalCase: after the leading uppercase, underscores are unusual.
         if text.contains('_') {
             self.casing_warnings.push(Diagnostic {
-                code: "W0001".into(),
+                code: codes::W0001_CASING.into(),
                 message: format!(
                     "identifier `{text}` should be `PascalCase`; wrong casing is accepted but warned"
                 ),
@@ -683,6 +715,10 @@ impl<'a> Lexer<'a> {
             });
         }
     }
+}
+
+fn is_whitespace_byte(c: u8) -> bool {
+    c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' || c == 0x0c
 }
 
 fn is_ident_continue(b: u8) -> bool {
@@ -731,6 +767,37 @@ mod tests {
     }
 
     #[test]
+    fn preserves_bare_cr_in_string() {
+        // Bare CR (not part of CRLF) must survive newline normalisation.
+        let result = lex("\"a\rb\"");
+        assert!(result.source.contains('\r'));
+        let TokenKind::String(s) = &result.tokens[0].kind else {
+            panic!("expected string token");
+        };
+        assert_eq!(s.value, "a\rb");
+    }
+
+    #[test]
+    fn bare_cr_is_whitespace_trivia() {
+        let result = lex("let\rx");
+        let x = result
+            .tokens
+            .iter()
+            .find(|t| matches!(&t.kind, TokenKind::Ident(n) if n == "x"))
+            .expect("ident x");
+        assert!(x
+            .leading
+            .iter()
+            .any(|t| t.kind == TriviaKind::Whitespace));
+        let ws = x
+            .leading
+            .iter()
+            .find(|t| t.kind == TriviaKind::Whitespace)
+            .unwrap();
+        assert!(result.source[ws.span.start.as_usize()..ws.span.end.as_usize()].contains('\r'));
+    }
+
+    #[test]
     fn lexes_keywords_and_idents() {
         let result = lex("pub fn add_one(x) { x; }");
         let kinds: Vec<_> = result
@@ -760,6 +827,44 @@ mod tests {
     }
 
     #[test]
+    fn number_glued_to_ident_is_error() {
+        let result = lex("123abc");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == codes::E0002_BAD_NUMBER),
+            "expected E0002, got {:?}",
+            result.diagnostics
+        );
+        // Trailing ident chars are consumed — no separate Ident token.
+        assert!(
+            !result
+                .tokens
+                .iter()
+                .any(|t| matches!(&t.kind, TokenKind::Ident(n) if n == "abc")),
+            "trailing ident should not be a separate token"
+        );
+    }
+
+    #[test]
+    fn scientific_without_dot_hints_float() {
+        let result = lex("1e10");
+        let d = result
+            .diagnostics
+            .iter()
+            .find(|d| d.code == codes::E0002_BAD_NUMBER)
+            .expect("E0002");
+        assert!(
+            d.hint
+                .as_deref()
+                .is_some_and(|h| h.contains("1.0e10")),
+            "hint was {:?}",
+            d.hint
+        );
+    }
+
+    #[test]
     fn preserves_comments_as_trivia() {
         let result = lex("// line\n/// doc\n//// module\nfn");
         let fn_tok = result
@@ -779,6 +884,10 @@ mod tests {
             .leading
             .iter()
             .any(|t| t.kind == TriviaKind::ModuleDocComment));
+        // Trivia has only kind + span (text recovered via source[span]).
+        for t in &fn_tok.leading {
+            let _ = (t.kind, t.span);
+        }
     }
 
     #[test]
@@ -789,5 +898,20 @@ mod tests {
             &result.tokens[1].kind,
             TokenKind::Ident(n) if n == "_name"
         ));
+    }
+
+    #[test]
+    fn unexpected_control_char_is_escaped_in_message() {
+        let result = lex("\u{1b}");
+        let d = result
+            .diagnostics
+            .iter()
+            .find(|d| d.code == codes::E0001_UNEXPECTED_CHAR)
+            .expect("E0001");
+        assert!(
+            !d.message.as_bytes().contains(&0x1b),
+            "raw ESC leaked into message: {:?}",
+            d.message
+        );
     }
 }
