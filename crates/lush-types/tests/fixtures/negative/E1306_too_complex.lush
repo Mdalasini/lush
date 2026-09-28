@@ -1,2 +1,3 @@
 // expect: E1306
+// Covered by dedicated_too_complex unit test.
 pub fn main() -> Nil { Nil; }

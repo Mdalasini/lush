@@ -1,0 +1,2 @@
+// expect: E1300
+pub fn f(r: Result(Int, String)) -> String { case r { Ok(n) -> n <> "x"; Error(e) -> e; }; }

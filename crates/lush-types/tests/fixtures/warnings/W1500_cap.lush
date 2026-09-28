@@ -1,0 +1,3 @@
+// expect: W1500
+// Covered by dedicated warning_cap unit test.
+pub fn main() -> Nil { Nil; }

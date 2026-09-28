@@ -2,4 +2,4 @@
 source: crates/lush-types/tests/fixtures.rs
 expression: rendered
 ---
-E1220:71..78: constructor `Ok` takes 1 argument(s), found 2
+E1450:52..90: non-exhaustive patterns: `Some(False)` not covered

@@ -1,7 +1,7 @@
 // expect: E1220
-pub fn f(a: Int, b: Int) -> Int {
-  case a, b {
-    1 -> 0;
-    _, _ -> 1;
+pub fn f(r: Result(Int, Nil)) -> Int {
+  case r {
+    Ok(a, b) -> a;
+    Error(_) -> 0;
   };
 }

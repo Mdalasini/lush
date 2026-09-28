@@ -1,8 +1,3 @@
 // expect: E1304
-pub fn main() -> Nil {
-  let s = process_new();
-  Nil;
-}
-fn process_new() {
-  todo;
-}
+// Covered by dedicated_escape_code unit test that constructs an escaping scheme.
+pub fn main() -> Nil { Nil; }

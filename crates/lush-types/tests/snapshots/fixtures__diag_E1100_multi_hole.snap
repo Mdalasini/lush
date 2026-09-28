@@ -2,5 +2,4 @@
 source: crates/lush-types/tests/fixtures.rs
 expression: rendered
 ---
-E0181:95..104: a call may contain at most one capture hole `_`
 E1100:95..104: exactly one `_` placeholder is allowed in a capture

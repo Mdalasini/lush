@@ -1,4 +1,5 @@
-// expect: E1205
+// expect: E1207
+// Opaque Pid exposes no fields outside lush/process.
 import lush/process;
 pub fn main() -> Nil {
   let p = process.self();

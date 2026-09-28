@@ -2,4 +2,4 @@
 source: crates/lush-types/tests/fixtures.rs
 expression: rendered
 ---
-E1000:57..58: unknown variable `f`
+E1012:57..58: anonymous function cannot refer to `f` being defined
