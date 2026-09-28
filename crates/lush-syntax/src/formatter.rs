@@ -407,7 +407,6 @@ impl<'a> Formatter<'a> {
             ExprKind::Float(f) => self.push(&f.raw),
             ExprKind::String(s) => self.push(&s.raw),
             ExprKind::Var(n) => self.push(&n.text),
-            ExprKind::Discard => self.push("_"),
             ExprKind::Constructor(c) => self.fmt_ctor(c),
             ExprKind::Tuple(elems) => {
                 self.push("#(");

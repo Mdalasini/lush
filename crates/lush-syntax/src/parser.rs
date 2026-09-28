@@ -1,9 +1,13 @@
 //! Recursive-descent parser for the full §12 grammar.
 
 use crate::ast::*;
+use crate::codes;
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 use crate::span::Span;
 use crate::token::{SpannedToken, StringLit, TokenKind};
+
+const MAX_ERRORS: usize = 100;
+const MAX_DEPTH: u32 = 256;
 
 pub struct ParseResult {
     pub module: Option<Module>,
@@ -53,6 +57,8 @@ struct Parser<'a> {
     tokens: &'a [SpannedToken],
     pos: usize,
     diagnostics: Vec<Diagnostic>,
+    depth: u32,
+    stopped: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -61,6 +67,8 @@ impl<'a> Parser<'a> {
             tokens,
             pos: 0,
             diagnostics: Vec::new(),
+            depth: 0,
+            stopped: false,
         }
     }
 
@@ -93,11 +101,11 @@ impl<'a> Parser<'a> {
             let span = self.span();
             self.error(
                 span,
-                "E0100",
+                codes::E0100_EXPECTED_TOKEN,
                 format!(
-                    "expected `{}`, found `{}`",
+                    "expected `{}`, found {}",
                     expected.as_str(),
-                    self.kind().as_str()
+                    self.kind().describe()
                 ),
                 Some(hint.to_string()),
             );
@@ -105,7 +113,29 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn error_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count()
+    }
+
     fn error(&mut self, span: Span, code: &str, message: impl Into<String>, hint: Option<String>) {
+        if self.stopped {
+            return;
+        }
+        if self.error_count() >= MAX_ERRORS {
+            self.diagnostics.push(Diagnostic {
+                code: codes::E0191_TOO_MANY_ERRORS.into(),
+                message: "too many errors; parsing stopped".into(),
+                span,
+                severity: Severity::Error,
+                hint: None,
+                kind: DiagnosticKind::Parser,
+            });
+            self.stopped = true;
+            return;
+        }
         self.diagnostics.push(Diagnostic {
             code: code.into(),
             message: message.into(),
@@ -116,10 +146,112 @@ impl<'a> Parser<'a> {
         });
     }
 
+    fn enter_depth(&mut self) -> bool {
+        if self.depth >= MAX_DEPTH {
+            self.error(
+                self.span(),
+                codes::E0190_TOO_DEEP,
+                "expression nesting is too deep",
+                Some(format!("maximum nesting depth is {MAX_DEPTH}")),
+            );
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
+    fn exit_depth(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    fn dummy_expr(&self) -> Expr {
+        Expr {
+            kind: ExprKind::Todo { message: None },
+            span: self.span(),
+        }
+    }
+
+    fn dummy_pattern(&self) -> Pattern {
+        Pattern {
+            kind: PatternKind::Discard,
+            span: self.span(),
+        }
+    }
+
+    fn dummy_type(&self) -> TypeExpr {
+        TypeExpr {
+            kind: TypeKind::Var(Name {
+                text: "_".into(),
+                span: self.span(),
+            }),
+            span: self.span(),
+        }
+    }
+
+    fn dummy_block(&self) -> Block {
+        Block {
+            statements: vec![],
+            span: self.span(),
+        }
+    }
+
+    /// Sync to the next module-level item keyword after an unexpected token.
+    fn sync_module_item(&mut self) {
+        if !matches!(self.kind(), TokenKind::Eof) {
+            self.bump();
+        }
+        while !matches!(
+            self.kind(),
+            TokenKind::Import
+                | TokenKind::Pub
+                | TokenKind::Fn
+                | TokenKind::Type
+                | TokenKind::Opaque
+                | TokenKind::Const
+                | TokenKind::Eof
+        ) {
+            self.bump();
+        }
+    }
+
+    /// Sync to the end of a statement (`;` consumed, or `}` left for the block).
+    fn sync_statement(&mut self) {
+        while !matches!(
+            self.kind(),
+            TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof
+        ) {
+            if self.stopped {
+                return;
+            }
+            self.bump();
+        }
+        if matches!(self.kind(), TokenKind::Semicolon) {
+            self.bump();
+        }
+    }
+
+    fn expect_semicolon_or_sync(&mut self, hint: &str) {
+        if matches!(self.kind(), TokenKind::Semicolon) {
+            self.bump();
+        } else {
+            let span = self.span();
+            self.error(
+                span,
+                codes::E0100_EXPECTED_TOKEN,
+                format!("expected `;`, found {}", self.kind().describe()),
+                Some(hint.to_string()),
+            );
+            self.sync_statement();
+        }
+    }
+
     fn parse_module(&mut self) -> Module {
         let start = self.span();
         let mut items = Vec::new();
         while !matches!(self.kind(), TokenKind::Eof) {
+            if self.stopped {
+                break;
+            }
             match self.kind() {
                 TokenKind::Import => items.push(ModuleItem::Import(self.parse_import())),
                 TokenKind::Pub => {
@@ -143,11 +275,11 @@ impl<'a> Parser<'a> {
                         _ => {
                             self.error(
                                 self.span(),
-                                "E0101",
+                                codes::E0101_AFTER_PUB,
                                 "expected `fn`, `const`, `type`, or `opaque` after `pub`",
                                 Some("write `pub fn`, `pub const`, or `pub type`".into()),
                             );
-                            self.bump();
+                            self.sync_module_item();
                         }
                     }
                 }
@@ -159,14 +291,14 @@ impl<'a> Parser<'a> {
                 _ => {
                     self.error(
                         self.span(),
-                        "E0102",
-                        format!("expected a module item, found `{}`", self.kind().as_str()),
+                        codes::E0102_MODULE_ITEM,
+                        format!(
+                            "expected a module item, found {}",
+                            self.kind().describe()
+                        ),
                         Some("modules contain `import`, `fn`, `type`, and `const` items".into()),
                     );
-                    self.bump();
-                    if matches!(self.kind(), TokenKind::Eof) {
-                        break;
-                    }
+                    self.sync_module_item();
                 }
             }
         }
@@ -255,7 +387,7 @@ impl<'a> Parser<'a> {
             _ => {
                 self.error(
                     self.span(),
-                    "E0103",
+                    codes::E0103_IMPORT_PATH,
                     "expected an import path segment",
                     Some("paths look like `lush/list` or `github.com/user/repo`".into()),
                 );
@@ -390,9 +522,10 @@ impl<'a> Parser<'a> {
         let start = self.span();
         // [ident] ident [: type]
         // Could be: name | label name | name: Type | label name: Type
-        let first = self.parse_name();
-        let (label, name) = if matches!(self.kind(), TokenKind::Ident(_)) {
-            let second = self.parse_name();
+        // Parameter names may be `_` (unused); function/const names may not.
+        let first = self.parse_name_allowing_discard();
+        let (label, name) = if matches!(self.kind(), TokenKind::Ident(_) | TokenKind::Discard) {
+            let second = self.parse_name_allowing_discard();
             (Some(first), second)
         } else {
             (None, first)
@@ -531,34 +664,51 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_block(&mut self) -> Block {
+        if !self.enter_depth() {
+            return self.dummy_block();
+        }
         let start = self.expect(TokenKind::LBrace, "blocks start with `{`");
         let mut statements = Vec::new();
         while !matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
-            // Local function: no trailing semicolon.
+            if self.stopped {
+                break;
+            }
+            // `fn (` — anonymous function in statement position (expression + `;`).
+            // `fn name` — named local function (no trailing semicolon).
             if matches!(self.kind(), TokenKind::Fn) {
-                statements.push(Statement::Fn(self.parse_fn_def()));
+                let anon = self.pos + 1 < self.tokens.len()
+                    && matches!(self.tokens[self.pos + 1].kind, TokenKind::LParen);
+                if anon {
+                    let expr = self.parse_expression(0);
+                    self.expect_semicolon_or_sync(
+                        "every expression statement ends with `;`, even the last one and even across a newline",
+                    );
+                    statements.push(Statement::Expr(expr));
+                } else {
+                    statements.push(Statement::Fn(self.parse_fn_def()));
+                }
                 continue;
             }
             if matches!(self.kind(), TokenKind::Let) {
                 let stmt = self.parse_let_stmt();
-                self.expect(TokenKind::Semicolon, "every `let` statement ends with `;`");
+                self.expect_semicolon_or_sync("every `let` statement ends with `;`");
                 statements.push(Statement::Let(stmt));
                 continue;
             }
             if matches!(self.kind(), TokenKind::Use) {
                 let stmt = self.parse_use_stmt();
-                self.expect(TokenKind::Semicolon, "every `use` statement ends with `;`");
+                self.expect_semicolon_or_sync("every `use` statement ends with `;`");
                 statements.push(Statement::Use(stmt));
                 continue;
             }
             let expr = self.parse_expression(0);
-            self.expect(
-                TokenKind::Semicolon,
+            self.expect_semicolon_or_sync(
                 "every expression statement ends with `;`, even the last one and even across a newline",
             );
             statements.push(Statement::Expr(expr));
         }
         let end = self.expect(TokenKind::RBrace, "close the block with `}`");
+        self.exit_depth();
         Block {
             statements,
             span: start.merge(end),
@@ -628,8 +778,14 @@ impl<'a> Parser<'a> {
     // ----- expressions (Pratt) -----
 
     fn parse_expression(&mut self, min_prec: u8) -> Expr {
+        if !self.enter_depth() {
+            return self.dummy_expr();
+        }
         let mut left = self.parse_prefix();
         loop {
+            if self.stopped {
+                break;
+            }
             // Postfix: call and field access (prec 11/12), left-to-right chain.
             if matches!(self.kind(), TokenKind::LParen) && min_prec <= 11 {
                 left = self.parse_call(left);
@@ -673,7 +829,7 @@ impl<'a> Parser<'a> {
                     if next_prec == prec && next_op.is_comparison_or_eq() {
                         self.error(
                             self.span(),
-                            "E0110",
+                            codes::E0110_CHAINED_CMP,
                             "chained comparisons or equality are not allowed",
                             Some("add parentheses, for example `(a < b) == True`".into()),
                         );
@@ -689,6 +845,7 @@ impl<'a> Parser<'a> {
                 },
             };
         }
+        self.exit_depth();
         left
     }
 
@@ -750,9 +907,15 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Discard => {
                 let span = self.span();
+                self.error(
+                    span,
+                    codes::E0180_DISCARD_EXPR,
+                    "`_` cannot be used as an expression",
+                    Some("`_` is only valid as a pattern discard or a call capture hole".into()),
+                );
                 self.bump();
                 Expr {
-                    kind: ExprKind::Discard,
+                    kind: ExprKind::Todo { message: None },
                     span,
                 }
             }
@@ -864,8 +1027,8 @@ impl<'a> Parser<'a> {
                 let span = self.span();
                 self.error(
                     span,
-                    "E0120",
-                    format!("expected an expression, found `{}`", other.as_str()),
+                    codes::E0120_EXPECTED_EXPR,
+                    format!("expected an expression, found {}", other.describe()),
                     Some(
                         "expressions include literals, calls, `case`, blocks, and operators".into(),
                     ),
@@ -897,7 +1060,7 @@ impl<'a> Parser<'a> {
             _ => {
                 self.error(
                     self.span(),
-                    "E0121",
+                    codes::E0121_EXPECTED_STRING,
                     "expected a string literal",
                     Some("write a message in double quotes".into()),
                 );
@@ -924,6 +1087,18 @@ impl<'a> Parser<'a> {
                 }
                 break;
             }
+        }
+        let hole_count = args
+            .iter()
+            .filter(|a| matches!(a.value, ArgValue::Hole))
+            .count();
+        if hole_count > 1 {
+            self.error(
+                callee.span.merge(self.span()),
+                codes::E0181_MULTI_HOLE,
+                "a call may contain at most one capture hole `_`",
+                Some("write separate partial calls, or use a lambda".into()),
+            );
         }
         let end = self.expect(TokenKind::RParen, "close the call with `)`");
         Expr {
@@ -995,7 +1170,7 @@ impl<'a> Parser<'a> {
             _ => {
                 self.error(
                     self.span(),
-                    "E0122",
+                    codes::E0122_EXPECTED_FIELD,
                     "expected a field or constructor name after `.`",
                     Some("write `value.field` or `module.Constructor`".into()),
                 );
@@ -1091,7 +1266,7 @@ impl<'a> Parser<'a> {
                 if !matches!(self.kind(), TokenKind::RBracket) {
                     self.error(
                         self.span(),
-                        "E0130",
+                        codes::E0130_SPREAD_FINAL,
                         "list spread must be the final element",
                         Some("write `[x, ..xs]` or `[..xs]`, not `[..xs, x]`".into()),
                     );
@@ -1116,7 +1291,7 @@ impl<'a> Parser<'a> {
             if matches!(self.kind(), TokenKind::DotDot) {
                 self.error(
                     self.span(),
-                    "E0131",
+                    codes::E0131_SPREAD_COMMA,
                     "missing comma before list spread",
                     Some("write `[x, ..xs]` with a comma before `..`".into()),
                 );
@@ -1141,7 +1316,7 @@ impl<'a> Parser<'a> {
                         if !matches!(self.kind(), TokenKind::RBracket) {
                             self.error(
                                 self.span(),
-                                "E0130",
+                                codes::E0130_SPREAD_FINAL,
                                 "list spread must be the final element",
                                 Some("write `[x, ..xs]`; nothing may follow the spread".into()),
                             );
@@ -1168,7 +1343,7 @@ impl<'a> Parser<'a> {
             self.bump();
             self.error(
                 start.merge(end),
-                "E0132",
+                codes::E0132_TUPLE_ARITY,
                 "tuples need at least two elements",
                 Some("write `#(a, b)`; `#()` is not valid".into()),
             );
@@ -1183,7 +1358,7 @@ impl<'a> Parser<'a> {
             let end = self.expect(TokenKind::RParen, "close the tuple with `)`");
             self.error(
                 start.merge(end),
-                "E0132",
+                codes::E0132_TUPLE_ARITY,
                 "tuples need at least two elements",
                 Some("write `#(a, b)`; `#(a)` is not valid".into()),
             );
@@ -1204,7 +1379,7 @@ impl<'a> Parser<'a> {
         if elems.len() < 2 {
             self.error(
                 start.merge(end),
-                "E0132",
+                codes::E0132_TUPLE_ARITY,
                 "tuples need at least two elements",
                 Some("write `#(a, b)`".into()),
             );
@@ -1275,13 +1450,28 @@ impl<'a> Parser<'a> {
                 BitOption::Size(expr)
             }
             TokenKind::Ident(name) => {
+                let span = self.span();
                 self.bump();
+                const KNOWN: &[&str] = &[
+                    "signed", "unsigned", "big", "little", "utf8", "bytes", "bits", "size",
+                ];
+                if !KNOWN.contains(&name.as_str()) {
+                    self.error(
+                        span,
+                        codes::E0134_UNKNOWN_BIT_OPTION,
+                        format!("unknown bit-array segment option `{name}`"),
+                        Some(
+                            "options are `size(n)`, `signed`, `unsigned`, `big`, `little`, `utf8`, `bytes`, `bits`"
+                                .into(),
+                        ),
+                    );
+                }
                 BitOption::Named(name)
             }
             _ => {
                 self.error(
                     self.span(),
-                    "E0133",
+                    codes::E0133_BIT_OPTION,
                     "expected a bit-array segment option",
                     Some("options include `size(n)`, `utf8`, `bytes`, `bits`, `signed`, `unsigned`, `big`, `little`".into()),
                 );
@@ -1384,7 +1574,7 @@ impl<'a> Parser<'a> {
         if patterns.len() != subject_count {
             self.error(
                 start.merge(patterns.last().map(|p| p.span).unwrap_or(start)),
-                "E0140",
+                codes::E0140_CASE_ARITY,
                 format!(
                     "case arm has {} pattern(s) but there are {subject_count} subject(s)",
                     patterns.len()
@@ -1402,6 +1592,9 @@ impl<'a> Parser<'a> {
     // ----- patterns -----
 
     fn parse_pattern(&mut self) -> Pattern {
+        if !self.enter_depth() {
+            return self.dummy_pattern();
+        }
         let mut pat = self.parse_pattern_primary();
         // String prefix: "hello " <> name
         if matches!(self.kind(), TokenKind::LtGt) {
@@ -1429,6 +1622,7 @@ impl<'a> Parser<'a> {
                 },
             };
         }
+        self.exit_depth();
         pat
     }
 
@@ -1550,8 +1744,8 @@ impl<'a> Parser<'a> {
                 let span = self.span();
                 self.error(
                     span,
-                    "E0150",
-                    format!("expected a pattern, found `{}`", self.kind().as_str()),
+                    codes::E0150_EXPECTED_PATTERN,
+                    format!("expected a pattern, found {}", self.kind().describe()),
                     Some(
                         "patterns include literals, variables, constructors, lists, and tuples"
                             .into(),
@@ -1636,7 +1830,7 @@ impl<'a> Parser<'a> {
         if elems.len() < 2 {
             self.error(
                 start.merge(end),
-                "E0132",
+                codes::E0132_TUPLE_ARITY,
                 "tuples need at least two elements",
                 Some("write `#(a, b)`".into()),
             );
@@ -1668,7 +1862,7 @@ impl<'a> Parser<'a> {
                 if !matches!(self.kind(), TokenKind::RBracket) {
                     self.error(
                         self.span(),
-                        "E0130",
+                        codes::E0130_SPREAD_FINAL,
                         "list spread must be the final element",
                         Some("write `[x, ..xs]` or `[..xs]`".into()),
                     );
@@ -1689,7 +1883,7 @@ impl<'a> Parser<'a> {
             if matches!(self.kind(), TokenKind::DotDot) {
                 self.error(
                     self.span(),
-                    "E0131",
+                    codes::E0131_SPREAD_COMMA,
                     "missing comma before list spread",
                     Some("write `[x, ..xs]` with a comma before `..`".into()),
                 );
@@ -1773,6 +1967,15 @@ impl<'a> Parser<'a> {
     // ----- types -----
 
     fn parse_type(&mut self) -> TypeExpr {
+        if !self.enter_depth() {
+            return self.dummy_type();
+        }
+        let result = self.parse_type_inner();
+        self.exit_depth();
+        result
+    }
+
+    fn parse_type_inner(&mut self) -> TypeExpr {
         match self.kind().clone() {
             TokenKind::Fn => {
                 let start = self.span();
@@ -1810,18 +2013,28 @@ impl<'a> Parser<'a> {
                 let start = self.span();
                 self.bump();
                 let mut elems = Vec::new();
-                loop {
-                    elems.push(self.parse_type());
-                    if matches!(self.kind(), TokenKind::Comma) {
-                        self.bump();
-                        if matches!(self.kind(), TokenKind::RParen) {
-                            break;
+                if !matches!(self.kind(), TokenKind::RParen) {
+                    loop {
+                        elems.push(self.parse_type());
+                        if matches!(self.kind(), TokenKind::Comma) {
+                            self.bump();
+                            if matches!(self.kind(), TokenKind::RParen) {
+                                break;
+                            }
+                            continue;
                         }
-                        continue;
+                        break;
                     }
-                    break;
                 }
                 let end = self.expect(TokenKind::RParen, "close the tuple type with `)`");
+                if elems.len() < 2 {
+                    self.error(
+                        start.merge(end),
+                        codes::E0132_TUPLE_ARITY,
+                        "tuples need at least two elements",
+                        Some("write `#(a, b)`; `#()` and `#(a)` are not valid".into()),
+                    );
+                }
                 TypeExpr {
                     span: start.merge(end),
                     kind: TypeKind::Tuple(elems),
@@ -1856,8 +2069,8 @@ impl<'a> Parser<'a> {
                 let span = self.span();
                 self.error(
                     span,
-                    "E0160",
-                    format!("expected a type, found `{}`", self.kind().as_str()),
+                    codes::E0160_EXPECTED_TYPE,
+                    format!("expected a type, found {}", self.kind().describe()),
                     Some("types include `Int`, `List(a)`, `fn(a) -> b`, and `#(a, b)`".into()),
                 );
                 self.bump();
@@ -1913,6 +2126,12 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Discard => {
                 let span = self.span();
+                self.error(
+                    span,
+                    codes::E0172_DISCARD_NAME,
+                    "`_` cannot be used as a binding name here",
+                    Some("`_` is allowed in patterns and as an unused parameter, not as a definition name".into()),
+                );
                 self.bump();
                 Name {
                     text: "_".into(),
@@ -1923,8 +2142,40 @@ impl<'a> Parser<'a> {
                 let span = self.span();
                 self.error(
                     span,
-                    "E0170",
-                    format!("expected a name, found `{}`", self.kind().as_str()),
+                    codes::E0170_EXPECTED_NAME,
+                    format!("expected a name, found {}", self.kind().describe()),
+                    Some("names start with a lowercase letter or underscore".into()),
+                );
+                Name {
+                    text: String::new(),
+                    span,
+                }
+            }
+        }
+    }
+
+    /// Like `parse_name`, but accepts bare `_` (for unused parameters).
+    fn parse_name_allowing_discard(&mut self) -> Name {
+        match self.kind().clone() {
+            TokenKind::Ident(text) => {
+                let span = self.span();
+                self.bump();
+                Name { text, span }
+            }
+            TokenKind::Discard => {
+                let span = self.span();
+                self.bump();
+                Name {
+                    text: "_".into(),
+                    span,
+                }
+            }
+            _ => {
+                let span = self.span();
+                self.error(
+                    span,
+                    codes::E0170_EXPECTED_NAME,
+                    format!("expected a name, found {}", self.kind().describe()),
                     Some("names start with a lowercase letter or underscore".into()),
                 );
                 Name {
@@ -1946,10 +2197,10 @@ impl<'a> Parser<'a> {
                 let span = self.span();
                 self.error(
                     span,
-                    "E0171",
+                    codes::E0171_EXPECTED_UNAME,
                     format!(
-                        "expected a type/constructor name, found `{}`",
-                        self.kind().as_str()
+                        "expected a type/constructor name, found {}",
+                        self.kind().describe()
                     ),
                     Some("type and constructor names are PascalCase".into()),
                 );

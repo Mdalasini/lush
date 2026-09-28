@@ -165,7 +165,6 @@ pub enum ExprKind {
     Var(Name),
     /// Constructor or type name used as a value (nullary).
     Constructor(ConstructorRef),
-    Discard,
     Tuple(Vec<Expr>),
     List {
         items: Vec<Expr>,
@@ -623,7 +622,6 @@ pub mod equiv {
             ExprKind::String(s) => ExprKind::String(s.clone()),
             ExprKind::Var(n) => ExprKind::Var(strip_name(n)),
             ExprKind::Constructor(c) => ExprKind::Constructor(strip_ctor(c)),
-            ExprKind::Discard => ExprKind::Discard,
             ExprKind::Tuple(items) => ExprKind::Tuple(items.iter().map(strip_expr).collect()),
             ExprKind::List { items, spread } => ExprKind::List {
                 items: items.iter().map(strip_expr).collect(),

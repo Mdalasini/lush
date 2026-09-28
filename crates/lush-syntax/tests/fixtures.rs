@@ -206,3 +206,24 @@ fn round_trip_equivalence_helper() {
     let b = parse_module(&formatted).module.unwrap();
     assert!(equiv::modules_eq(&a, &b));
 }
+
+#[test]
+fn deep_nesting_does_not_abort() {
+    let inner = format!("{}1{}", "(".repeat(300), ")".repeat(300));
+    let src = format!("pub fn f() {{ {inner}; }}\n");
+    let outcome = parse_module(&src);
+    assert!(
+        outcome
+            .diagnostics
+            .iter()
+            .any(|d| d.code == lush_syntax::codes::E0190_TOO_DEEP),
+        "expected E0190 for deep nesting, got: {:?}",
+        outcome
+            .diagnostics
+            .iter()
+            .map(|d| &d.code)
+            .collect::<Vec<_>>()
+    );
+    // Must complete without aborting / panicking.
+    assert!(!outcome.ok());
+}
