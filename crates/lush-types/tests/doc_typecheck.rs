@@ -337,6 +337,60 @@ pub fn main() -> Int {
 }
 
 #[test]
+fn rejects_non_constant_ident_in_const() {
+    let err = typecheck_source(
+        r#"
+pub fn f() -> Int { 1; }
+const c = f;
+pub fn main() { Nil; }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("not a constant reference")
+        )),
+        "expected non-constant reference error, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_echo_in_const() {
+    let err = typecheck_source(
+        r#"
+const c = echo 1;
+pub fn main() { Nil; }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("echo")
+        )),
+        "expected echo-in-constant error, got {err:?}"
+    );
+}
+
+#[test]
+fn accepts_constructor_pattern_with_spread() {
+    typecheck_source(
+        r#"
+pub type User {
+  User(name: String, age: Int)
+}
+pub fn main(u: User) -> String {
+  case u {
+    User(name: n, ..) -> n;
+  };
+}
+"#,
+    )
+    .expect("spread constructor pattern should type-check");
+}
+
+#[test]
 fn rejects_const_division_by_zero() {
     let err = typecheck_source(
         r#"

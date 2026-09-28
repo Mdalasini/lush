@@ -54,6 +54,8 @@ struct Checker {
     fn_labels: HashMap<String, Vec<Option<String>>>,
     /// Alias expansion stack for cycle detection.
     alias_stack: Vec<String>,
+    /// Names of module-level constants (for constant-expression validation).
+    const_names: HashSet<String>,
 }
 
 impl Checker {
@@ -68,6 +70,7 @@ impl Checker {
             type_vars: HashMap::new(),
             fn_labels: HashMap::new(),
             alias_stack: Vec::new(),
+            const_names: HashSet::new(),
         }
     }
 
@@ -142,6 +145,7 @@ impl Checker {
             if let Definition::Const(c) = def {
                 let ty = self.fresh();
                 self.env.insert_mono(c.name.clone(), ty);
+                self.const_names.insert(c.name.clone());
             }
         }
 
@@ -301,7 +305,7 @@ impl Checker {
     }
 
     fn check_const(&mut self, c: &ConstDef) {
-        if let Err(e) = check_const_expr(&c.value) {
+        if let Err(e) = check_const_expr(&c.value, &self.const_names) {
             self.errors.push(e);
         }
         let inferred = self.infer_expr(&c.value);
@@ -467,59 +471,73 @@ impl Checker {
                 module,
                 name,
                 fields,
-                ..
+                with_spread,
             } => {
-                let ctor_ty = if module.is_some() {
+                if module.is_some() {
                     // Qualified constructor from an imported module stub.
-                    let field_tys: Vec<Type> = fields.iter().map(|_| self.fresh()).collect();
-                    if field_tys.is_empty() {
-                        ty.clone()
-                    } else {
-                        Type::Fn {
-                            params: field_tys,
-                            ret: Box::new(ty.clone()),
-                        }
-                    }
-                } else if let Some(scheme) = self.ctors.get(name).cloned() {
-                    self.instantiate(&scheme)
-                } else if let Some(scheme) = self.env.get(name).cloned() {
-                    self.instantiate(&scheme)
-                } else {
-                    self.errors.push(TypeError::Unbound {
-                        span: pattern.span,
-                        name: name.clone(),
-                    });
-                    let field_tys: Vec<Type> = fields.iter().map(|_| self.fresh()).collect();
-                    if field_tys.is_empty() {
-                        ty.clone()
-                    } else {
-                        Type::Fn {
-                            params: field_tys,
-                            ret: Box::new(ty.clone()),
-                        }
-                    }
-                };
-                if fields.is_empty() {
-                    if let Err(e) = unify(&mut self.subst, &ctor_ty, &ty, pattern.span) {
-                        self.errors.push(e);
+                    for f in fields {
+                        let ft = self.fresh();
+                        self.bind_pattern(&f.pattern, &ft);
                     }
                 } else {
-                    let field_tys: Vec<Type> = fields.iter().map(|_| self.fresh()).collect();
-                    let expected = Type::Fn {
-                        params: field_tys.clone(),
-                        ret: Box::new(ty.clone()),
-                    };
-                    if let Err(e) = unify(&mut self.subst, &ctor_ty, &expected, pattern.span) {
-                        self.errors.push(e);
-                    }
-                    let labels = self.fn_labels.get(name).cloned();
-                    match reorder_pattern_fields(fields, labels.as_deref(), pattern.span) {
-                        Ok(ordered) => {
-                            for (f, ft) in ordered.iter().zip(field_tys.iter()) {
-                                self.bind_pattern(&f.pattern, ft);
+                    let ctor_ty = if let Some(scheme) = self.ctors.get(name).cloned() {
+                        self.instantiate(&scheme)
+                    } else if let Some(scheme) = self.env.get(name).cloned() {
+                        self.instantiate(&scheme)
+                    } else {
+                        self.errors.push(TypeError::Unbound {
+                            span: pattern.span,
+                            name: name.clone(),
+                        });
+                        let field_tys: Vec<Type> = fields.iter().map(|_| self.fresh()).collect();
+                        if field_tys.is_empty() && !*with_spread {
+                            ty.clone()
+                        } else {
+                            Type::Fn {
+                                params: field_tys,
+                                ret: Box::new(ty.clone()),
                             }
                         }
-                        Err(e) => self.errors.push(e),
+                    };
+                    let ctor_ty = apply(&self.subst, &ctor_ty);
+                    match ctor_ty {
+                        Type::Fn { params, ret } => {
+                            if let Err(e) = unify(&mut self.subst, &ret, &ty, pattern.span) {
+                                self.errors.push(e);
+                            }
+                            let labels = self.fn_labels.get(name).cloned();
+                            match align_pattern_fields(
+                                fields,
+                                labels.as_deref(),
+                                params.len(),
+                                *with_spread,
+                                pattern.span,
+                            ) {
+                                Ok(ordered) => {
+                                    for (slot, ft) in ordered.iter().zip(params.iter()) {
+                                        if let Some(f) = slot {
+                                            self.bind_pattern(&f.pattern, ft);
+                                        }
+                                    }
+                                }
+                                Err(e) => self.errors.push(e),
+                            }
+                        }
+                        other => {
+                            if fields.is_empty() {
+                                if let Err(e) = unify(&mut self.subst, &other, &ty, pattern.span)
+                                {
+                                    self.errors.push(e);
+                                }
+                            } else {
+                                self.errors.push(TypeError::Other {
+                                    span: pattern.span,
+                                    message: format!(
+                                        "constructor `{name}` does not take fields"
+                                    ),
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -1293,11 +1311,11 @@ enum ConstVal {
 /// Constant-expression check (`spec.md` §5.7 / constants).
 /// Validates shape and evaluates foldable arithmetic so division-by-zero and
 /// overflow are compile errors.
-fn check_const_expr(expr: &Expr) -> Result<(), TypeError> {
-    eval_const_expr(expr).map(|_| ())
+fn check_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<(), TypeError> {
+    eval_const_expr(expr, const_names).map(|_| ())
 }
 
-fn eval_const_expr(expr: &Expr) -> Result<ConstVal, TypeError> {
+fn eval_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<ConstVal, TypeError> {
     match &expr.kind {
         ExprKind::Int(lit) => {
             validate_int_literal(lit, expr.span)?;
@@ -1311,8 +1329,22 @@ fn eval_const_expr(expr: &Expr) -> Result<ConstVal, TypeError> {
             ))
         }
         ExprKind::String(s) => Ok(ConstVal::String(s.clone())),
-        ExprKind::Ident(_) | ExprKind::Constructor(_) => Ok(ConstVal::Opaque),
-        ExprKind::Group(inner) | ExprKind::Echo { value: inner } => eval_const_expr(inner),
+        ExprKind::Ident(name) => {
+            if const_names.contains(name) {
+                Ok(ConstVal::Opaque)
+            } else {
+                Err(TypeError::Other {
+                    span: expr.span,
+                    message: format!("`{name}` is not a constant reference"),
+                })
+            }
+        }
+        ExprKind::Constructor(_) => Ok(ConstVal::Opaque),
+        ExprKind::Group(inner) => eval_const_expr(inner, const_names),
+        ExprKind::Echo { .. } => Err(TypeError::Other {
+            span: expr.span,
+            message: "echo is not allowed in a constant".into(),
+        }),
         ExprKind::Unary { op, expr: inner } => match op {
             UnaryOp::Neg => {
                 // Direct `-9223372036854775808` denotes MIN_INT (§5.7); the positive
@@ -1323,7 +1355,7 @@ fn eval_const_expr(expr: &Expr) -> Result<ConstVal, TypeError> {
                         return Ok(ConstVal::Int(i64::MIN));
                     }
                 }
-                match eval_const_expr(inner)? {
+                match eval_const_expr(inner, const_names)? {
                     ConstVal::Int(i) => i.checked_neg().map(ConstVal::Int).ok_or_else(|| {
                         TypeError::Other {
                             span: expr.span,
@@ -1348,7 +1380,7 @@ fn eval_const_expr(expr: &Expr) -> Result<ConstVal, TypeError> {
                     }),
                 }
             }
-            UnaryOp::Not => match eval_const_expr(inner)? {
+            UnaryOp::Not => match eval_const_expr(inner, const_names)? {
                 ConstVal::Bool(b) => Ok(ConstVal::Bool(!b)),
                 ConstVal::Opaque => Ok(ConstVal::Opaque),
                 _ => Err(TypeError::Other {
@@ -1356,24 +1388,24 @@ fn eval_const_expr(expr: &Expr) -> Result<ConstVal, TypeError> {
                     message: "invalid operand for `!` in constant".into(),
                 }),
             },
-        }
+        },
         ExprKind::Binary { left, op, right } => {
-            let l = eval_const_expr(left)?;
-            let r = eval_const_expr(right)?;
+            let l = eval_const_expr(left, const_names)?;
+            let r = eval_const_expr(right, const_names)?;
             eval_const_binop(*op, l, r, expr.span)
         }
         ExprKind::Tuple(elems) => {
             for e in elems {
-                eval_const_expr(e)?;
+                eval_const_expr(e, const_names)?;
             }
             Ok(ConstVal::Opaque)
         }
         ExprKind::List { items, spread } => {
             for e in items {
-                eval_const_expr(e)?;
+                eval_const_expr(e, const_names)?;
             }
             if let Some(s) = spread {
-                eval_const_expr(s)?;
+                eval_const_expr(s, const_names)?;
             }
             Ok(ConstVal::Opaque)
         }
@@ -1387,7 +1419,7 @@ fn eval_const_expr(expr: &Expr) -> Result<ConstVal, TypeError> {
             }
             for a in args {
                 if let ArgValue::Expr(e) = &a.value {
-                    eval_const_expr(e)?;
+                    eval_const_expr(e, const_names)?;
                 }
             }
             Ok(ConstVal::Opaque)
@@ -1583,18 +1615,30 @@ fn parse_int_literal(lit: &str) -> Option<i64> {
     }
 }
 
-fn reorder_pattern_fields(
+/// Align constructor pattern fields to parameter order.
+/// When `with_spread` is set, omitted fields remain `None` instead of erroring.
+fn align_pattern_fields(
     fields: &[PatternField],
     labels: Option<&[Option<String>]>,
+    param_count: usize,
+    with_spread: bool,
     span: Span,
-) -> Result<Vec<PatternField>, TypeError> {
-    let Some(labels) = labels else {
-        return Ok(fields.to_vec());
-    };
-    if labels.iter().all(|l| l.is_none()) || fields.iter().all(|f| f.label.is_none()) {
-        return Ok(fields.to_vec());
+) -> Result<Vec<Option<PatternField>>, TypeError> {
+    let labelled = labels.is_some_and(|ls| ls.iter().any(|l| l.is_some()))
+        && fields.iter().any(|f| f.label.is_some());
+    if !labelled {
+        if fields.len() > param_count || (!with_spread && fields.len() != param_count) {
+            return Err(TypeError::Other {
+                span,
+                message: "constructor pattern field count mismatch".into(),
+            });
+        }
+        let mut slots: Vec<Option<PatternField>> = fields.iter().cloned().map(Some).collect();
+        slots.resize(param_count, None);
+        return Ok(slots);
     }
-    let mut slots: Vec<Option<PatternField>> = vec![None; labels.len()];
+    let labels = labels.expect("labelled branch");
+    let mut slots: Vec<Option<PatternField>> = vec![None; param_count.max(labels.len())];
     let mut unlabelled = Vec::new();
     for field in fields {
         if let Some(label) = &field.label {
@@ -1604,6 +1648,12 @@ fn reorder_pattern_fields(
                     message: format!("unknown field label `{label}`"),
                 });
             };
+            if idx >= slots.len() {
+                return Err(TypeError::Other {
+                    span: field.span,
+                    message: format!("unknown field label `{label}`"),
+                });
+            }
             if slots[idx].is_some() {
                 return Err(TypeError::Other {
                     span: field.span,
@@ -1630,7 +1680,19 @@ fn reorder_pattern_fields(
             message: "too many fields in constructor pattern".into(),
         });
     }
-    Ok(slots.into_iter().flatten().collect())
+    if !with_spread {
+        if slots.len() != param_count || slots.iter().any(|s| s.is_none()) {
+            return Err(TypeError::Other {
+                span,
+                message: "constructor pattern field count mismatch".into(),
+            });
+        }
+    } else if slots.len() > param_count {
+        slots.truncate(param_count);
+    } else {
+        slots.resize(param_count, None);
+    }
+    Ok(slots)
 }
 
 /// Reorder labelled arguments to match declaration label order.
