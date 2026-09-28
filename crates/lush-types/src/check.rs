@@ -1209,26 +1209,7 @@ fn is_irrefutable(pattern: &Pattern) -> bool {
 }
 
 fn validate_int_literal(lit: &str, span: Span) -> Result<(), TypeError> {
-    let cleaned: String = lit.chars().filter(|c| *c != '_').collect();
-    let parsed = if let Some(rest) = cleaned
-        .strip_prefix("0x")
-        .or_else(|| cleaned.strip_prefix("0X"))
-    {
-        i64::from_str_radix(rest, 16)
-    } else if let Some(rest) = cleaned
-        .strip_prefix("0o")
-        .or_else(|| cleaned.strip_prefix("0O"))
-    {
-        i64::from_str_radix(rest, 8)
-    } else if let Some(rest) = cleaned
-        .strip_prefix("0b")
-        .or_else(|| cleaned.strip_prefix("0B"))
-    {
-        i64::from_str_radix(rest, 2)
-    } else {
-        cleaned.parse::<i64>()
-    };
-    parsed.map(|_| ()).map_err(|_| TypeError::Other {
+    parse_int_literal(lit).map(|_| ()).ok_or_else(|| TypeError::Other {
         span,
         message: format!("integer literal `{lit}` out of Int range"),
     })
@@ -1298,35 +1279,103 @@ fn collect_const_refs(expr: &Expr, const_names: &HashSet<String>, out: &mut Hash
     }
 }
 
+/// Folded constant value used for evaluation-failure checks (`spec.md` §5.7).
+#[derive(Debug, Clone)]
+enum ConstVal {
+    Int(i64),
+    Float(f64),
+    String(String),
+    Bool(bool),
+    /// Well-formed but not folded further in this prototype.
+    Opaque,
+}
+
 /// Constant-expression check (`spec.md` §5.7 / constants).
+/// Validates shape and evaluates foldable arithmetic so division-by-zero and
+/// overflow are compile errors.
 fn check_const_expr(expr: &Expr) -> Result<(), TypeError> {
+    eval_const_expr(expr).map(|_| ())
+}
+
+fn eval_const_expr(expr: &Expr) -> Result<ConstVal, TypeError> {
     match &expr.kind {
-        ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::String(_)
-        | ExprKind::Ident(_)
-        | ExprKind::Constructor(_) => Ok(()),
-        ExprKind::Group(inner)
-        | ExprKind::Unary { expr: inner, .. }
-        | ExprKind::Echo { value: inner } => check_const_expr(inner),
-        ExprKind::Binary { left, right, .. } => {
-            check_const_expr(left)?;
-            check_const_expr(right)
+        ExprKind::Int(lit) => {
+            validate_int_literal(lit, expr.span)?;
+            Ok(ConstVal::Int(parse_int_literal(lit).expect("validated int")))
+        }
+        ExprKind::Float(lit) => {
+            validate_float_literal(lit, expr.span)?;
+            let cleaned = lit.replace('_', "");
+            Ok(ConstVal::Float(
+                cleaned.parse::<f64>().expect("validated float"),
+            ))
+        }
+        ExprKind::String(s) => Ok(ConstVal::String(s.clone())),
+        ExprKind::Ident(_) | ExprKind::Constructor(_) => Ok(ConstVal::Opaque),
+        ExprKind::Group(inner) | ExprKind::Echo { value: inner } => eval_const_expr(inner),
+        ExprKind::Unary { op, expr: inner } => match op {
+            UnaryOp::Neg => {
+                // Direct `-9223372036854775808` denotes MIN_INT (§5.7); the positive
+                // magnitude is not a valid standalone Int literal.
+                if let ExprKind::Int(lit) = &inner.kind {
+                    let cleaned: String = lit.chars().filter(|c| *c != '_').collect();
+                    if cleaned == "9223372036854775808" {
+                        return Ok(ConstVal::Int(i64::MIN));
+                    }
+                }
+                match eval_const_expr(inner)? {
+                    ConstVal::Int(i) => i.checked_neg().map(ConstVal::Int).ok_or_else(|| {
+                        TypeError::Other {
+                            span: expr.span,
+                            message: "integer overflow in constant".into(),
+                        }
+                    }),
+                    ConstVal::Float(f) => {
+                        let r = -f;
+                        if r.is_finite() {
+                            Ok(ConstVal::Float(r))
+                        } else {
+                            Err(TypeError::Other {
+                                span: expr.span,
+                                message: "float overflow in constant".into(),
+                            })
+                        }
+                    }
+                    ConstVal::Opaque => Ok(ConstVal::Opaque),
+                    _ => Err(TypeError::Other {
+                        span: expr.span,
+                        message: "invalid operand for negation in constant".into(),
+                    }),
+                }
+            }
+            UnaryOp::Not => match eval_const_expr(inner)? {
+                ConstVal::Bool(b) => Ok(ConstVal::Bool(!b)),
+                ConstVal::Opaque => Ok(ConstVal::Opaque),
+                _ => Err(TypeError::Other {
+                    span: expr.span,
+                    message: "invalid operand for `!` in constant".into(),
+                }),
+            },
+        }
+        ExprKind::Binary { left, op, right } => {
+            let l = eval_const_expr(left)?;
+            let r = eval_const_expr(right)?;
+            eval_const_binop(*op, l, r, expr.span)
         }
         ExprKind::Tuple(elems) => {
             for e in elems {
-                check_const_expr(e)?;
+                eval_const_expr(e)?;
             }
-            Ok(())
+            Ok(ConstVal::Opaque)
         }
         ExprKind::List { items, spread } => {
             for e in items {
-                check_const_expr(e)?;
+                eval_const_expr(e)?;
             }
             if let Some(s) = spread {
-                check_const_expr(s)?;
+                eval_const_expr(s)?;
             }
-            Ok(())
+            Ok(ConstVal::Opaque)
         }
         ExprKind::Call { callee, args } => {
             // ADT construction only; no general function calls in constants.
@@ -1338,10 +1387,10 @@ fn check_const_expr(expr: &Expr) -> Result<(), TypeError> {
             }
             for a in args {
                 if let ArgValue::Expr(e) = &a.value {
-                    check_const_expr(e)?;
+                    eval_const_expr(e)?;
                 }
             }
-            Ok(())
+            Ok(ConstVal::Opaque)
         }
         ExprKind::Fn { .. }
         | ExprKind::Pipe { .. }
@@ -1356,6 +1405,181 @@ fn check_const_expr(expr: &Expr) -> Result<(), TypeError> {
             span: expr.span,
             message: "expression is not allowed in a constant".into(),
         }),
+    }
+}
+
+fn eval_const_binop(op: BinOp, left: ConstVal, right: ConstVal, span: Span) -> Result<ConstVal, TypeError> {
+    match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            match (left, right) {
+                (ConstVal::Int(a), ConstVal::Int(b)) => {
+                    let result = match op {
+                        BinOp::Add => a.checked_add(b),
+                        BinOp::Sub => a.checked_sub(b),
+                        BinOp::Mul => a.checked_mul(b),
+                        BinOp::Div => {
+                            if b == 0 || (a == i64::MIN && b == -1) {
+                                return Err(TypeError::Other {
+                                    span,
+                                    message: "integer division error in constant".into(),
+                                });
+                            }
+                            Some(a / b)
+                        }
+                        BinOp::Rem => {
+                            if b == 0 || (a == i64::MIN && b == -1) {
+                                return Err(TypeError::Other {
+                                    span,
+                                    message: "integer remainder error in constant".into(),
+                                });
+                            }
+                            Some(a % b)
+                        }
+                        _ => unreachable!(),
+                    };
+                    result.map(ConstVal::Int).ok_or_else(|| TypeError::Other {
+                        span,
+                        message: "integer overflow in constant".into(),
+                    })
+                }
+                (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
+                _ => Err(TypeError::Other {
+                    span,
+                    message: "invalid operands for integer operator in constant".into(),
+                }),
+            }
+        }
+        BinOp::AddFloat | BinOp::SubFloat | BinOp::MulFloat | BinOp::DivFloat => {
+            match (left, right) {
+                (ConstVal::Float(a), ConstVal::Float(b)) => {
+                    if matches!(op, BinOp::DivFloat) && b == 0.0 {
+                        return Err(TypeError::Other {
+                            span,
+                            message: "float division by zero in constant".into(),
+                        });
+                    }
+                    let r = match op {
+                        BinOp::AddFloat => a + b,
+                        BinOp::SubFloat => a - b,
+                        BinOp::MulFloat => a * b,
+                        BinOp::DivFloat => a / b,
+                        _ => unreachable!(),
+                    };
+                    if r.is_finite() {
+                        Ok(ConstVal::Float(r))
+                    } else {
+                        Err(TypeError::Other {
+                            span,
+                            message: "float overflow in constant".into(),
+                        })
+                    }
+                }
+                (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
+                _ => Err(TypeError::Other {
+                    span,
+                    message: "invalid operands for float operator in constant".into(),
+                }),
+            }
+        }
+        BinOp::Concat => match (left, right) {
+            (ConstVal::String(a), ConstVal::String(b)) => Ok(ConstVal::String(a + &b)),
+            (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
+            _ => Err(TypeError::Other {
+                span,
+                message: "invalid operands for `<>` in constant".into(),
+            }),
+        },
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => match (left, right) {
+            (ConstVal::Int(a), ConstVal::Int(b)) => Ok(ConstVal::Bool(match op {
+                BinOp::Lt => a < b,
+                BinOp::Le => a <= b,
+                BinOp::Gt => a > b,
+                BinOp::Ge => a >= b,
+                _ => unreachable!(),
+            })),
+            (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
+            _ => Err(TypeError::Other {
+                span,
+                message: "invalid operands for integer comparison in constant".into(),
+            }),
+        },
+        BinOp::LtFloat | BinOp::LeFloat | BinOp::GtFloat | BinOp::GeFloat => {
+            match (left, right) {
+                (ConstVal::Float(a), ConstVal::Float(b)) => Ok(ConstVal::Bool(match op {
+                    BinOp::LtFloat => a < b,
+                    BinOp::LeFloat => a <= b,
+                    BinOp::GtFloat => a > b,
+                    BinOp::GeFloat => a >= b,
+                    _ => unreachable!(),
+                })),
+                (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
+                _ => Err(TypeError::Other {
+                    span,
+                    message: "invalid operands for float comparison in constant".into(),
+                }),
+            }
+        }
+        BinOp::Eq | BinOp::NotEq => match (left, right) {
+            (ConstVal::Int(a), ConstVal::Int(b)) => Ok(ConstVal::Bool(if op == BinOp::Eq {
+                a == b
+            } else {
+                a != b
+            })),
+            (ConstVal::Float(a), ConstVal::Float(b)) => Ok(ConstVal::Bool(if op == BinOp::Eq {
+                a == b
+            } else {
+                a != b
+            })),
+            (ConstVal::String(a), ConstVal::String(b)) => Ok(ConstVal::Bool(if op == BinOp::Eq {
+                a == b
+            } else {
+                a != b
+            })),
+            (ConstVal::Bool(a), ConstVal::Bool(b)) => Ok(ConstVal::Bool(if op == BinOp::Eq {
+                a == b
+            } else {
+                a != b
+            })),
+            (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
+            _ => Err(TypeError::Other {
+                span,
+                message: "invalid operands for equality in constant".into(),
+            }),
+        },
+        BinOp::And | BinOp::Or => match (left, right) {
+            (ConstVal::Bool(a), ConstVal::Bool(b)) => Ok(ConstVal::Bool(if op == BinOp::And {
+                a && b
+            } else {
+                a || b
+            })),
+            (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
+            _ => Err(TypeError::Other {
+                span,
+                message: "invalid operands for boolean operator in constant".into(),
+            }),
+        },
+    }
+}
+
+fn parse_int_literal(lit: &str) -> Option<i64> {
+    let cleaned: String = lit.chars().filter(|c| *c != '_').collect();
+    if let Some(rest) = cleaned
+        .strip_prefix("0x")
+        .or_else(|| cleaned.strip_prefix("0X"))
+    {
+        i64::from_str_radix(rest, 16).ok()
+    } else if let Some(rest) = cleaned
+        .strip_prefix("0o")
+        .or_else(|| cleaned.strip_prefix("0O"))
+    {
+        i64::from_str_radix(rest, 8).ok()
+    } else if let Some(rest) = cleaned
+        .strip_prefix("0b")
+        .or_else(|| cleaned.strip_prefix("0B"))
+    {
+        i64::from_str_radix(rest, 2).ok()
+    } else {
+        cleaned.parse::<i64>().ok()
     }
 }
 

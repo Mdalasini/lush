@@ -337,6 +337,24 @@ pub fn main() -> Int {
 }
 
 #[test]
+fn rejects_const_division_by_zero() {
+    let err = typecheck_source(
+        r#"
+const x = 1 / 0;
+pub fn main() { Nil; }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("division")
+        )),
+        "expected constant division error, got {err:?}"
+    );
+}
+
+#[test]
 fn rejects_cyclic_constants() {
     let err = typecheck_source(
         r#"
