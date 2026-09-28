@@ -144,6 +144,34 @@ pub fn main(x: Option(Int)) {
 }
 
 #[test]
+fn labelled_call_uses_param_names() {
+    typecheck_source(
+        r#"
+pub fn pair(s: String, n: Int) -> Int { n; }
+pub fn main() {
+  pair(n: 1, s: "x");
+}
+"#,
+    )
+    .expect("param names are external labels");
+}
+
+#[test]
+fn labelled_constructor_call_reorders() {
+    typecheck_source(
+        r#"
+pub type User {
+  User(name: String, age: Int)
+}
+pub fn main() -> User {
+  User(age: 1, name: "n");
+}
+"#,
+    )
+    .expect("labelled constructor fields reorder");
+}
+
+#[test]
 fn rejects_out_of_range_int() {
     let err = typecheck_source(
         r#"

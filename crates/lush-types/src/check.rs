@@ -129,7 +129,7 @@ impl Checker {
                 let ret = self.fresh();
                 self.fn_labels.insert(
                     f.name.clone(),
-                    f.params.iter().map(|p| p.label.clone()).collect(),
+                    f.params.iter().map(effective_param_label).collect(),
                 );
                 self.env.insert_mono(
                     f.name.clone(),
@@ -271,7 +271,7 @@ impl Checker {
 
         self.fn_labels.insert(
             f.name.clone(),
-            f.params.iter().map(|p| p.label.clone()).collect(),
+            f.params.iter().map(effective_param_label).collect(),
         );
 
         for (p, ty) in f.params.iter().zip(param_tys.iter()) {
@@ -307,7 +307,7 @@ impl Checker {
         self.fn_labels = saved_labels;
         self.fn_labels.insert(
             f.name.clone(),
-            f.params.iter().map(|p| p.label.clone()).collect(),
+            f.params.iter().map(effective_param_label).collect(),
         );
         if generalize_now {
             self.env.values.remove(&f.name);
@@ -800,7 +800,7 @@ impl Checker {
                             let ret = self.fresh();
                             self.fn_labels.insert(
                                 f.name.clone(),
-                                f.params.iter().map(|p| p.label.clone()).collect(),
+                                f.params.iter().map(effective_param_label).collect(),
                             );
                             self.env.insert_mono(
                                 f.name.clone(),
@@ -1021,6 +1021,11 @@ impl Checker {
             TypeKind::Tuple(elems) => Type::Tuple(elems.iter().map(|e| self.ast_type(e)).collect()),
         }
     }
+}
+
+/// External label for a parameter: explicit `label name` or the binding name.
+fn effective_param_label(p: &Param) -> Option<String> {
+    p.label.clone().or_else(|| Some(p.name.clone()))
 }
 
 fn is_irrefutable(pattern: &Pattern) -> bool {
