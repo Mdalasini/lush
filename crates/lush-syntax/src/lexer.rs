@@ -785,10 +785,7 @@ mod tests {
             .iter()
             .find(|t| matches!(&t.kind, TokenKind::Ident(n) if n == "x"))
             .expect("ident x");
-        assert!(x
-            .leading
-            .iter()
-            .any(|t| t.kind == TriviaKind::Whitespace));
+        assert!(x.leading.iter().any(|t| t.kind == TriviaKind::Whitespace));
         let ws = x
             .leading
             .iter()
@@ -856,9 +853,7 @@ mod tests {
             .find(|d| d.code == codes::E0002_BAD_NUMBER)
             .expect("E0002");
         assert!(
-            d.hint
-                .as_deref()
-                .is_some_and(|h| h.contains("1.0e10")),
+            d.hint.as_deref().is_some_and(|h| h.contains("1.0e10")),
             "hint was {:?}",
             d.hint
         );

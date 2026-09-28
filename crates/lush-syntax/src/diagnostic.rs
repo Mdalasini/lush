@@ -148,10 +148,7 @@ mod tests {
 
     #[test]
     fn escape_injects_no_raw_esc() {
-        let msg = format!(
-            "unexpected character `{}`",
-            escape_for_message('\u{1b}')
-        );
+        let msg = format!("unexpected character `{}`", escape_for_message('\u{1b}'));
         assert!(!msg.as_bytes().contains(&0x1b));
         assert!(msg.contains("\\u{1b}") || msg.contains("\\x1b"));
     }
