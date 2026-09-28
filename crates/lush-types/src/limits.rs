@@ -13,10 +13,13 @@ pub const MAX_MODULES: usize = 10_000;
 pub const MAX_DEFS_PER_MODULE: usize = 50_000;
 
 /// Approximate AST node budget per module (expressions + patterns + types).
-pub const MAX_NODES_PER_MODULE: usize = 1_000_000;
+pub const MAX_NODES_PER_MODULE: usize = 100_000;
 
 /// Exhaustiveness work units before the match is rejected as too complex.
 pub const MAX_EXHAUST_WORK: u64 = 250_000;
+
+/// Maximum warnings retained across a module graph (then W1500).
+pub const MAX_WARNINGS: usize = 100;
 
 /// Type-printing depth before elision.
 pub const MAX_PRINT_DEPTH: usize = 32;

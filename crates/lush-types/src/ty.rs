@@ -1,7 +1,11 @@
 //! Internal type representation, schemes, and sealed constraints.
+//!
+//! Compound types use [`Rc`] so DAG-shaped types (e.g. let-doubling) share
+//! structure; zonk / free_vars / display walk with a pointer-keyed memo.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::limits::{MAX_PRINT_DEPTH, MAX_PRINT_NODES};
@@ -82,16 +86,16 @@ pub enum Type {
     Bool,
     Nil,
     BitArray,
-    List(Box<Type>),
-    Tuple(Vec<Type>),
+    List(Rc<Type>),
+    Tuple(Vec<Rc<Type>>),
     Fun {
-        params: Vec<Type>,
-        ret: Box<Type>,
+        params: Vec<Rc<Type>>,
+        ret: Rc<Type>,
     },
     /// Nominal application of an ADT or opaque type.
     App {
         def: TypeDefId,
-        args: Vec<Type>,
+        args: Vec<Rc<Type>>,
     },
 }
 
@@ -99,7 +103,33 @@ impl Type {
     pub fn unit_fun() -> Type {
         Type::Fun {
             params: vec![],
-            ret: Box::new(Type::Nil),
+            ret: Rc::new(Type::Nil),
+        }
+    }
+
+    pub fn list(elem: Type) -> Type {
+        Type::List(Rc::new(elem))
+    }
+
+    pub fn tuple(elems: Vec<Type>) -> Type {
+        Type::Tuple(elems.into_iter().map(Rc::new).collect())
+    }
+
+    pub fn tuple_shared(elems: Vec<Rc<Type>>) -> Type {
+        Type::Tuple(elems)
+    }
+
+    pub fn fun(params: Vec<Type>, ret: Type) -> Type {
+        Type::Fun {
+            params: params.into_iter().map(Rc::new).collect(),
+            ret: Rc::new(ret),
+        }
+    }
+
+    pub fn app(def: TypeDefId, args: Vec<Type>) -> Type {
+        Type::App {
+            def,
+            args: args.into_iter().map(Rc::new).collect(),
         }
     }
 }
@@ -214,55 +244,147 @@ impl TypeStore {
     }
 
     pub fn zonk(&mut self, ty: &Type) -> Type {
-        self.work = self.work.saturating_add(1);
-        match ty {
+        let mut memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
+        (*self.zonk_rc(&Rc::new(ty.clone()), &mut memo)).clone()
+    }
+
+    /// Zonk a shared type node, memoising by `Rc` pointer so DAG walks are linear.
+    pub fn zonk_rc(
+        &mut self,
+        ty: &Rc<Type>,
+        memo: &mut HashMap<*const Type, Rc<Type>>,
+    ) -> Rc<Type> {
+        let ptr = Rc::as_ptr(ty);
+        if let Some(z) = memo.get(&ptr) {
+            return z.clone();
+        }
+        let result = match ty.as_ref() {
             Type::Var(id) => {
                 if let Some(info) = self.vars.get(id) {
                     if let Some(link) = info.link.clone() {
-                        let z = self.zonk(&link);
+                        let z = self.zonk_rc(&Rc::new(link), memo);
                         if let Some(info) = self.vars.get_mut(id) {
-                            info.link = Some(z.clone());
+                            info.link = Some((*z).clone());
                         }
+                        // Don't insert the Var node's ptr → linked type; callers see the link.
                         return z;
                     }
                 }
-                Type::Var(*id)
+                ty.clone()
             }
-            Type::List(t) => Type::List(Box::new(self.zonk(t))),
-            Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| self.zonk(t)).collect()),
-            Type::Fun { params, ret } => Type::Fun {
-                params: params.iter().map(|t| self.zonk(t)).collect(),
-                ret: Box::new(self.zonk(ret)),
-            },
-            Type::App { def, args } => Type::App {
-                def: *def,
-                args: args.iter().map(|t| self.zonk(t)).collect(),
-            },
-            other => other.clone(),
-        }
+            Type::List(t) => {
+                let zt = self.zonk_rc(t, memo);
+                if Rc::ptr_eq(&zt, t) {
+                    ty.clone()
+                } else {
+                    Rc::new(Type::List(zt))
+                }
+            }
+            Type::Tuple(ts) => {
+                let mut changed = false;
+                let mut zs = Vec::with_capacity(ts.len());
+                for t in ts {
+                    let z = self.zonk_rc(t, memo);
+                    if !Rc::ptr_eq(&z, t) {
+                        changed = true;
+                    }
+                    zs.push(z);
+                }
+                if changed {
+                    Rc::new(Type::Tuple(zs))
+                } else {
+                    ty.clone()
+                }
+            }
+            Type::Fun { params, ret } => {
+                let mut changed = false;
+                let mut zs = Vec::with_capacity(params.len());
+                for p in params {
+                    let z = self.zonk_rc(p, memo);
+                    if !Rc::ptr_eq(&z, p) {
+                        changed = true;
+                    }
+                    zs.push(z);
+                }
+                let zr = self.zonk_rc(ret, memo);
+                if !Rc::ptr_eq(&zr, ret) {
+                    changed = true;
+                }
+                if changed {
+                    Rc::new(Type::Fun {
+                        params: zs,
+                        ret: zr,
+                    })
+                } else {
+                    ty.clone()
+                }
+            }
+            Type::App { def, args } => {
+                let mut changed = false;
+                let mut zs = Vec::with_capacity(args.len());
+                for a in args {
+                    let z = self.zonk_rc(a, memo);
+                    if !Rc::ptr_eq(&z, a) {
+                        changed = true;
+                    }
+                    zs.push(z);
+                }
+                if changed {
+                    Rc::new(Type::App {
+                        def: *def,
+                        args: zs,
+                    })
+                } else {
+                    ty.clone()
+                }
+            }
+            _ => ty.clone(),
+        };
+        memo.insert(ptr, result.clone());
+        result
     }
 
     pub fn free_vars(&mut self, ty: &Type, out: &mut BTreeSet<TvId>) {
-        let z = self.zonk(ty);
-        match z {
+        let mut visited: HashMap<*const Type, ()> = HashMap::new();
+        self.free_vars_rc(&Rc::new(ty.clone()), out, &mut visited);
+    }
+
+    fn free_vars_rc(
+        &mut self,
+        ty: &Rc<Type>,
+        out: &mut BTreeSet<TvId>,
+        visited: &mut HashMap<*const Type, ()>,
+    ) {
+        let ptr = Rc::as_ptr(ty);
+        if visited.contains_key(&ptr) {
+            return;
+        }
+        visited.insert(ptr, ());
+        match ty.as_ref() {
             Type::Var(id) => {
-                out.insert(id);
+                if let Some(info) = self.vars.get(id) {
+                    if let Some(link) = info.link.clone() {
+                        self.free_vars_rc(&Rc::new(link), out, visited);
+                        return;
+                    }
+                }
+                out.insert(*id);
             }
-            Type::List(t) => self.free_vars(&t, out),
+            Type::List(t) => self.free_vars_rc(t, out, visited),
             Type::Tuple(ts) => {
                 for t in ts {
-                    self.free_vars(&t, out);
+                    self.free_vars_rc(t, out, visited);
                 }
             }
             Type::Fun { params, ret } => {
                 for p in params {
-                    self.free_vars(&p, out);
+                    self.free_vars_rc(p, out, visited);
                 }
-                self.free_vars(&ret, out);
+                self.free_vars_rc(ret, out, visited);
             }
             Type::App { args, .. } => {
                 for a in args {
-                    self.free_vars(&a, out);
+                    self.free_vars_rc(a, out, visited);
                 }
             }
             _ => {}

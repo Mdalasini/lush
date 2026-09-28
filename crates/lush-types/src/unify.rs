@@ -1,6 +1,7 @@
 //! Unification, occurs check, instantiation, and generalisation.
 
 use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 
 use lush_syntax::span::Span;
 
@@ -47,18 +48,15 @@ impl<'a> Unifier<'a> {
         match (&a, &b) {
             (Type::Error, _) | (_, Type::Error) => {}
             (Type::Var(id), t) | (t, Type::Var(id)) => {
-                // Ensure we bind the var side correctly when both are vars.
                 if let Type::Var(id2) = t {
                     if id == id2 {
                         self.depth -= 1;
                         return;
                     }
-                    // Bind the higher-level var to the lower one (or merge).
                     self.bind_var(*id, Type::Var(*id2), span, expected_origin);
                 } else if matches!(a, Type::Var(_)) {
                     self.bind_var(*id, t.clone(), span, expected_origin);
                 } else {
-                    // b is Var
                     let Type::Var(id) = &b else { unreachable!() };
                     self.bind_var(*id, a.clone(), span, expected_origin);
                 }
@@ -130,7 +128,6 @@ impl<'a> Unifier<'a> {
             );
             return;
         }
-        // Level adjustment + constraint merge
         let level = self.store.vars.get(&id).map(|v| v.level).unwrap_or(0);
         let constraints = self
             .store
@@ -139,7 +136,6 @@ impl<'a> Unifier<'a> {
             .map(|v| v.constraints.clone())
             .unwrap_or_default();
         self.adjust_level(&ty, level);
-        // If tying two vars, merge constraints onto the representative.
         if let Type::Var(other) = &ty {
             if let Some(info) = self.store.vars.get_mut(other) {
                 info.constraints.merge(&constraints);
@@ -149,7 +145,6 @@ impl<'a> Unifier<'a> {
             }
             return;
         }
-        // Concrete type: discharge constraints
         if !constraints.is_empty() {
             self.discharge_constraints(&ty, &constraints, span, expected_origin);
         }
@@ -159,30 +154,50 @@ impl<'a> Unifier<'a> {
     }
 
     fn adjust_level(&mut self, ty: &Type, max_level: u32) {
-        let z = self.store.zonk(ty);
-        match z {
+        let mut visited: HashMap<*const Type, ()> = HashMap::new();
+        self.adjust_level_rc(&Rc::new(ty.clone()), max_level, &mut visited);
+    }
+
+    fn adjust_level_rc(
+        &mut self,
+        ty: &Rc<Type>,
+        max_level: u32,
+        visited: &mut HashMap<*const Type, ()>,
+    ) {
+        let ptr = Rc::as_ptr(ty);
+        if visited.contains_key(&ptr) {
+            return;
+        }
+        visited.insert(ptr, ());
+        match ty.as_ref() {
             Type::Var(id) => {
-                if let Some(info) = self.store.vars.get_mut(&id) {
+                if let Some(info) = self.store.vars.get(id) {
+                    if let Some(link) = info.link.clone() {
+                        self.adjust_level_rc(&Rc::new(link), max_level, visited);
+                        return;
+                    }
+                }
+                if let Some(info) = self.store.vars.get_mut(id) {
                     if info.level > max_level {
                         info.level = max_level;
                     }
                 }
             }
-            Type::List(t) => self.adjust_level(&t, max_level),
+            Type::List(t) => self.adjust_level_rc(t, max_level, visited),
             Type::Tuple(ts) => {
                 for t in ts {
-                    self.adjust_level(&t, max_level);
+                    self.adjust_level_rc(t, max_level, visited);
                 }
             }
             Type::Fun { params, ret } => {
                 for p in params {
-                    self.adjust_level(&p, max_level);
+                    self.adjust_level_rc(p, max_level, visited);
                 }
-                self.adjust_level(&ret, max_level);
+                self.adjust_level_rc(ret, max_level, visited);
             }
             Type::App { args, .. } => {
                 for a in args {
-                    self.adjust_level(&a, max_level);
+                    self.adjust_level_rc(a, max_level, visited);
                 }
             }
             _ => {}
@@ -190,20 +205,46 @@ impl<'a> Unifier<'a> {
     }
 
     pub fn occurs(&mut self, id: TvId, ty: &Type, depth: usize) -> bool {
+        let mut visited: HashMap<*const Type, ()> = HashMap::new();
+        self.occurs_rc(id, &Rc::new(ty.clone()), depth, &mut visited)
+    }
+
+    fn occurs_rc(
+        &mut self,
+        id: TvId,
+        ty: &Rc<Type>,
+        depth: usize,
+        visited: &mut HashMap<*const Type, ()>,
+    ) -> bool {
         if depth > MAX_DEPTH {
             return true;
         }
+        let ptr = Rc::as_ptr(ty);
+        if visited.contains_key(&ptr) {
+            return false;
+        }
+        visited.insert(ptr, ());
         self.store.work = self.store.work.saturating_add(1);
-        let z = self.store.zonk(ty);
-        match z {
-            Type::Var(v) => v == id,
-            Type::List(t) => self.occurs(id, &t, depth + 1),
-            Type::Tuple(ts) => ts.iter().any(|t| self.occurs(id, t, depth + 1)),
-            Type::Fun { params, ret } => {
-                params.iter().any(|t| self.occurs(id, t, depth + 1))
-                    || self.occurs(id, &ret, depth + 1)
+        match ty.as_ref() {
+            Type::Var(v) => {
+                if let Some(info) = self.store.vars.get(v) {
+                    if let Some(link) = info.link.clone() {
+                        return self.occurs_rc(id, &Rc::new(link), depth + 1, visited);
+                    }
+                }
+                *v == id
             }
-            Type::App { args, .. } => args.iter().any(|t| self.occurs(id, t, depth + 1)),
+            Type::List(t) => self.occurs_rc(id, t, depth + 1, visited),
+            Type::Tuple(ts) => ts.iter().any(|t| self.occurs_rc(id, t, depth + 1, visited)),
+            Type::Fun { params, ret } => {
+                params
+                    .iter()
+                    .any(|t| self.occurs_rc(id, t, depth + 1, visited))
+                    || self.occurs_rc(id, ret, depth + 1, visited)
+            }
+            Type::App { args, .. } => args
+                .iter()
+                .any(|t| self.occurs_rc(id, t, depth + 1, visited)),
             _ => false,
         }
     }
@@ -225,22 +266,13 @@ impl<'a> Unifier<'a> {
             );
         }
         if c.neg && !matches!(ty, Type::Int | Type::Float | Type::Var(_) | Type::Error) {
-            // Still a var? leave constraint. Concrete non-numeric:
-            if !matches!(ty, Type::Var(_)) {
-                let shown = self.store.display(ty);
-                self.sink.error(
-                    codes::E1351_NO_NEG,
-                    format!("type `{shown}` does not support negation (`Neg`)"),
-                    span,
-                    Some("`Neg` is only satisfied by `Int` and `Float`".into()),
-                );
-            }
-        }
-        if c.neg {
-            match ty {
-                Type::Int | Type::Float | Type::Error | Type::Var(_) => {}
-                _ => {}
-            }
+            let shown = self.store.display(ty);
+            self.sink.error(
+                codes::E1351_NO_NEG,
+                format!("type `{shown}` does not support negation (`Neg`)"),
+                span,
+                Some("`Neg` is only satisfied by `Int` and `Float`".into()),
+            );
         }
     }
 }
@@ -284,9 +316,12 @@ impl DiagnosticBuilder {
     }
 }
 
-/// Instantiate a scheme at the current level, returning the body and a map of
-/// fresh vars (for constraint origin tracking).
+/// Instantiate a scheme at the current level.
 pub fn instantiate(store: &mut TypeStore, scheme: &Scheme, level: u32) -> Type {
+    if scheme.vars.is_empty() {
+        // Preserve DAG sharing for monomorphic bindings.
+        return scheme.body.clone();
+    }
     let mut subst: HashMap<TvId, Type> = HashMap::new();
     for v in &scheme.vars {
         let fresh = store.fresh_var(level);
@@ -301,27 +336,61 @@ pub fn instantiate(store: &mut TypeStore, scheme: &Scheme, level: u32) -> Type {
 }
 
 fn apply_subst(store: &mut TypeStore, ty: &Type, subst: &HashMap<TvId, Type>) -> Type {
-    let z = store.zonk(ty);
-    match z {
-        Type::Var(id) => subst.get(&id).cloned().unwrap_or(Type::Var(id)),
-        Type::List(t) => Type::List(Box::new(apply_subst(store, &t, subst))),
-        Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| apply_subst(store, t, subst)).collect()),
-        Type::Fun { params, ret } => Type::Fun {
-            params: params
-                .iter()
-                .map(|t| apply_subst(store, t, subst))
-                .collect(),
-            ret: Box::new(apply_subst(store, &ret, subst)),
-        },
-        Type::App { def, args } => Type::App {
-            def,
-            args: args.iter().map(|t| apply_subst(store, t, subst)).collect(),
-        },
-        other => other,
-    }
+    let mut memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
+    (*apply_subst_rc(store, &Rc::new(ty.clone()), subst, &mut memo)).clone()
 }
 
-/// Generalise type variables with level > current_level that are not free in the environment.
+fn apply_subst_rc(
+    store: &mut TypeStore,
+    ty: &Rc<Type>,
+    subst: &HashMap<TvId, Type>,
+    memo: &mut HashMap<*const Type, Rc<Type>>,
+) -> Rc<Type> {
+    let ptr = Rc::as_ptr(ty);
+    if let Some(z) = memo.get(&ptr) {
+        return z.clone();
+    }
+    store.work = store.work.saturating_add(1);
+    let result = match ty.as_ref() {
+        Type::Var(id) => {
+            if let Some(info) = store.vars.get(id) {
+                if let Some(link) = info.link.clone() {
+                    return apply_subst_rc(store, &Rc::new(link), subst, memo);
+                }
+            }
+            if let Some(t) = subst.get(id) {
+                Rc::new(t.clone())
+            } else {
+                ty.clone()
+            }
+        }
+        Type::List(t) => Rc::new(Type::List(apply_subst_rc(store, t, subst, memo))),
+        Type::Tuple(ts) => Rc::new(Type::Tuple(
+            ts.iter()
+                .map(|t| apply_subst_rc(store, t, subst, memo))
+                .collect(),
+        )),
+        Type::Fun { params, ret } => Rc::new(Type::Fun {
+            params: params
+                .iter()
+                .map(|t| apply_subst_rc(store, t, subst, memo))
+                .collect(),
+            ret: apply_subst_rc(store, ret, subst, memo),
+        }),
+        Type::App { def, args } => Rc::new(Type::App {
+            def: *def,
+            args: args
+                .iter()
+                .map(|t| apply_subst_rc(store, t, subst, memo))
+                .collect(),
+        }),
+        _ => ty.clone(),
+    };
+    memo.insert(ptr, result.clone());
+    result
+}
+
+/// Generalise type variables with level > current_level.
 pub fn generalise(store: &mut TypeStore, ty: &Type, env_level: u32, expansive: bool) -> Scheme {
     let z = store.zonk(ty);
     if expansive {
@@ -360,7 +429,6 @@ pub fn generalise_rigids(store: &mut TypeStore, ty: &Type, rigids: &[(RigidId, S
             Type::Var(id) => id,
             _ => unreachable!(),
         };
-        // Transfer rigid constraints
         if let Some(info) = store.rigids.get(rid) {
             if !info.constraints.is_empty() {
                 if let Some(vi) = store.vars.get_mut(&tv) {
@@ -381,35 +449,61 @@ pub fn generalise_rigids(store: &mut TypeStore, ty: &Type, rigids: &[(RigidId, S
 }
 
 fn replace_rigids(store: &mut TypeStore, ty: &Type, subst: &HashMap<RigidId, TvId>) -> Type {
-    let z = store.zonk(ty);
-    match z {
+    let mut memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
+    (*replace_rigids_rc(store, &Rc::new(ty.clone()), subst, &mut memo)).clone()
+}
+
+fn replace_rigids_rc(
+    store: &mut TypeStore,
+    ty: &Rc<Type>,
+    subst: &HashMap<RigidId, TvId>,
+    memo: &mut HashMap<*const Type, Rc<Type>>,
+) -> Rc<Type> {
+    let ptr = Rc::as_ptr(ty);
+    if let Some(z) = memo.get(&ptr) {
+        return z.clone();
+    }
+    store.work = store.work.saturating_add(1);
+    let result = match ty.as_ref() {
         Type::Rigid(id) => {
-            if let Some(tv) = subst.get(&id) {
-                Type::Var(*tv)
+            if let Some(tv) = subst.get(id) {
+                Rc::new(Type::Var(*tv))
             } else {
-                Type::Rigid(id)
+                ty.clone()
             }
         }
-        Type::List(t) => Type::List(Box::new(replace_rigids(store, &t, subst))),
-        Type::Tuple(ts) => {
-            Type::Tuple(ts.iter().map(|t| replace_rigids(store, t, subst)).collect())
+        Type::Var(id) => {
+            if let Some(info) = store.vars.get(id) {
+                if let Some(link) = info.link.clone() {
+                    return replace_rigids_rc(store, &Rc::new(link), subst, memo);
+                }
+            }
+            ty.clone()
         }
-        Type::Fun { params, ret } => Type::Fun {
+        Type::List(t) => Rc::new(Type::List(replace_rigids_rc(store, t, subst, memo))),
+        Type::Tuple(ts) => Rc::new(Type::Tuple(
+            ts.iter()
+                .map(|t| replace_rigids_rc(store, t, subst, memo))
+                .collect(),
+        )),
+        Type::Fun { params, ret } => Rc::new(Type::Fun {
             params: params
                 .iter()
-                .map(|t| replace_rigids(store, t, subst))
+                .map(|t| replace_rigids_rc(store, t, subst, memo))
                 .collect(),
-            ret: Box::new(replace_rigids(store, &ret, subst)),
-        },
-        Type::App { def, args } => Type::App {
-            def,
+            ret: replace_rigids_rc(store, ret, subst, memo),
+        }),
+        Type::App { def, args } => Rc::new(Type::App {
+            def: *def,
             args: args
                 .iter()
-                .map(|t| replace_rigids(store, t, subst))
+                .map(|t| replace_rigids_rc(store, t, subst, memo))
                 .collect(),
-        },
-        other => other,
-    }
+        }),
+        _ => ty.clone(),
+    };
+    memo.insert(ptr, result.clone());
+    result
 }
 
 /// Attach a constraint to a type (var or rigid).
