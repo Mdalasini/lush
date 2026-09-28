@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1202:77..78: constructor expects 1 argument(s), got more

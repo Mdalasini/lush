@@ -1,0 +1,6 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1008:26..27: type alias cycle involving `A`
+E1008:41..42: type alias cycle involving `B`

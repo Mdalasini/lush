@@ -1,0 +1,4 @@
+// expect: E1001
+pub fn f(x: Subject(Int)) -> Nil {
+  Nil;
+}

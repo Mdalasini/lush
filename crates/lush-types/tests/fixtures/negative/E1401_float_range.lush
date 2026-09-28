@@ -1,0 +1,2 @@
+// expect: E1401
+const x = 1.0e400;

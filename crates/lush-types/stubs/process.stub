@@ -1,0 +1,58 @@
+# Stand-in stubs for lush/process until step 10.
+module lush/process
+
+opaque Pid
+opaque Subject(msg)
+opaque Monitor
+opaque Timer
+opaque Selector(a)
+
+type Crash {
+  Crash(message: String, trace: List(String))
+}
+type ExitReason {
+  Normal
+  Killed
+  NoProcess
+  HeapLimit
+  Abnormal(Crash)
+}
+type Signal {
+  Down(monitor: Monitor, pid: Pid, reason: ExitReason)
+  Exit(from: Pid, reason: ExitReason)
+}
+type ExitRequest {
+  ExitNormal
+  ExitAbnormal(String)
+}
+type SpawnError {
+  SpawnFailed
+}
+
+pub fn spawn(fn() -> Nil) -> Pid
+pub fn try_spawn(fn() -> Nil) -> Result(Pid, SpawnError)
+pub fn spawn_link(fn() -> Nil) -> Pid
+pub fn self() -> Pid
+pub fn new_subject() -> Subject(msg)
+pub fn subject_owner(Subject(msg)) -> Pid
+pub fn close_subject(Subject(msg)) -> Nil
+pub fn new_selector() -> Selector(a)
+pub fn select_subject(Selector(a), Subject(a)) -> Selector(a)
+pub fn select_map(Selector(a), Subject(msg), fn(msg) -> a) -> Selector(a)
+pub fn select(Selector(a), within: Int) -> Result(a, Nil)
+pub fn send(Subject(msg), msg) -> Nil
+pub fn receive(Subject(msg), within: Int) -> Result(msg, Nil)
+pub fn receive_forever(Subject(msg)) -> msg
+pub fn receive_signal(within: Int) -> Result(Signal, Nil)
+pub fn receive_signal_forever() -> Signal
+pub fn sleep(Int) -> Nil
+pub fn send_after(Subject(msg), after: Int, msg) -> Timer
+pub fn cancel_timer(Timer) -> Nil
+pub fn monitor(Pid) -> Monitor
+pub fn demonitor(Monitor, flush: Bool) -> Nil
+pub fn link(Pid) -> Nil
+pub fn unlink(Pid) -> Nil
+pub fn trap_exits(Bool) -> Nil
+pub fn exit(Pid, ExitRequest) -> Nil
+pub fn kill(Pid) -> Nil
+pub fn is_alive(Pid) -> Bool

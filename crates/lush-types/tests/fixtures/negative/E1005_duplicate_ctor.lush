@@ -1,0 +1,5 @@
+// expect: E1005
+pub type T {
+  A
+  A
+}

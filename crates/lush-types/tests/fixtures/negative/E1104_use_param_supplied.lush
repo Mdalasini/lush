@@ -1,0 +1,6 @@
+// expect: E1104
+import lush/result;
+pub fn main() -> Nil {
+  use x <- result.try(Ok(1), fn(y) { Ok(y); });
+  Nil;
+}

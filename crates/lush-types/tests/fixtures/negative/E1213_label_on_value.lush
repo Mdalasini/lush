@@ -1,0 +1,6 @@
+// expect: E1213
+pub fn main() -> Nil {
+  let g = fn(x: Int) { x; };
+  let _ = g(x: 1);
+  Nil;
+}

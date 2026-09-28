@@ -1,0 +1,4 @@
+// expect: W1006
+pub fn f(x) {
+  x;
+}

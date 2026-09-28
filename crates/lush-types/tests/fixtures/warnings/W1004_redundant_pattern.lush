@@ -1,0 +1,7 @@
+// expect: W1004
+pub fn f(b: Bool) -> Int {
+  case b {
+    _ -> 1;
+    True -> 2;
+  };
+}

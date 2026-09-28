@@ -1,0 +1,6 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1214:50..56: expected a function, found `Int`
+E1105:55..56: pipe right-hand side must be a function, constructor, or call

@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1300:165..186: type mismatch: expected `String`, found `Int`

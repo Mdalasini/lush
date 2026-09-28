@@ -1,0 +1,19 @@
+# Stand-in stubs for lush/actor until step 10.
+module lush/actor
+
+type Next(state) {
+  Continue(state)
+  Stop(process.ExitRequest)
+}
+type StartError {
+  SpawnFailed
+  InitFailed(process.ExitReason)
+  InitTimeout
+}
+type CallError {
+  Timeout
+  ServerDown(process.ExitReason)
+}
+
+pub fn start(init: fn() -> state, within: Int, handler: fn(msg, state) -> Next(state)) -> Result(Subject(msg), StartError)
+pub fn call(Subject(msg), make_msg: fn(Subject(reply)) -> msg, timeout: Int) -> Result(reply, CallError)

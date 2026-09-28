@@ -1,0 +1,6 @@
+// expect: E1214
+pub fn f(a: Int, b: Int) -> Int { a + b; }
+pub fn main() -> Nil {
+  let _ = f(1);
+  Nil;
+}

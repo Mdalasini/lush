@@ -1,0 +1,8 @@
+// expect: E1101
+// Nested placeholder `f(g(_))` is rejected (chosen reading of §5.8).
+pub fn g(x: Int) -> Int { x; }
+pub fn f(x: Int) -> Int { x; }
+pub fn main() -> Nil {
+  let _ = f(g(_));
+  Nil;
+}

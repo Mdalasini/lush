@@ -1,0 +1,6 @@
+pub opaque type Email {
+  Email(String)
+}
+pub fn new(s: String) -> Email {
+  Email(s);
+}

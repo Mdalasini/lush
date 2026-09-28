@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1206:50..65: record update requires a constructor

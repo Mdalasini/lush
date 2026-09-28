@@ -1,0 +1,6 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1300:17..36: type mismatch: expected `Int`, found `Float`
+E1405:17..36: constant annotation does not match value type

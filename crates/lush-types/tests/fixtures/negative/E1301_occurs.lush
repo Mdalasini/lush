@@ -1,0 +1,8 @@
+// expect: E1301
+pub fn main() -> Nil {
+  let f = fn(x) { #(x, x); };
+  // Force occurs via unification of a type variable with a type containing it:
+  let g = fn(x) { x(x); };
+  let _ = g(f);
+  Nil;
+}

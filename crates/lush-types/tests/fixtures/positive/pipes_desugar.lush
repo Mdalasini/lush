@@ -1,0 +1,5 @@
+import lush/int;
+pub fn main() -> Nil {
+  let _ = 1 |> int.to_string;
+  Nil;
+}

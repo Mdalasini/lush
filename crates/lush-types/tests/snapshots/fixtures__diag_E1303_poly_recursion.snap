@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1303:65..76: polymorphic recursion is not allowed: recursive calls must use a single monomorphic type

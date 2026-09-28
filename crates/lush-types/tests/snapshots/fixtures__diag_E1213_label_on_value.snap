@@ -1,0 +1,7 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1213:79..86: labelled arguments require a statically resolved named function or constructor
+E1214:79..86: function expects 1 argument(s), got 0
+E1211:81..82: unknown argument label `x`

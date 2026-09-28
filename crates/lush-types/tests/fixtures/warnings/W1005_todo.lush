@@ -1,0 +1,4 @@
+// expect: W1005
+pub fn main() -> Nil {
+  todo;
+}

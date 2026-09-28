@@ -1,0 +1,10 @@
+import lush/process.{type Subject};
+import lush/process;
+pub fn main() -> Nil {
+  let mk = fn() { process.new_subject(); };
+  let a: Subject(Int) = mk();
+  let b: Subject(String) = mk();
+  let _ = a;
+  let _ = b;
+  Nil;
+}

@@ -1,0 +1,6 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1005:36..37: duplicate constructor `A`
+E1005:36..37: duplicate constructor `A`

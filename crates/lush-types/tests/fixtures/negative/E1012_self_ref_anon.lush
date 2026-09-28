@@ -1,0 +1,5 @@
+// expect: E1000
+pub fn main() -> Nil {
+  let f = fn() { f(); };
+  Nil;
+}

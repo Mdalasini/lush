@@ -1,0 +1,7 @@
+// expect: E1219
+pub fn f(n: Int) -> Int {
+  case n {
+    1 | x -> x;
+    _ -> 0;
+  };
+}

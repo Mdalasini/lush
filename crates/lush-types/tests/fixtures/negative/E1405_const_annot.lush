@@ -1,0 +1,2 @@
+// expect: E1405
+const x: Int = 1.0;

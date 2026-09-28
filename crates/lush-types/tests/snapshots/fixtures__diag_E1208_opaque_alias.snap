@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1208:21..40: opaque type aliases are not allowed; opacity applies only to ADT forms

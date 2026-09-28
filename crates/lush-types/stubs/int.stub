@@ -1,0 +1,8 @@
+# Stand-in stubs for lush/int until step 10.
+module lush/int
+
+pub fn to_string(Int) -> String
+pub fn parse(String) -> Result(Int, Nil)
+pub fn divide(Int, Int) -> Result(Int, Nil)
+pub fn absolute(Int) -> Int
+pub fn clamp(Int, min: Int, max: Int) -> Int

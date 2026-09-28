@@ -1,0 +1,17 @@
+# Stand-in stubs for lush/set until step 10.
+module lush/set
+
+opaque Set(a)
+
+@eq(a)
+pub fn new() -> Set(a)
+@eq(a)
+pub fn from_list(List(a)) -> Set(a)
+@eq(a)
+pub fn insert(Set(a), a) -> Set(a)
+@eq(a)
+pub fn contains(Set(a), a) -> Bool
+@eq(a)
+pub fn delete(Set(a), a) -> Set(a)
+pub fn to_list(Set(a)) -> List(a)
+pub fn size(Set(a)) -> Int

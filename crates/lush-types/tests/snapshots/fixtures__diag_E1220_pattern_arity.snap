@@ -1,0 +1,6 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E0140:69..70: case arm has 1 pattern(s) but there are 2 subject(s)
+E1220:69..70: pattern row has 1 pattern(s) but case has 2 subject(s)

@@ -1,0 +1,4 @@
+// expect: E1210
+pub fn f(x) {
+  x.name;
+}

@@ -1,0 +1,6 @@
+// expect: E1350
+pub fn main() -> Nil {
+  let f = fn(x: Int) { x; };
+  let _ = f == f;
+  Nil;
+}

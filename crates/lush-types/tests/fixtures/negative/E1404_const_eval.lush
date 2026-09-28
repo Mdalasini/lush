@@ -1,0 +1,2 @@
+// expect: E1404
+const x = 1 / 0;

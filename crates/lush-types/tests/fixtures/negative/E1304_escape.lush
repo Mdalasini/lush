@@ -1,0 +1,8 @@
+// expect: E1304
+pub fn main() -> Nil {
+  let s = process_new();
+  Nil;
+}
+fn process_new() {
+  todo;
+}

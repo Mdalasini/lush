@@ -1,0 +1,4 @@
+// expect: E1000
+pub fn main() -> Nil {
+  nope;
+}

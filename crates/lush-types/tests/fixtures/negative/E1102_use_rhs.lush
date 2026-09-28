@@ -1,0 +1,5 @@
+// expect: E1102
+pub fn main() -> Nil {
+  use x <- 1;
+  Nil;
+}

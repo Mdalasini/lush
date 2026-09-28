@@ -1,0 +1,7 @@
+// expect: E1205
+import lush/process;
+pub fn main() -> Nil {
+  let p = process.self();
+  let _ = p.x;
+  Nil;
+}

@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1217:52..63: bit-array segment width 128 is not in 1..=64

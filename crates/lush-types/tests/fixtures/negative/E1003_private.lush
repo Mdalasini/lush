@@ -1,0 +1,4 @@
+// expect: E1003
+// Checked via two-module graph in tests; single-file stand-in uses lush private via fake:
+import lush/process.{not_a_real_item};
+pub fn main() -> Nil { Nil; }

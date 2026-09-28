@@ -1,0 +1,6 @@
+// expect: E1202
+pub type T { A(Int) }
+pub fn main() -> Nil {
+  let _ = A(1, 2);
+  Nil;
+}

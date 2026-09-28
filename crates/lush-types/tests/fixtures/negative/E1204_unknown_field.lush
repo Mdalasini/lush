@@ -1,0 +1,7 @@
+// expect: E1204
+pub type User { User(name: String) }
+pub fn main() -> Nil {
+  let u = User(name: "a");
+  let _ = User(..u, age: 1);
+  Nil;
+}

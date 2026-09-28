@@ -1,0 +1,3 @@
+// expect: E1402
+pub fn f() -> Int { 1; }
+const x = f();
