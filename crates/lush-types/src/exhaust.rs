@@ -1,4 +1,4 @@
-//! Exhaustiveness and redundancy checking (§5.4).
+//! Exhaustiveness and redundancy checking via Maranget usefulness (§5.4).
 
 use lush_syntax::ast::*;
 use lush_syntax::span::Span;
@@ -6,7 +6,37 @@ use lush_syntax::span::Span;
 use crate::codes;
 use crate::diag::TypeSink;
 use crate::limits::MAX_EXHAUST_WORK;
-use crate::ty::{Type, TypeDefId, TypeStore};
+use crate::ty::{Type, TypeDefKind, TypeStore};
+
+#[derive(Clone, Debug)]
+enum Head {
+    Wildcard,
+    Ctor { name: String, fields: Vec<Pat> },
+    Tuple(Vec<Pat>),
+    ListNil,
+    ListCons { heads: Vec<Pat>, has_spread: bool },
+    Lit(LitKind),
+    Infinite,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LitKind {
+    Int(String),
+    Float(String),
+    String(String),
+}
+
+#[derive(Clone, Debug)]
+struct Pat {
+    head: Head,
+}
+
+type Row = Vec<Pat>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Budget {
+    Exhausted,
+}
 
 pub struct ExhaustChecker<'a> {
     pub store: &'a mut TypeStore,
@@ -19,68 +49,222 @@ impl<'a> ExhaustChecker<'a> {
         if subjects.is_empty() {
             return;
         }
-        // Budget: each arm × constructor branching
-        let estimate = (clauses.len() as u64)
-            .saturating_mul(subjects.len() as u64)
-            .saturating_mul(8);
-        self.work = self.work.saturating_add(estimate);
-        if self.work > MAX_EXHAUST_WORK || subjects.len() >= 20 {
-            self.sink.error(
-                codes::E1451_MATCH_COMPLEX,
-                "pattern match is too complex to check for exhaustiveness",
-                span,
-                Some("simplify the match or split it into smaller cases".into()),
-            );
-            return;
-        }
-
-        let mut covered_wildcard = false;
-        let mut saw_unguarded_catch_all = false;
-        for (i, clause) in clauses.iter().enumerate() {
-            let has_guard = clause.guard.is_some();
+        for clause in clauses {
             if let Some(g) = &clause.guard {
                 check_guard(g, self.sink);
             }
-            // Or-pattern binding agreement
             if clause.patterns.len() > 1 {
                 check_or_bindings(&clause.patterns, self.sink);
             }
-            let is_catch_all = clause.patterns.iter().all(|row| {
-                row.patterns.len() == subjects.len() && row.patterns.iter().all(is_wildcard_pat)
-            });
-            if is_catch_all && !has_guard {
-                if saw_unguarded_catch_all {
-                    self.sink.warning(
-                        codes::W1004_REDUNDANT_PATTERN,
-                        "redundant pattern: unreachable arm",
-                        clause.span,
-                        None,
-                    );
-                }
-                saw_unguarded_catch_all = true;
-                covered_wildcard = true;
-            } else if saw_unguarded_catch_all {
-                self.sink.warning(
-                    codes::W1004_REDUNDANT_PATTERN,
-                    "redundant pattern: unreachable arm after catch-all",
-                    clause.span,
-                    None,
-                );
-            } else if has_guard && i + 1 < clauses.len() {
-                // guarded arms never establish exhaustiveness / redundancy for later
-            }
-            let _ = covered_wildcard;
         }
 
-        // Simple exhaustiveness for Bool, Nil, Option, Result, ADTs with nullary + catch-all
-        if !saw_unguarded_catch_all {
-            if let Some(missing) = missing_counterexample(self.store, subjects, clauses) {
+        let mut matrix: Vec<Row> = Vec::new();
+        for clause in clauses {
+            let rows = expand_clause(clause, subjects.len());
+            if clause.guard.is_some() {
+                continue; // guarded arms don't establish coverage
+            }
+            for row in &rows {
+                match self.useful(&matrix, row, subjects) {
+                    Ok(false) => {
+                        self.sink.warning(
+                            codes::W1004_REDUNDANT_PATTERN,
+                            "redundant pattern: unreachable arm",
+                            clause.span,
+                            None,
+                        );
+                        break;
+                    }
+                    Ok(true) => {}
+                    Err(Budget::Exhausted) => {
+                        self.emit_budget(span);
+                        return;
+                    }
+                }
+            }
+            matrix.extend(rows);
+        }
+
+        let wild: Row = (0..subjects.len())
+            .map(|_| Pat {
+                head: Head::Wildcard,
+            })
+            .collect();
+        match self.useful(&matrix, &wild, subjects) {
+            Ok(true) => {
+                let witness =
+                    missing_witness(self.store, &matrix, subjects).unwrap_or_else(|| "_".into());
                 self.sink.error(
                     codes::E1450_NON_EXHAUSTIVE,
-                    format!("non-exhaustive patterns: `{missing}` not covered"),
+                    format!("non-exhaustive patterns: `{witness}` not covered"),
                     span,
                     Some("add a case for the missing pattern or a catch-all `_`".into()),
                 );
+            }
+            Ok(false) => {}
+            Err(Budget::Exhausted) => self.emit_budget(span),
+        }
+    }
+
+    fn emit_budget(&mut self, span: Span) {
+        self.sink.error(
+            codes::E1451_MATCH_COMPLEX,
+            "pattern match is too complex to check for exhaustiveness",
+            span,
+            Some("simplify the match or split it into smaller cases".into()),
+        );
+    }
+
+    fn tick(&mut self) -> Result<(), Budget> {
+        self.work = self.work.saturating_add(1);
+        self.store.work = self.store.work.saturating_add(1);
+        if self.work > MAX_EXHAUST_WORK {
+            Err(Budget::Exhausted)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn useful(&mut self, matrix: &[Row], row: &Row, tys: &[Type]) -> Result<bool, Budget> {
+        self.tick()?;
+        // Charge matrix traversal: specialisation scans every row.
+        self.work = self.work.saturating_add(matrix.len() as u64);
+        self.store.work = self.store.work.saturating_add(matrix.len() as u64);
+        if self.work > MAX_EXHAUST_WORK {
+            return Err(Budget::Exhausted);
+        }
+        // Empty matrix covers nothing — any row (incl. further specialisations) is useful.
+        // Without this short-circuit, wildcard-on-List keeps cons-specialising forever.
+        if matrix.is_empty() {
+            return Ok(true);
+        }
+        if row.is_empty() {
+            return Ok(false);
+        }
+        let pat = &row[0];
+        let ty = follow(self.store, &tys[0]);
+        match &pat.head {
+            Head::Ctor { name, fields } => {
+                let ftys = ctor_fields(self.store, &ty, name, fields.len());
+                let m = spec_ctor(matrix, name, fields.len());
+                let mut v = fields.clone();
+                v.extend_from_slice(&row[1..]);
+                let mut ntys = ftys;
+                ntys.extend_from_slice(&tys[1..]);
+                self.useful(&m, &v, &ntys)
+            }
+            Head::Tuple(elems) => {
+                let ftys: Vec<Type> = match &ty {
+                    Type::Tuple(ts) => ts.iter().map(|t| (**t).clone()).collect(),
+                    _ => elems.iter().map(|_| Type::Error).collect(),
+                };
+                let m = spec_tuple(matrix, elems.len());
+                let mut v = elems.clone();
+                v.extend_from_slice(&row[1..]);
+                let mut ntys = ftys;
+                ntys.extend_from_slice(&tys[1..]);
+                self.useful(&m, &v, &ntys)
+            }
+            Head::ListNil => {
+                let m = spec_list_nil(matrix);
+                self.useful(&m, &row[1..].to_vec(), &tys[1..])
+            }
+            Head::ListCons { heads, has_spread } => {
+                let elem = match &ty {
+                    Type::List(t) => (**t).clone(),
+                    _ => Type::Error,
+                };
+                let m = spec_list_cons(matrix, heads.len(), *has_spread);
+                let mut v = heads.clone();
+                v.push(Pat {
+                    head: if *has_spread {
+                        Head::Wildcard
+                    } else {
+                        Head::ListNil
+                    },
+                });
+                v.extend_from_slice(&row[1..]);
+                let mut ntys: Vec<Type> = heads.iter().map(|_| elem.clone()).collect();
+                ntys.push(Type::list(elem));
+                ntys.extend_from_slice(&tys[1..]);
+                self.useful(&m, &v, &ntys)
+            }
+            Head::Lit(lit) => {
+                let m = spec_lit(matrix, lit);
+                self.useful(&m, &row[1..].to_vec(), &tys[1..])
+            }
+            Head::Infinite => {
+                let m = default_matrix(matrix);
+                self.useful(&m, &row[1..].to_vec(), &tys[1..])
+            }
+            Head::Wildcard => {
+                // A top-level wildcard in the matrix already covers every constructor
+                // of this column (including recursive List tails). Specialising would
+                // re-introduce wildcards on the same type and loop forever.
+                let matrix_has_wild = matrix
+                    .iter()
+                    .any(|r| !r.is_empty() && matches!(r[0].head, Head::Wildcard));
+                if matrix_has_wild {
+                    let m = default_matrix(matrix);
+                    return self.useful(&m, &row[1..].to_vec(), &tys[1..]);
+                }
+                if let Some(ctors) = complete_sig(self.store, &ty) {
+                    for (name, arity) in &ctors {
+                        let m = spec_ctor(matrix, name, *arity);
+                        let mut v: Vec<Pat> = (0..*arity)
+                            .map(|_| Pat {
+                                head: Head::Wildcard,
+                            })
+                            .collect();
+                        v.extend_from_slice(&row[1..]);
+                        let mut ntys = ctor_fields(self.store, &ty, name, *arity);
+                        ntys.extend_from_slice(&tys[1..]);
+                        if self.useful(&m, &v, &ntys)? {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                } else {
+                    match &ty {
+                        Type::Tuple(ts) => {
+                            let n = ts.len();
+                            let m = spec_tuple(matrix, n);
+                            let mut v: Vec<Pat> = (0..n)
+                                .map(|_| Pat {
+                                    head: Head::Wildcard,
+                                })
+                                .collect();
+                            v.extend_from_slice(&row[1..]);
+                            let mut ntys: Vec<Type> = ts.iter().map(|t| (**t).clone()).collect();
+                            ntys.extend_from_slice(&tys[1..]);
+                            self.useful(&m, &v, &ntys)
+                        }
+                        Type::List(elem) => {
+                            let m_nil = spec_list_nil(matrix);
+                            if self.useful(&m_nil, &row[1..].to_vec(), &tys[1..])? {
+                                return Ok(true);
+                            }
+                            let m_cons = spec_list_cons(matrix, 1, true);
+                            let mut v = vec![
+                                Pat {
+                                    head: Head::Wildcard,
+                                },
+                                Pat {
+                                    head: Head::Wildcard,
+                                },
+                            ];
+                            v.extend_from_slice(&row[1..]);
+                            let mut ntys = vec![(**elem).clone(), Type::list((**elem).clone())];
+                            ntys.extend_from_slice(&tys[1..]);
+                            self.useful(&m_cons, &v, &ntys)
+                        }
+                        _ => {
+                            // Infinite domain: needs an explicit wildcard in the matrix.
+                            let m = default_matrix(matrix);
+                            self.useful(&m, &row[1..].to_vec(), &tys[1..])
+                        }
+                    }
+                }
             }
         }
     }
@@ -100,11 +284,449 @@ impl<'a> ExhaustChecker<'a> {
     }
 }
 
-fn is_wildcard_pat(p: &Pattern) -> bool {
-    matches!(
-        p.kind,
-        PatternKind::Discard | PatternKind::Var(_) | PatternKind::UnderscoreName(_)
-    )
+fn follow(store: &TypeStore, ty: &Type) -> Type {
+    match ty {
+        Type::Var(id) => {
+            if let Some(info) = store.vars.get(id) {
+                if let Some(link) = &info.link {
+                    return follow(store, link);
+                }
+            }
+            ty.clone()
+        }
+        Type::App { def, args } => {
+            if let Some(info) = store.defs.get(def) {
+                if info.kind == TypeDefKind::Alias {
+                    if let Some(body) = &info.alias_body {
+                        if info.params.is_empty() {
+                            return follow(store, body);
+                        }
+                        // Keep App for parameterised aliases; pattern matching uses variants
+                        // of the underlying type only after expansion in infer.
+                        let _ = args;
+                    }
+                }
+            }
+            ty.clone()
+        }
+        _ => ty.clone(),
+    }
+}
+
+fn complete_sig(store: &TypeStore, ty: &Type) -> Option<Vec<(String, usize)>> {
+    match ty {
+        Type::Bool => Some(vec![("True".into(), 0), ("False".into(), 0)]),
+        Type::Nil => Some(vec![("Nil".into(), 0)]),
+        Type::App { def, .. } => {
+            let info = store.defs.get(def)?;
+            if info.variants.is_empty() {
+                return None;
+            }
+            Some(
+                info.variants
+                    .iter()
+                    .map(|v| (v.name.clone(), v.fields.len()))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn ctor_fields(store: &TypeStore, ty: &Type, name: &str, arity: usize) -> Vec<Type> {
+    if let Type::App { def, args } = ty {
+        if let Some(info) = store.defs.get(def) {
+            if let Some(v) = info.variants.iter().find(|v| v.name == name) {
+                // RigidIds in imported TypeDefInfo may not exist in this store's
+                // `rigids` map (they were allocated in the stub/prelude store).
+                // Fall back to the order of first appearance of distinct Rigids
+                // across this def's variants, which matches `params` order.
+                let mut rigid_order: Vec<crate::ty::RigidId> = Vec::new();
+                for vv in &info.variants {
+                    for f in &vv.fields {
+                        if let Type::Rigid(rid) = &f.ty {
+                            if !rigid_order.contains(rid) {
+                                rigid_order.push(*rid);
+                            }
+                        }
+                    }
+                }
+                return v
+                    .fields
+                    .iter()
+                    .map(|f| match &f.ty {
+                        Type::Rigid(id) => {
+                            if let Some(r) = store.rigids.get(id) {
+                                if let Some(idx) = info.params.iter().position(|p| *p == r.name) {
+                                    return args
+                                        .get(idx)
+                                        .map(|t| (**t).clone())
+                                        .unwrap_or(Type::Error);
+                                }
+                            }
+                            if let Some(idx) = rigid_order.iter().position(|r| r == id) {
+                                return args.get(idx).map(|t| (**t).clone()).unwrap_or(Type::Error);
+                            }
+                            if info.params.len() == 1 {
+                                return args.first().map(|t| (**t).clone()).unwrap_or(Type::Error);
+                            }
+                            f.ty.clone()
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+            }
+        }
+    }
+    (0..arity).map(|_| Type::Error).collect()
+}
+
+fn expand_clause(clause: &Clause, n: usize) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for prow in &clause.patterns {
+        let mut nodes: Vec<Pat> = prow.patterns.iter().map(ast_pat).collect();
+        nodes.resize(
+            n,
+            Pat {
+                head: Head::Wildcard,
+            },
+        );
+        nodes.truncate(n);
+        rows.push(nodes);
+    }
+    rows
+}
+
+fn ast_pat(p: &Pattern) -> Pat {
+    match &p.kind {
+        PatternKind::Discard | PatternKind::Var(_) | PatternKind::UnderscoreName(_) => Pat {
+            head: Head::Wildcard,
+        },
+        PatternKind::Alias { pattern, .. } => ast_pat(pattern),
+        PatternKind::Int(lit) => Pat {
+            head: Head::Lit(LitKind::Int(lit.digits.clone())),
+        },
+        PatternKind::Float(lit) => Pat {
+            head: Head::Lit(LitKind::Float(lit.raw.clone())),
+        },
+        PatternKind::String(lit) => Pat {
+            head: Head::Lit(LitKind::String(lit.value.clone())),
+        },
+        PatternKind::Tuple(ps) => Pat {
+            head: Head::Tuple(ps.iter().map(ast_pat).collect()),
+        },
+        PatternKind::List { items, spread } => {
+            if items.is_empty() && spread.is_none() {
+                Pat {
+                    head: Head::ListNil,
+                }
+            } else {
+                Pat {
+                    head: Head::ListCons {
+                        heads: items.iter().map(ast_pat).collect(),
+                        has_spread: spread.is_some(),
+                    },
+                }
+            }
+        }
+        PatternKind::Constructor { constructor, args } => {
+            let fields = match args {
+                Some(args) => args
+                    .iter()
+                    .filter(|a| !a.spread)
+                    .map(|a| {
+                        a.pattern.as_ref().map(ast_pat).unwrap_or(Pat {
+                            head: Head::Wildcard,
+                        })
+                    })
+                    .collect(),
+                None => vec![],
+            };
+            Pat {
+                head: Head::Ctor {
+                    name: constructor.name.text.clone(),
+                    fields,
+                },
+            }
+        }
+        PatternKind::StringPrefix { .. } | PatternKind::BitArray(_) => Pat {
+            head: Head::Infinite,
+        },
+    }
+}
+
+fn spec_ctor(matrix: &[Row], name: &str, arity: usize) -> Vec<Row> {
+    let mut out = Vec::new();
+    for row in matrix {
+        if row.is_empty() {
+            continue;
+        }
+        match &row[0].head {
+            Head::Ctor {
+                name: n, fields, ..
+            } if n == name => {
+                let mut r = fields.clone();
+                r.resize(
+                    arity,
+                    Pat {
+                        head: Head::Wildcard,
+                    },
+                );
+                r.truncate(arity);
+                r.extend_from_slice(&row[1..]);
+                out.push(r);
+            }
+            Head::Wildcard => {
+                let mut r: Vec<Pat> = (0..arity)
+                    .map(|_| Pat {
+                        head: Head::Wildcard,
+                    })
+                    .collect();
+                r.extend_from_slice(&row[1..]);
+                out.push(r);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn spec_tuple(matrix: &[Row], arity: usize) -> Vec<Row> {
+    let mut out = Vec::new();
+    for row in matrix {
+        if row.is_empty() {
+            continue;
+        }
+        match &row[0].head {
+            Head::Tuple(elems) => {
+                let mut r = elems.clone();
+                r.resize(
+                    arity,
+                    Pat {
+                        head: Head::Wildcard,
+                    },
+                );
+                r.truncate(arity);
+                r.extend_from_slice(&row[1..]);
+                out.push(r);
+            }
+            Head::Wildcard => {
+                let mut r: Vec<Pat> = (0..arity)
+                    .map(|_| Pat {
+                        head: Head::Wildcard,
+                    })
+                    .collect();
+                r.extend_from_slice(&row[1..]);
+                out.push(r);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn spec_list_nil(matrix: &[Row]) -> Vec<Row> {
+    let mut out = Vec::new();
+    for row in matrix {
+        if row.is_empty() {
+            continue;
+        }
+        match &row[0].head {
+            Head::ListNil | Head::Wildcard => out.push(row[1..].to_vec()),
+            Head::ListCons { heads, has_spread } if heads.is_empty() && *has_spread => {
+                out.push(row[1..].to_vec());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn spec_list_cons(matrix: &[Row], n_heads: usize, _has_spread: bool) -> Vec<Row> {
+    let mut out = Vec::new();
+    for row in matrix {
+        if row.is_empty() {
+            continue;
+        }
+        match &row[0].head {
+            Head::ListCons { heads, has_spread } => {
+                let mut r = heads.clone();
+                while r.len() < n_heads {
+                    r.push(Pat {
+                        head: Head::Wildcard,
+                    });
+                }
+                let rest = r.split_off(n_heads.min(r.len()));
+                r.truncate(n_heads);
+                if rest.is_empty() {
+                    r.push(Pat {
+                        head: if *has_spread {
+                            Head::Wildcard
+                        } else {
+                            Head::ListNil
+                        },
+                    });
+                } else {
+                    r.push(Pat {
+                        head: Head::ListCons {
+                            heads: rest,
+                            has_spread: *has_spread,
+                        },
+                    });
+                }
+                r.extend_from_slice(&row[1..]);
+                out.push(r);
+            }
+            Head::Wildcard => {
+                let mut r: Vec<Pat> = (0..n_heads)
+                    .map(|_| Pat {
+                        head: Head::Wildcard,
+                    })
+                    .collect();
+                r.push(Pat {
+                    head: Head::Wildcard,
+                });
+                r.extend_from_slice(&row[1..]);
+                out.push(r);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn spec_lit(matrix: &[Row], lit: &LitKind) -> Vec<Row> {
+    let mut out = Vec::new();
+    for row in matrix {
+        if row.is_empty() {
+            continue;
+        }
+        match &row[0].head {
+            Head::Lit(l) if l == lit => out.push(row[1..].to_vec()),
+            Head::Wildcard => out.push(row[1..].to_vec()),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn default_matrix(matrix: &[Row]) -> Vec<Row> {
+    matrix
+        .iter()
+        .filter_map(|row| {
+            if row.is_empty() {
+                return None;
+            }
+            match &row[0].head {
+                Head::Wildcard => Some(row[1..].to_vec()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn missing_witness(store: &TypeStore, matrix: &[Row], tys: &[Type]) -> Option<String> {
+    if tys.is_empty() {
+        return Some("_".into());
+    }
+    let ty = follow(store, &tys[0]);
+    if let Some(ctors) = complete_sig(store, &ty) {
+        for (name, arity) in ctors {
+            let m = spec_ctor(matrix, &name, arity);
+            // If specialized matrix doesn't cover wildcards for remaining...
+            // Simplified witness: constructor name if no row mentions it at top level.
+            let covered = matrix.iter().any(|r| {
+                !r.is_empty() && matches!(&r[0].head, Head::Ctor { name: n, .. } if *n == name)
+                    || matches!(&r[0].head, Head::Wildcard)
+            });
+            let _ = m;
+            if !covered {
+                return Some(if arity == 0 {
+                    name
+                } else {
+                    format!("{name}(..)")
+                });
+            }
+            // Sub-pattern gap
+            if arity > 0 {
+                let only_wild = matrix.iter().all(|r| {
+                    r.is_empty()
+                        || matches!(&r[0].head, Head::Wildcard)
+                        || matches!(&r[0].head, Head::Ctor { name: n, fields } if *n == name && fields.iter().all(|f| matches!(f.head, Head::Wildcard)))
+                });
+                if !only_wild {
+                    // Check if some ctor specialization leaves a gap — use name(..)
+                    let m = spec_ctor(matrix, &name, arity);
+                    let wild_rest: Row = (0..arity + tys.len() - 1)
+                        .map(|_| Pat {
+                            head: Head::Wildcard,
+                        })
+                        .collect();
+                    let mut ntys = ctor_fields(store, &ty, &name, arity);
+                    ntys.extend_from_slice(&tys[1..]);
+                    // Can't call useful without &mut self — approximate:
+                    if m.is_empty() {
+                        return Some(format!("{name}(..)"));
+                    }
+                    let _ = wild_rest;
+                }
+            }
+        }
+        // Nested gap common case: Some(True) missing Some(False)
+        for (name, arity) in complete_sig(store, &ty).unwrap_or_default() {
+            if arity == 0 {
+                continue;
+            }
+            let m = spec_ctor(matrix, &name, arity);
+            let ftys = ctor_fields(store, &ty, &name, arity);
+            if let Some(w) = missing_witness(store, &m, &{
+                let mut t = ftys.clone();
+                t.extend_from_slice(&tys[1..]);
+                t
+            }) {
+                if w != "_" {
+                    return Some(format!("{name}({w})"));
+                }
+                // Check if first field type has a complete sig not covered
+                if let Some(inner) = ftys.first() {
+                    if let Some(sig) = complete_sig(store, inner) {
+                        for (iname, _) in sig {
+                            let covered = m.iter().any(|r| {
+                                !r.is_empty()
+                                    && (matches!(&r[0].head, Head::Ctor { name: n, .. } if *n == iname)
+                                        || matches!(&r[0].head, Head::Wildcard))
+                            });
+                            if !covered {
+                                return Some(format!("{name}({iname})"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return Some("_".into());
+    }
+    match &ty {
+        Type::List(_) => {
+            let has_nil = matrix.iter().any(|r| {
+                !r.is_empty()
+                    && (matches!(r[0].head, Head::ListNil | Head::Wildcard)
+                        || matches!(&r[0].head, Head::ListCons { heads, has_spread } if heads.is_empty() && *has_spread))
+            });
+            let has_cons = matrix.iter().any(|r| {
+                !r.is_empty() && (matches!(r[0].head, Head::ListCons { .. } | Head::Wildcard))
+            });
+            if !has_nil {
+                return Some("[]".into());
+            }
+            if !has_cons {
+                return Some("[_, ..]".into());
+            }
+            Some("_".into())
+        }
+        Type::Tuple(_) => Some("#(..)".into()),
+        _ => Some("_".into()),
+    }
 }
 
 fn check_guard(g: &Expr, sink: &mut TypeSink) {
@@ -129,30 +751,14 @@ fn guard_ok(e: &Expr) -> bool {
         | ExprKind::Float(_)
         | ExprKind::String(_)
         | ExprKind::Var(_)
-        | ExprKind::Constructor(ConstructorRef { .. }) => {
-            // nullary ctor only — with args would be Call
-            true
-        }
+        | ExprKind::Constructor(_) => true,
         ExprKind::Paren(inner) => guard_ok(inner),
         ExprKind::Field { base, .. } => guard_ok(base),
         ExprKind::Unary {
             op: UnaryOp::Neg | UnaryOp::Not,
             expr,
         } => guard_ok(expr),
-        ExprKind::Binary { left, op, right } => {
-            // all §5.7 binops except pipe (pipe is ExprKind::Pipe)
-            let _ = op;
-            guard_ok(left) && guard_ok(right)
-        }
-        ExprKind::Pipe { .. }
-        | ExprKind::Call { .. }
-        | ExprKind::Block(_)
-        | ExprKind::Case { .. }
-        | ExprKind::Fn { .. }
-        | ExprKind::Todo { .. }
-        | ExprKind::Panic { .. }
-        | ExprKind::Assert { .. }
-        | ExprKind::Echo(_) => false,
+        ExprKind::Binary { left, right, .. } => guard_ok(left) && guard_ok(right),
         _ => false,
     }
 }
@@ -210,6 +816,11 @@ fn collect_vars(p: &Pattern, out: &mut Vec<String>) {
             }
         }
         PatternKind::StringPrefix { rest, .. } => collect_vars(rest, out),
+        PatternKind::BitArray(segs) => {
+            for s in segs {
+                collect_vars(&s.pattern, out);
+            }
+        }
         _ => {}
     }
 }
@@ -230,7 +841,6 @@ fn pattern_irrefutable(store: &TypeStore, pat: &Pattern, ty: &Type) -> bool {
             }
         }
         PatternKind::Constructor { constructor, args } => {
-            // Irrefutable only for single-variant types
             let Type::App { def, .. } = ty else {
                 return false;
             };
@@ -259,89 +869,7 @@ fn pattern_irrefutable(store: &TypeStore, pat: &Pattern, ty: &Type) -> bool {
     }
 }
 
-fn missing_counterexample(
-    store: &TypeStore,
-    subjects: &[Type],
-    clauses: &[Clause],
-) -> Option<String> {
-    if subjects.len() != 1 {
-        // Multi-subject: require catch-all for now unless all bool
-        return Some("_".into());
-    }
-    let ty = &subjects[0];
-    match ty {
-        Type::Bool => {
-            let has_true = covers_ctor(clauses, "True");
-            let has_false = covers_ctor(clauses, "False");
-            if !has_true {
-                return Some("True".into());
-            }
-            if !has_false {
-                return Some("False".into());
-            }
-            None
-        }
-        Type::Nil => {
-            if covers_ctor(clauses, "Nil") || has_wildcard(clauses) {
-                None
-            } else {
-                Some("Nil".into())
-            }
-        }
-        Type::App { def, .. } => missing_adt(store, *def, clauses),
-        Type::Int | Type::Float | Type::String | Type::BitArray => {
-            if has_wildcard(clauses) {
-                None
-            } else {
-                Some("_".into())
-            }
-        }
-        _ => {
-            if has_wildcard(clauses) {
-                None
-            } else {
-                Some("_".into())
-            }
-        }
-    }
-}
-
-fn missing_adt(store: &TypeStore, def: TypeDefId, clauses: &[Clause]) -> Option<String> {
-    let info = store.defs.get(&def)?;
-    if has_wildcard(clauses) {
-        return None;
-    }
-    for v in &info.variants {
-        if !covers_ctor(clauses, &v.name) {
-            return Some(v.name.clone());
-        }
-    }
-    None
-}
-
-fn covers_ctor(clauses: &[Clause], name: &str) -> bool {
-    clauses.iter().any(|c| {
-        c.guard.is_none()
-            && c.patterns.iter().any(|row| {
-                row.patterns.iter().any(|p| match &p.kind {
-                    PatternKind::Constructor { constructor, .. } => constructor.name.text == name,
-                    PatternKind::Var(n) if n.text == name => true,
-                    _ => false,
-                })
-            })
-    })
-}
-
-fn has_wildcard(clauses: &[Clause]) -> bool {
-    clauses.iter().any(|c| {
-        c.guard.is_none()
-            && c.patterns
-                .iter()
-                .any(|row| row.patterns.iter().all(is_wildcard_pat))
-    })
-}
-
-/// Soundness helper: when checker says exhaustive for small finite types, verify.
+/// Soundness helper kept for tests.
 pub fn brute_force_confirm_bool(clauses: &[Clause]) -> bool {
     let values = ["True", "False"];
     values.iter().all(|v| {
