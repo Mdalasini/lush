@@ -156,6 +156,7 @@ pub struct Block {
 
 /// Statement inside a block.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // AST nodes are heap-allocated at the block level.
 pub enum Statement {
     /// Local function definition (no trailing `;`).
     Fn(FnDef),

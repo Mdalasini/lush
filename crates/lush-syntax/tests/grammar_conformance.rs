@@ -146,3 +146,55 @@ fn pipes_labels_captures() {
         &wrap_expr(r#"replace(in: "a,b", each: ",", with: " ");"#),
     );
 }
+
+#[test]
+fn list_spread_leading_only() {
+    // Leading spread with a following element is rejected (`[..xs, x]`).
+    assert_rejects(
+        "leading spread then element",
+        &wrap_expr("let xs = [..ys, x]; Nil;"),
+    );
+    // Trailing comma after a lone leading spread is accepted.
+    assert_parses(
+        "leading spread with trailing comma",
+        &wrap_expr("let xs = [..ys,]; Nil;"),
+    );
+}
+
+#[test]
+fn discard_param_and_host_import() {
+    assert_parses(
+        "discard parameter name",
+        &wrap_block("  fn ignore(_) { Nil; }\n  ignore(1);\n"),
+    );
+    assert_parses(
+        "github.com import path",
+        "import github.com/user/repo;\npub fn main() -> Nil { Nil; }\n",
+    );
+}
+
+#[test]
+fn opaque_constructor_update_parses() {
+    // Opacity is a type-checker concern; the grammar accepts the update form.
+    assert_parses(
+        "opaque type record update syntax",
+        r#"
+pub opaque type User {
+  User(name: String, age: Int)
+}
+pub fn main() -> User {
+  User(..user, age: 31);
+}
+"#,
+    );
+}
+
+#[test]
+fn and_with_equality_parses() {
+    // Non-associativity applies within the same precedence class; `&&` may
+    // combine equality comparisons without extra parentheses.
+    assert_parses(
+        "equality under &&",
+        &wrap_expr("let x = a == b && c == d; Nil;"),
+    );
+}

@@ -1,4 +1,8 @@
 //! Type checking entry points and inference.
+//!
+//! This is an early prototype: enough to type-check complete documentation
+//! modules and catch basic mismatches. It is not a full Hindley-Milner
+//! implementation of `spec.md` §4.3.
 
 use crate::desugar::desugar_module;
 use crate::env::Env;
@@ -7,7 +11,7 @@ use crate::ty::{apply, free_vars, Scheme, Subst, Type};
 use crate::unify::unify;
 use lush_syntax::ast::*;
 use lush_syntax::{parse_module, Span};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Parse and type-check a source module.
 pub fn typecheck_source(source: &str) -> Result<(), Vec<TypeError>> {
@@ -40,8 +44,14 @@ struct Checker {
     subst: Subst,
     next_var: u32,
     errors: Vec<TypeError>,
-    /// Local ADT constructors: name -> scheme
+    /// Local ADT constructors: name -> scheme.
     ctors: HashMap<String, Scheme>,
+    /// Type aliases: name -> (params, body).
+    aliases: HashMap<String, (Vec<String>, TypeExpr)>,
+    /// Scoped annotation type variables (`a`, `b`, …) → unification vars.
+    type_vars: HashMap<String, Type>,
+    /// Function parameter labels for labelled-argument reordering.
+    fn_labels: HashMap<String, Vec<Option<String>>>,
 }
 
 impl Checker {
@@ -52,6 +62,9 @@ impl Checker {
             next_var: 100,
             errors: Vec::new(),
             ctors: HashMap::new(),
+            aliases: HashMap::new(),
+            type_vars: HashMap::new(),
+            fn_labels: HashMap::new(),
         }
     }
 
@@ -92,23 +105,15 @@ impl Checker {
             }
         }
 
-        // Pre-bind functions for mutual recursion (monomorphic placeholders).
+        // Pre-bind functions/consts with fresh placeholders (shared with check).
         for def in &module.definitions {
             if let Definition::Fn(f) = def {
-                let ret = f
-                    .return_type
-                    .as_ref()
-                    .map(|t| self.ast_type(t))
-                    .unwrap_or_else(|| self.fresh());
-                let params: Vec<Type> = f
-                    .params
-                    .iter()
-                    .map(|p| {
-                        p.ty.as_ref()
-                            .map(|t| self.ast_type(t))
-                            .unwrap_or_else(|| self.fresh())
-                    })
-                    .collect();
+                let params: Vec<Type> = f.params.iter().map(|_| self.fresh()).collect();
+                let ret = self.fresh();
+                self.fn_labels.insert(
+                    f.name.clone(),
+                    f.params.iter().map(|p| p.label.clone()).collect(),
+                );
                 self.env.insert_mono(
                     f.name.clone(),
                     Type::Fn {
@@ -118,10 +123,7 @@ impl Checker {
                 );
             }
             if let Definition::Const(c) = def {
-                let ty =
-                    c.ty.as_ref()
-                        .map(|t| self.ast_type(t))
-                        .unwrap_or_else(|| self.fresh());
+                let ty = self.fresh();
                 self.env.insert_mono(c.name.clone(), ty);
             }
         }
@@ -129,13 +131,7 @@ impl Checker {
         for def in &module.definitions {
             match def {
                 Definition::Fn(f) => self.check_fn(f),
-                Definition::Const(c) => {
-                    let inferred = self.infer_expr(&c.value);
-                    if let Some(ann) = &c.ty {
-                        let ann_ty = self.ast_type(ann);
-                        let _ = unify(&mut self.subst, &inferred, &ann_ty, c.span);
-                    }
-                }
+                Definition::Const(c) => self.check_const(c),
                 Definition::Type(_) => {}
             }
         }
@@ -143,83 +139,286 @@ impl Checker {
 
     fn register_type_def(&mut self, t: &TypeDef) {
         self.env.types.insert(t.name.clone(), t.params.len());
-        if let TypeDefBody::Adt(variants) = &t.body {
-            for v in variants {
-                let param_tys: Vec<Type> = v.fields.iter().map(|f| self.ast_type(&f.ty)).collect();
+        match &t.body {
+            TypeDefBody::Alias(alias) => {
+                self.aliases
+                    .insert(t.name.clone(), (t.params.clone(), alias.clone()));
+            }
+            TypeDefBody::Adt(variants) => {
+                let saved_tvars = self.type_vars.clone();
+                self.type_vars.clear();
+                let param_vars: Vec<Type> = t
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let v = self.fresh();
+                        self.type_vars.insert(p.clone(), v.clone());
+                        v
+                    })
+                    .collect();
                 let ret = Type::Named {
                     module: None,
                     name: t.name.clone(),
-                    args: t.params.iter().map(|_| self.fresh()).collect(),
+                    args: param_vars.clone(),
                 };
-                if param_tys.is_empty() {
-                    self.ctors.insert(v.name.clone(), Scheme::mono(ret.clone()));
-                    self.env.insert_mono(v.name.clone(), ret);
-                } else {
-                    let scheme = Scheme::mono(Type::Fn {
-                        params: param_tys,
-                        ret: Box::new(ret),
-                    });
-                    self.ctors.insert(v.name.clone(), scheme.clone());
-                    self.env.insert_scheme(v.name.clone(), scheme);
+                for v in variants {
+                    let param_tys: Vec<Type> =
+                        v.fields.iter().map(|f| self.ast_type(&f.ty)).collect();
+                    let scheme_vars = free_vars(&ret);
+                    if param_tys.is_empty() {
+                        let scheme = Scheme {
+                            vars: scheme_vars,
+                            body: ret.clone(),
+                        };
+                        self.ctors.insert(v.name.clone(), scheme.clone());
+                        self.env.insert_scheme(v.name.clone(), scheme);
+                    } else {
+                        let body = Type::Fn {
+                            params: param_tys,
+                            ret: Box::new(ret.clone()),
+                        };
+                        let mut vars = free_vars(&body);
+                        vars.retain(|x| scheme_vars.contains(x) || free_vars(&body).contains(x));
+                        let scheme = Scheme {
+                            vars: free_vars(&body),
+                            body,
+                        };
+                        self.ctors.insert(v.name.clone(), scheme.clone());
+                        self.env.insert_scheme(v.name.clone(), scheme);
+                    }
                 }
+                self.type_vars = saved_tvars;
             }
         }
     }
 
-    fn check_fn(&mut self, f: &FnDef) {
-        let saved = self.env.clone();
-        let mut param_tys = Vec::new();
-        for p in &f.params {
-            let ty =
-                p.ty.as_ref()
-                    .map(|t| self.ast_type(t))
-                    .unwrap_or_else(|| self.fresh());
-            self.env.insert_mono(p.name.clone(), ty.clone());
-            param_tys.push(ty);
+    fn check_const(&mut self, c: &ConstDef) {
+        let inferred = self.infer_expr(&c.value);
+        let expected = self
+            .env
+            .get(&c.name)
+            .cloned()
+            .map(|s| s.body)
+            .unwrap_or_else(|| self.fresh());
+        if let Err(e) = unify(&mut self.subst, &inferred, &expected, c.span) {
+            self.errors.push(e);
         }
-        let body_ty = self.infer_block_scoped(&f.body);
-        if let Some(ret) = &f.return_type {
-            let ret_ty = self.ast_type(ret);
-            if let Err(e) = unify(&mut self.subst, &body_ty, &ret_ty, f.span) {
+        if let Some(ann) = &c.ty {
+            let saved = self.type_vars.clone();
+            self.type_vars.clear();
+            let ann_ty = self.ast_type(ann);
+            self.type_vars = saved;
+            if let Err(e) = unify(&mut self.subst, &inferred, &ann_ty, c.span) {
                 self.errors.push(e);
             }
         }
+        let final_ty = apply(&self.subst, &inferred);
+        self.env.insert_mono(c.name.clone(), final_ty);
+    }
+
+    fn check_fn(&mut self, f: &FnDef) {
+        let saved_env = self.env.clone();
+        let saved_tvars = self.type_vars.clone();
+        self.type_vars.clear();
+
+        let placeholder = self
+            .env
+            .get(&f.name)
+            .cloned()
+            .map(|s| apply(&self.subst, &s.body));
+
+        let (param_tys, ret_ty) = match placeholder {
+            Some(Type::Fn { params, ret }) => (params, *ret),
+            _ => {
+                let params: Vec<Type> = f.params.iter().map(|_| self.fresh()).collect();
+                (params, self.fresh())
+            }
+        };
+
+        self.fn_labels.insert(
+            f.name.clone(),
+            f.params.iter().map(|p| p.label.clone()).collect(),
+        );
+
+        for (p, ty) in f.params.iter().zip(param_tys.iter()) {
+            if let Some(ann) = &p.ty {
+                let ann_ty = self.ast_type(ann);
+                if let Err(e) = unify(&mut self.subst, ty, &ann_ty, p.span) {
+                    self.errors.push(e);
+                }
+            }
+            self.env.insert_mono(p.name.clone(), apply(&self.subst, ty));
+        }
+
+        let body_ty = self.infer_block_scoped(&f.body);
+        if let Err(e) = unify(&mut self.subst, &body_ty, &ret_ty, f.span) {
+            self.errors.push(e);
+        }
+        if let Some(ann) = &f.return_type {
+            let ann_ty = self.ast_type(ann);
+            if let Err(e) = unify(&mut self.subst, &ret_ty, &ann_ty, f.span) {
+                self.errors.push(e);
+            }
+        }
+
         let fn_ty = Type::Fn {
             params: param_tys,
-            ret: Box::new(body_ty),
+            ret: Box::new(ret_ty),
         };
-        self.env = saved;
-        self.env
-            .insert_mono(f.name.clone(), apply(&self.subst, &fn_ty));
+        // Restore the outer env without this function's monomorphic placeholder so
+        // its parameter/return vars are eligible for generalization.
+        self.env = saved_env;
+        self.env.values.remove(&f.name);
+        self.type_vars = saved_tvars;
+        let scheme = self.generalize(&fn_ty);
+        self.env.insert_scheme(f.name.clone(), scheme);
+    }
+
+    fn generalize(&self, ty: &Type) -> Scheme {
+        let applied = apply(&self.subst, ty);
+        let mut env_vars = HashSet::new();
+        for scheme in self.env.values.values() {
+            for v in free_vars(&apply(&self.subst, &scheme.body)) {
+                // Quantified vars in the scheme are not free in the env.
+                if !scheme.vars.contains(&v) {
+                    env_vars.insert(v);
+                }
+            }
+            for v in &scheme.vars {
+                // Instantiations may have replaced these; track applied body only.
+                let _ = v;
+            }
+        }
+        let vars: Vec<u32> = free_vars(&applied)
+            .into_iter()
+            .filter(|v| !env_vars.contains(v))
+            .collect();
+        Scheme {
+            vars,
+            body: applied,
+        }
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, ty: &Type) {
+        let ty = apply(&self.subst, ty);
         match &pattern.kind {
-            PatternKind::Var(name) | PatternKind::As { name, .. } => {
-                self.env.insert_mono(name.clone(), apply(&self.subst, ty));
+            PatternKind::Var(name) => {
+                self.env.insert_mono(name.clone(), ty);
+            }
+            PatternKind::As {
+                pattern: inner,
+                name,
+            } => {
+                self.bind_pattern(inner, &ty);
+                self.env.insert_mono(name.clone(), apply(&self.subst, &ty));
             }
             PatternKind::Discard => {}
-            PatternKind::Constructor { fields, .. } => {
-                for f in fields {
-                    let field_ty = self.fresh();
-                    self.bind_pattern(&f.pattern, &field_ty);
+            PatternKind::Int(_) => {
+                if let Err(e) = unify(&mut self.subst, &ty, &Type::int(), pattern.span) {
+                    self.errors.push(e);
+                }
+            }
+            PatternKind::Float(_) => {
+                if let Err(e) = unify(&mut self.subst, &ty, &Type::float(), pattern.span) {
+                    self.errors.push(e);
+                }
+            }
+            PatternKind::String(_) => {
+                if let Err(e) = unify(&mut self.subst, &ty, &Type::string(), pattern.span) {
+                    self.errors.push(e);
+                }
+            }
+            PatternKind::StringPrefix { rest, .. } => {
+                if let Err(e) = unify(&mut self.subst, &ty, &Type::string(), pattern.span) {
+                    self.errors.push(e);
+                }
+                self.bind_pattern(rest, &Type::string());
+            }
+            PatternKind::BitArray(_) => {
+                if let Err(e) = unify(&mut self.subst, &ty, &Type::bit_array(), pattern.span) {
+                    self.errors.push(e);
+                }
+            }
+            PatternKind::Constructor {
+                module,
+                name,
+                fields,
+                ..
+            } => {
+                let ctor_ty = if module.is_some() {
+                    // Qualified constructor from an imported module stub.
+                    let field_tys: Vec<Type> = fields.iter().map(|_| self.fresh()).collect();
+                    if field_tys.is_empty() {
+                        ty.clone()
+                    } else {
+                        Type::Fn {
+                            params: field_tys,
+                            ret: Box::new(ty.clone()),
+                        }
+                    }
+                } else if let Some(scheme) = self.ctors.get(name).cloned() {
+                    self.instantiate(&scheme)
+                } else if let Some(scheme) = self.env.get(name).cloned() {
+                    self.instantiate(&scheme)
+                } else {
+                    self.errors.push(TypeError::Unbound {
+                        span: pattern.span,
+                        name: name.clone(),
+                    });
+                    let field_tys: Vec<Type> = fields.iter().map(|_| self.fresh()).collect();
+                    if field_tys.is_empty() {
+                        ty.clone()
+                    } else {
+                        Type::Fn {
+                            params: field_tys,
+                            ret: Box::new(ty.clone()),
+                        }
+                    }
+                };
+                if fields.is_empty() {
+                    if let Err(e) = unify(&mut self.subst, &ctor_ty, &ty, pattern.span) {
+                        self.errors.push(e);
+                    }
+                } else {
+                    let field_tys: Vec<Type> = fields.iter().map(|_| self.fresh()).collect();
+                    let expected = Type::Fn {
+                        params: field_tys.clone(),
+                        ret: Box::new(ty.clone()),
+                    };
+                    if let Err(e) = unify(&mut self.subst, &ctor_ty, &expected, pattern.span) {
+                        self.errors.push(e);
+                    }
+                    for (f, ft) in fields.iter().zip(field_tys.iter()) {
+                        self.bind_pattern(&f.pattern, ft);
+                    }
                 }
             }
             PatternKind::Tuple(elems) => {
-                if let Type::Tuple(tys) = apply(&self.subst, ty) {
+                if let Type::Tuple(tys) = &ty {
                     for (p, t) in elems.iter().zip(tys.iter()) {
                         self.bind_pattern(p, t);
                     }
                 } else {
-                    for p in elems {
-                        let t = self.fresh();
-                        self.bind_pattern(p, &t);
+                    let elem_tys: Vec<Type> = elems.iter().map(|_| self.fresh()).collect();
+                    let expected = Type::Tuple(elem_tys.clone());
+                    if let Err(e) = unify(&mut self.subst, &ty, &expected, pattern.span) {
+                        self.errors.push(e);
+                    }
+                    for (p, t) in elems.iter().zip(elem_tys.iter()) {
+                        self.bind_pattern(p, t);
                     }
                 }
             }
             PatternKind::List { items, rest } => {
                 let elem = self.fresh();
-                let _ = unify(&mut self.subst, ty, &Type::list(elem.clone()), pattern.span);
+                if let Err(e) = unify(
+                    &mut self.subst,
+                    &ty,
+                    &Type::list(elem.clone()),
+                    pattern.span,
+                ) {
+                    self.errors.push(e);
+                }
                 for p in items {
                     self.bind_pattern(p, &elem);
                 }
@@ -227,11 +426,6 @@ impl Checker {
                     self.bind_pattern(r, &Type::list(elem));
                 }
             }
-            PatternKind::StringPrefix { rest, .. } => {
-                self.bind_pattern(rest, &Type::string());
-            }
-            PatternKind::BitArray(_) => {}
-            PatternKind::Int(_) | PatternKind::Float(_) | PatternKind::String(_) => {}
         }
     }
 
@@ -247,58 +441,15 @@ impl Checker {
                 let base_ty = apply(&self.subst, &inferred);
                 if let Type::Named { name, .. } = &base_ty {
                     if name.starts_with("Module_") {
-                        // Flexible member.
+                        // Imported module member: flexible stub.
+                        let _ = field;
                         return self.fresh();
                     }
                 }
-                // Record field: fresh for minimal checker.
                 let _ = field;
                 self.fresh()
             }
-            ExprKind::Call { callee, args } => {
-                let callee_ty = self.infer_expr(callee);
-                let mut arg_tys = Vec::new();
-                let mut hole_ty = None;
-                for arg in args {
-                    match &arg.value {
-                        ArgValue::Hole => {
-                            let t = self.fresh();
-                            hole_ty = Some(t.clone());
-                            arg_tys.push(t);
-                        }
-                        ArgValue::Expr(e) => arg_tys.push(self.infer_expr(e)),
-                    }
-                }
-                let ret = self.fresh();
-                let expected = Type::Fn {
-                    params: arg_tys,
-                    ret: Box::new(ret.clone()),
-                };
-                // Flexible: if callee is a free var (module stub member), bind it.
-                if let Err(e) = unify(&mut self.subst, &callee_ty, &expected, expr.span) {
-                    // Soft-fail for stub flexibility: ignore arity mismatches from stubs.
-                    if !matches!(apply(&self.subst, &callee_ty), Type::Var(_)) {
-                        self.errors.push(e);
-                    } else {
-                        self.subst.insert(
-                            match apply(&self.subst, &callee_ty) {
-                                Type::Var(v) => v,
-                                _ => unreachable!(),
-                            },
-                            expected,
-                        );
-                    }
-                }
-                if let Some(h) = hole_ty {
-                    // Capture: return fn(h) -> ret
-                    Type::Fn {
-                        params: vec![h],
-                        ret: Box::new(ret),
-                    }
-                } else {
-                    ret
-                }
-            }
+            ExprKind::Call { callee, args } => self.infer_call(callee, args, expr.span),
             ExprKind::Binary { left, op, right } => {
                 let lt = self.infer_expr(left);
                 let rt = self.infer_expr(right);
@@ -308,7 +459,6 @@ impl Checker {
                 let t = self.infer_expr(inner);
                 match op {
                     UnaryOp::Neg => {
-                        // Int or Float
                         if let Err(e) = unify(&mut self.subst, &t, &Type::int(), expr.span) {
                             if unify(&mut self.subst, &t, &Type::float(), expr.span).is_err() {
                                 self.errors.push(e);
@@ -327,57 +477,43 @@ impl Checker {
                 }
             }
             ExprKind::Pipe { left, right } => {
+                // Infer left once; never rebuild a Call that re-infers it.
                 let left_ty = self.infer_expr(left);
-                // Desugar pipe typing: right should accept left as first arg.
                 match &right.kind {
                     ExprKind::Call { callee, args } => {
-                        let mut new_args = vec![Arg {
-                            label: None,
-                            value: ArgValue::Expr((**left).clone()),
-                            span: left.span,
-                        }];
-                        // If hole present, replace; else insert first.
-                        let mut replaced = false;
-                        for a in args {
-                            if matches!(a.value, ArgValue::Hole) && !replaced {
-                                new_args.push(Arg {
-                                    label: a.label.clone(),
-                                    value: ArgValue::Expr((**left).clone()),
-                                    span: a.span,
-                                });
-                                replaced = true;
-                            } else if !matches!(a.value, ArgValue::Hole) {
-                                new_args.push(a.clone());
+                        let has_hole = args.iter().any(|a| matches!(a.value, ArgValue::Hole));
+                        let mut arg_tys = Vec::new();
+                        if !has_hole {
+                            arg_tys.push(left_ty.clone());
+                        }
+                        for arg in args {
+                            match &arg.value {
+                                ArgValue::Hole => arg_tys.push(left_ty.clone()),
+                                ArgValue::Expr(e) => arg_tys.push(self.infer_expr(e)),
                             }
                         }
-                        if replaced {
-                            // left already used as hole fill — don't also prepend
-                            new_args.remove(0);
-                        }
-                        let call = Expr {
-                            span: expr.span,
-                            kind: ExprKind::Call {
-                                callee: callee.clone(),
-                                args: new_args,
-                            },
+                        let callee_ty = self.infer_expr(callee);
+                        let ret = self.fresh();
+                        let expected = Type::Fn {
+                            params: arg_tys,
+                            ret: Box::new(ret.clone()),
                         };
-                        let _ = left_ty;
-                        self.infer_expr(&call)
+                        if let Err(e) = unify(&mut self.subst, &callee_ty, &expected, expr.span) {
+                            self.errors.push(e);
+                        }
+                        ret
                     }
                     _ => {
-                        // f |> g  means g(f) when g is a function ref
-                        let call = Expr {
-                            span: expr.span,
-                            kind: ExprKind::Call {
-                                callee: right.clone(),
-                                args: vec![Arg {
-                                    label: None,
-                                    value: ArgValue::Expr((**left).clone()),
-                                    span: left.span,
-                                }],
-                            },
+                        let callee_ty = self.infer_expr(right);
+                        let ret = self.fresh();
+                        let expected = Type::Fn {
+                            params: vec![left_ty],
+                            ret: Box::new(ret.clone()),
                         };
-                        self.infer_expr(&call)
+                        if let Err(e) = unify(&mut self.subst, &callee_ty, &expected, expr.span) {
+                            self.errors.push(e);
+                        }
+                        ret
                     }
                 }
             }
@@ -387,6 +523,8 @@ impl Checker {
                 body,
             } => {
                 let saved = self.env.clone();
+                let saved_tvars = self.type_vars.clone();
+                self.type_vars.clear();
                 let mut pts = Vec::new();
                 for p in params {
                     let ty =
@@ -404,6 +542,7 @@ impl Checker {
                     }
                 }
                 self.env = saved;
+                self.type_vars = saved_tvars;
                 Type::Fn {
                     params: pts,
                     ret: Box::new(body_ty),
@@ -443,7 +582,12 @@ impl Checker {
             }
             ExprKind::Echo { value } => self.infer_expr(value),
             ExprKind::Group(inner) => self.infer_expr(inner),
-            ExprKind::Block(b) => self.infer_block_scoped(b),
+            ExprKind::Block(b) => {
+                let saved = self.env.clone();
+                let t = self.infer_block_scoped(b);
+                self.env = saved;
+                t
+            }
             ExprKind::List { items, spread } => {
                 let elem = self.fresh();
                 for item in items {
@@ -474,13 +618,78 @@ impl Checker {
         }
     }
 
-    /// Infer a block while keeping let bindings in the current env (for fn bodies).
+    fn infer_call(&mut self, callee: &Expr, args: &[Arg], span: Span) -> Type {
+        let callee_ty = self.infer_expr(callee);
+        let labels = match &callee.kind {
+            ExprKind::Ident(name) | ExprKind::Constructor(name) => {
+                self.fn_labels.get(name).cloned()
+            }
+            ExprKind::Field { field, .. } => self.fn_labels.get(field).cloned(),
+            _ => None,
+        };
+        let ordered = reorder_args(args, labels.as_deref());
+
+        let mut arg_tys = Vec::new();
+        let mut hole_ty = None;
+        for arg in &ordered {
+            match &arg.value {
+                ArgValue::Hole => {
+                    let t = self.fresh();
+                    hole_ty = Some(t.clone());
+                    arg_tys.push(t);
+                }
+                ArgValue::Expr(e) => arg_tys.push(self.infer_expr(e)),
+            }
+        }
+        let ret = self.fresh();
+        let expected = Type::Fn {
+            params: arg_tys,
+            ret: Box::new(ret.clone()),
+        };
+        // Always go through unify so occurs-check is never bypassed.
+        if let Err(e) = unify(&mut self.subst, &callee_ty, &expected, span) {
+            self.errors.push(e);
+        }
+        if let Some(h) = hole_ty {
+            Type::Fn {
+                params: vec![h],
+                ret: Box::new(ret),
+            }
+        } else {
+            ret
+        }
+    }
+
+    /// Infer a block; `let`/`fn` bindings stay in scope for later statements.
+    /// The result type is the type of the final statement (expression), or `Nil`.
     fn infer_block_scoped(&mut self, block: &Block) -> Type {
-        let mut last = Type::nil();
-        let mut saw_expr = false;
-        for stmt in &block.statements {
+        if block.statements.is_empty() {
+            return Type::nil();
+        }
+        let last_idx = block.statements.len() - 1;
+        let mut result = Type::nil();
+        for (i, stmt) in block.statements.iter().enumerate() {
             match stmt {
-                Statement::Fn(f) => self.check_fn(f),
+                Statement::Fn(f) => {
+                    // Local functions: fresh placeholder then check + generalize.
+                    let params: Vec<Type> = f.params.iter().map(|_| self.fresh()).collect();
+                    let ret = self.fresh();
+                    self.fn_labels.insert(
+                        f.name.clone(),
+                        f.params.iter().map(|p| p.label.clone()).collect(),
+                    );
+                    self.env.insert_mono(
+                        f.name.clone(),
+                        Type::Fn {
+                            params,
+                            ret: Box::new(ret),
+                        },
+                    );
+                    self.check_fn(f);
+                    if i == last_idx {
+                        result = Type::nil();
+                    }
+                }
                 Statement::Let(l) => {
                     let value_ty = self.infer_expr(&l.value);
                     if let Some(ann) = &l.ty {
@@ -490,19 +699,25 @@ impl Checker {
                         }
                     }
                     self.bind_pattern(&l.pattern, &value_ty);
+                    if i == last_idx {
+                        result = Type::nil();
+                    }
                 }
                 Statement::Expr(e) => {
-                    last = self.infer_expr(e);
-                    saw_expr = true;
+                    let t = self.infer_expr(e);
+                    if i == last_idx {
+                        result = t;
+                    }
                 }
-                Statement::Use(_) => {}
+                Statement::Use(_) => {
+                    // Should have been desugared; treat as Nil if lingering.
+                    if i == last_idx {
+                        result = Type::nil();
+                    }
+                }
             }
         }
-        if saw_expr {
-            last
-        } else {
-            Type::nil()
-        }
+        result
     }
 
     fn infer_binop(&mut self, op: BinOp, left: Type, right: Type, span: Span) -> Type {
@@ -577,11 +792,12 @@ impl Checker {
         if let Some(scheme) = self.ctors.get(name).cloned() {
             return self.instantiate(&scheme);
         }
-        // Unknown: flexible fresh type (allows incomplete stubs while docs evolve).
-        let ty = self.fresh();
-        self.env.insert_mono(name, ty.clone());
-        let _ = span;
-        ty
+        // Do not invent a binding — that created cyclic types for `x(x)`.
+        self.errors.push(TypeError::Unbound {
+            span,
+            name: name.into(),
+        });
+        self.fresh()
     }
 
     fn instantiate(&mut self, scheme: &Scheme) -> Type {
@@ -594,16 +810,54 @@ impl Checker {
 
     fn ast_type(&mut self, ty: &TypeExpr) -> Type {
         match &ty.kind {
-            TypeKind::Var(name) => Type::Named {
-                module: None,
-                name: name.clone(),
-                args: vec![],
-            },
-            TypeKind::Named { module, name, args } => Type::Named {
-                module: module.clone(),
-                name: name.clone(),
-                args: args.iter().map(|a| self.ast_type(a)).collect(),
-            },
+            TypeKind::Var(name) => {
+                if let Some(t) = self.type_vars.get(name) {
+                    return t.clone();
+                }
+                // Lowercase names are type variables; uppercase are nominal types.
+                if name.starts_with(|c: char| c.is_ascii_lowercase()) {
+                    let v = self.fresh();
+                    self.type_vars.insert(name.clone(), v.clone());
+                    v
+                } else if let Some((params, body)) = self.aliases.get(name).cloned() {
+                    if params.is_empty() {
+                        self.ast_type(&body)
+                    } else {
+                        Type::Named {
+                            module: None,
+                            name: name.clone(),
+                            args: vec![],
+                        }
+                    }
+                } else {
+                    Type::Named {
+                        module: None,
+                        name: name.clone(),
+                        args: vec![],
+                    }
+                }
+            }
+            TypeKind::Named { module, name, args } => {
+                if module.is_none() {
+                    if let Some((params, body)) = self.aliases.get(name).cloned() {
+                        if params.len() == args.len() {
+                            let saved = self.type_vars.clone();
+                            for (p, a) in params.iter().zip(args.iter()) {
+                                let at = self.ast_type(a);
+                                self.type_vars.insert(p.clone(), at);
+                            }
+                            let expanded = self.ast_type(&body);
+                            self.type_vars = saved;
+                            return expanded;
+                        }
+                    }
+                }
+                Type::Named {
+                    module: module.clone(),
+                    name: name.clone(),
+                    args: args.iter().map(|a| self.ast_type(a)).collect(),
+                }
+            }
             TypeKind::Fn { params, ret } => Type::Fn {
                 params: params.iter().map(|p| self.ast_type(p)).collect(),
                 ret: Box::new(self.ast_type(ret)),
@@ -613,9 +867,54 @@ impl Checker {
     }
 }
 
+/// Reorder labelled arguments to match declaration label order.
+/// Unlabelled args keep relative order and fill remaining slots left-to-right.
+fn reorder_args(args: &[Arg], labels: Option<&[Option<String>]>) -> Vec<Arg> {
+    let Some(labels) = labels else {
+        return args.to_vec();
+    };
+    if labels.iter().all(|l| l.is_none()) || args.iter().all(|a| a.label.is_none()) {
+        return args.to_vec();
+    }
+
+    let mut slots: Vec<Option<Arg>> = vec![None; labels.len().max(args.len())];
+    let mut unlabelled = Vec::new();
+
+    for arg in args {
+        if let Some(label) = &arg.label {
+            if let Some(idx) = labels.iter().position(|l| l.as_ref() == Some(label)) {
+                if idx < slots.len() {
+                    slots[idx] = Some(arg.clone());
+                    continue;
+                }
+            }
+            // Unknown label: keep at end in encounter order.
+            unlabelled.push(arg.clone());
+        } else {
+            unlabelled.push(arg.clone());
+        }
+    }
+
+    let mut ui = 0;
+    for slot in &mut slots {
+        if slot.is_none() {
+            if let Some(a) = unlabelled.get(ui) {
+                *slot = Some(a.clone());
+                ui += 1;
+            }
+        }
+    }
+    while ui < unlabelled.len() {
+        slots.push(Some(unlabelled[ui].clone()));
+        ui += 1;
+    }
+
+    slots.into_iter().flatten().collect()
+}
+
 fn apply_map(map: &HashMap<u32, Type>, ty: &Type) -> Type {
     match ty {
-        Type::Var(v) => map.get(v).cloned().unwrap_or_else(|| Type::Var(*v)),
+        Type::Var(v) => map.get(v).cloned().unwrap_or(Type::Var(*v)),
         Type::Named { module, name, args } => Type::Named {
             module: module.clone(),
             name: name.clone(),

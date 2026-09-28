@@ -10,10 +10,7 @@ use crate::span::Span;
 /// Spans refer to the caller's `source`. `\r` is treated as whitespace by the
 /// lexer, so CRLF files keep correct byte offsets (no rewrite to `\n`).
 pub fn parse_module(source: &str) -> Result<Module, Vec<SyntaxError>> {
-    let tokens = match crate::lexer::lex(source) {
-        Ok(t) => t,
-        Err(errors) => return Err(errors),
-    };
+    let tokens = crate::lexer::lex(source)?;
     let mut parser = Parser::new(source, tokens);
     match parser.parse_module() {
         Ok(module) => {
@@ -1281,26 +1278,26 @@ impl<'a> Parser<'a> {
 
     fn parse_arg(&mut self) -> Result<Arg, ()> {
         // label: expr / label: _ / expr / _
-        if self.at(Token::Ident) {
-            if self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(Token::Colon) {
-                let label_tok = self.bump().unwrap();
-                self.bump(); // colon
-                let start = label_tok.span.start;
-                if self.at(Token::Discard) {
-                    let hole = self.bump().unwrap();
-                    return Ok(Arg {
-                        label: Some(self.text(label_tok.span)),
-                        value: ArgValue::Hole,
-                        span: Span::new(start, hole.span.end),
-                    });
-                }
-                let expr = self.parse_expr(0)?;
+        if self.at(Token::Ident)
+            && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(Token::Colon)
+        {
+            let label_tok = self.bump().unwrap();
+            self.bump(); // colon
+            let start = label_tok.span.start;
+            if self.at(Token::Discard) {
+                let hole = self.bump().unwrap();
                 return Ok(Arg {
                     label: Some(self.text(label_tok.span)),
-                    value: ArgValue::Expr(expr.clone()),
-                    span: Span::new(start, expr.span.end),
+                    value: ArgValue::Hole,
+                    span: Span::new(start, hole.span.end),
                 });
             }
+            let expr = self.parse_expr(0)?;
+            return Ok(Arg {
+                label: Some(self.text(label_tok.span)),
+                value: ArgValue::Expr(expr.clone()),
+                span: Span::new(start, expr.span.end),
+            });
         }
         if self.at(Token::Discard) {
             let hole = self.bump().unwrap();

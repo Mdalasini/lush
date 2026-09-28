@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Name resolution and Hindley-Milner type checking for Lush"
+description = "Early type-checker prototype for Lush documentation fixtures"
 
 [dependencies]
 lush-syntax = { path = "../lush-syntax" }

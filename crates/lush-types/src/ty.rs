@@ -147,7 +147,7 @@ pub fn apply(subst: &Subst, ty: &Type) -> Type {
         Type::Var(v) => subst
             .get(v)
             .map(|t| apply(subst, t))
-            .unwrap_or_else(|| Type::Var(*v)),
+            .unwrap_or(Type::Var(*v)),
         Type::Named { module, name, args } => Type::Named {
             module: module.clone(),
             name: name.clone(),

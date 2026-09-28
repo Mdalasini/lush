@@ -141,33 +141,50 @@ pub fn check_fence(class: FenceClass, body: &str) -> Result<(), Vec<SyntaxError>
     }
 }
 
-/// Spec inventory: fence index → classification for `spec.md`.
-pub fn spec_inventory() -> Vec<(usize, FenceClass)> {
+/// One inventory entry: stable key, document order index, and classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InventoryEntry {
+    /// Stable key (`section/topic`) — prefer this over bare index when editing `spec.md`.
+    pub key: &'static str,
+    /// Zero-based fence index in document order (must stay aligned with [`extract_fences`]).
+    pub index: usize,
+    /// How CI treats the fence.
+    pub class: FenceClass,
+}
+
+/// Spec inventory for `spec.md` (§11.4).
+///
+/// Keys are stable section anchors; indices must match fence order. When adding
+/// or removing fences, update both the key list and indices together.
+pub fn spec_inventory() -> Vec<InventoryEntry> {
     use FenceClass::*;
-    vec![
-        (0, Module),                  // §4.2 custom types
-        (1, WrappedSnippet),          // §5.1 bindings
-        (2, IllustrativePlaceholder), // §5.2 contains `...;`
-        (3, WrappedSnippet),          // §5.3 pipes
-        (4, WrappedSnippet),          // §5.4 case
-        (5, WrappedSnippet),          // §5.5 use
-        (6, WrappedSnippet),          // §5.10 imports + qualified call
-        (7, NonLush),                 // pipeline ascii
-        (8, Module),                  // §9.1 subject example
-        (9, WrappedSnippet),          // §9.1 selector
-        (10, ApiPseudocode),          // §9.2 process API
-        (11, ApiPseudocode),          // §9.3 actor signatures
-        (12, Module),                 // §9.3 actor example
-        (13, ApiPseudocode),          // §9.4 supervisor API
-        (14, WrappedSnippet),         // §9.5 task snippet
-        (15, ApiPseudocode),          // §9.5 task API
-        (16, NonLush),                // toolchain commands
-        (17, NonLush),                // project layout
-        (18, NonLush),                // lush.mod
-        (19, NonLush),                // ebnf
-        (20, Module),                 // §13 fib
-        (21, Module),                 // §13 million messages
-        (22, Module),                 // §13 supervised worker
-        (23, NonLush),                // crates layout
+    [
+        ("§4.2/custom-types", 0, Module),
+        ("§5.1/bindings", 1, WrappedSnippet),
+        ("§5.2/placeholder", 2, IllustrativePlaceholder),
+        ("§5.3/pipes", 3, WrappedSnippet),
+        ("§5.4/case", 4, WrappedSnippet),
+        ("§5.5/use", 5, WrappedSnippet),
+        ("§5.10/imports", 6, WrappedSnippet),
+        ("§8/pipeline-ascii", 7, NonLush),
+        ("§9.1/subject", 8, Module),
+        ("§9.1/selector", 9, WrappedSnippet),
+        ("§9.2/process-api", 10, ApiPseudocode),
+        ("§9.3/actor-signatures", 11, ApiPseudocode),
+        ("§9.3/actor-example", 12, Module),
+        ("§9.4/supervisor-api", 13, ApiPseudocode),
+        ("§9.5/task-snippet", 14, WrappedSnippet),
+        ("§9.5/task-api", 15, ApiPseudocode),
+        ("§11/toolchain", 16, NonLush),
+        ("§11/project-layout", 17, NonLush),
+        ("§11/lush.mod", 18, NonLush),
+        ("§12/ebnf", 19, NonLush),
+        ("§13/fib", 20, Module),
+        ("§13/million-messages", 21, Module),
+        ("§13/supervised-worker", 22, Module),
+        ("§15/crates-layout", 23, NonLush),
     ]
+    .into_iter()
+    .map(|(key, index, class)| InventoryEntry { key, index, class })
+    .collect()
 }

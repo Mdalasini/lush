@@ -1,6 +1,7 @@
 //! Documentation fence inventory and parse checks (`spec.md` §11.4).
 
 use lush_syntax::doc::{check_fence, extract_fences, spec_inventory, FenceClass};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 fn spec_path() -> PathBuf {
@@ -17,20 +18,31 @@ fn every_fence_is_classified() {
         inventory.len(),
         "inventory size must match fence count; update spec_inventory()"
     );
-    for (i, fence) in fences.iter().enumerate() {
-        assert_eq!(inventory[i].0, i, "inventory index mismatch at {i}");
+
+    let mut keys = HashSet::new();
+    for (i, entry) in inventory.iter().enumerate() {
+        assert_eq!(entry.index, i, "inventory index mismatch at {i}");
+        assert!(
+            keys.insert(entry.key),
+            "duplicate inventory key {}",
+            entry.key
+        );
+        let fence = &fences[i];
         if fence.lang == "lush" {
             assert!(
-                !matches!(inventory[i].1, FenceClass::NonLush),
-                "lush fence {i} classified NonLush"
+                !matches!(entry.class, FenceClass::NonLush),
+                "lush fence {} ({}) classified NonLush",
+                i,
+                entry.key
             );
         }
         if fence.lang != "lush" && !fence.lang.is_empty() {
-            // ebnf etc.
             assert!(
-                matches!(inventory[i].1, FenceClass::NonLush),
-                "non-lush lang {:?} fence {i} should be NonLush",
-                fence.lang
+                matches!(entry.class, FenceClass::NonLush),
+                "non-lush lang {:?} fence {} ({}) should be NonLush",
+                fence.lang,
+                i,
+                entry.key
             );
         }
     }
@@ -44,14 +56,14 @@ fn no_unclassified_or_silent_skips() {
     let mut parse_checked = 0usize;
     let mut excluded = 0usize;
 
-    for (fence, (idx, class)) in fences.iter().zip(inventory.iter()) {
-        assert_eq!(fence.index, *idx);
-        match class {
+    for (fence, entry) in fences.iter().zip(inventory.iter()) {
+        assert_eq!(fence.index, entry.index);
+        match entry.class {
             FenceClass::Module | FenceClass::WrappedSnippet | FenceClass::ExpectedError => {
-                check_fence(*class, &fence.body).unwrap_or_else(|e| {
+                check_fence(entry.class, &fence.body).unwrap_or_else(|e| {
                     panic!(
-                        "fence {} (line {}, {:?}) failed: {e:?}\n{}",
-                        fence.index, fence.line, class, fence.body
+                        "fence {} ({}, line {}, {:?}) failed: {e:?}\n{}",
+                        fence.index, entry.key, fence.line, entry.class, fence.body
                     )
                 });
                 parse_checked += 1;

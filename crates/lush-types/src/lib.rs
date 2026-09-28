@@ -1,8 +1,9 @@
-//! Minimal Hindley-Milner type checker for Lush (`spec.md` §4.3, §15.3 step 2 start).
+//! Early type-checker prototype for Lush (`spec.md` §15.3 step 2 start).
 //!
-//! This crate provides enough inference and prelude/stdlib stubs to type-check
-//! documentation fixtures from §11.4. Full exhaustiveness and sealed `Eq`/`Neg`
-//! constraint propagation continue to deepen in later work.
+//! Provides enough inference, prelude stubs, and `use` desugaring to type-check
+//! complete documentation modules from §11.4. This is not yet a full
+//! Hindley-Milner implementation of §4.3 (exhaustiveness, sealed `Eq`/`Neg`
+//! constraints, and complete generics remain future work).
 
 #![deny(missing_docs)]
 
