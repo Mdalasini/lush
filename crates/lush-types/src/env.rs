@@ -42,6 +42,7 @@ impl Env {
                     params: vec![Type::Var(0)],
                     ret: Box::new(Type::result(Type::Var(0), Type::Var(1))),
                 },
+                constraints: vec![],
             },
         );
         env.insert_scheme(
@@ -52,6 +53,7 @@ impl Env {
                     params: vec![Type::Var(1)],
                     ret: Box::new(Type::result(Type::Var(0), Type::Var(1))),
                 },
+                constraints: vec![],
             },
         );
         env.insert_scheme(
@@ -62,6 +64,7 @@ impl Env {
                     params: vec![Type::Var(0)],
                     ret: Box::new(Type::option(Type::Var(0))),
                 },
+                constraints: vec![],
             },
         );
         env.insert_scheme(
@@ -69,6 +72,7 @@ impl Env {
             Scheme {
                 vars: vec![0],
                 body: Type::option(Type::Var(0)),
+                constraints: vec![],
             },
         );
         env

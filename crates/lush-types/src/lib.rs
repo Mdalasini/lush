@@ -1,9 +1,8 @@
 //! Type checker for Lush (`spec.md` §15.3 step 2).
 //!
-//! Implements Hindley-Milner inference with a syntactic value restriction
-//! (§4.3), prelude stubs, and `use` desugaring sufficient to type-check
-//! complete documentation modules from §11.4. Exhaustiveness and sealed
-//! `Eq`/`Neg` constraints remain follow-on work.
+//! Implements Hindley-Milner inference with a syntactic value restriction and
+//! sealed `Eq`/`Neg` constraints (§4.3), plus prelude stubs and `use`
+//! desugaring for §11.4 documentation modules. Exhaustiveness is merged next.
 
 #![deny(missing_docs)]
 
