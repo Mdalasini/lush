@@ -103,7 +103,8 @@ pub fn wrap_snippet(body: &str) -> String {
         }
         out.push('\n');
     }
-    out.push_str("pub fn main() -> Nil {\n");
+    // Omit an explicit return type so expression snippets keep their inferred type (§11.4).
+    out.push_str("pub fn main() {\n");
     for line in stmts {
         out.push_str(line);
         out.push('\n');

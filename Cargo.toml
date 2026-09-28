@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lush-syntax"]
+members = ["crates/lush-syntax", "crates/lush-types"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,3 +12,4 @@ repository = "https://github.com/Mdalasini/lush"
 logos = "0.14"
 thiserror = "2"
 insta = "1"
+lush-syntax = { path = "crates/lush-syntax" }
