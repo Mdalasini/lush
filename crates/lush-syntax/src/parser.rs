@@ -292,10 +292,7 @@ impl<'a> Parser<'a> {
                     self.error(
                         self.span(),
                         codes::E0102_MODULE_ITEM,
-                        format!(
-                            "expected a module item, found {}",
-                            self.kind().describe()
-                        ),
+                        format!("expected a module item, found {}", self.kind().describe()),
                         Some("modules contain `import`, `fn`, `type`, and `const` items".into()),
                     );
                     self.sync_module_item();
@@ -692,7 +689,7 @@ impl<'a> Parser<'a> {
             if matches!(self.kind(), TokenKind::Let) {
                 let stmt = self.parse_let_stmt();
                 self.expect_semicolon_or_sync("every `let` statement ends with `;`");
-                statements.push(Statement::Let(stmt));
+                statements.push(Statement::Let(Box::new(stmt)));
                 continue;
             }
             if matches!(self.kind(), TokenKind::Use) {

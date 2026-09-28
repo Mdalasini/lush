@@ -128,7 +128,7 @@ pub struct Block {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
     Fn(FnDef),
-    Let(LetStmt),
+    Let(Box<LetStmt>),
     Use(UseStmt),
     Expr(Expr),
 }
@@ -579,7 +579,7 @@ pub mod equiv {
     fn strip_statement(s: &Statement) -> Statement {
         match s {
             Statement::Fn(f) => Statement::Fn(strip_fn(f)),
-            Statement::Let(l) => Statement::Let(strip_let(l)),
+            Statement::Let(l) => Statement::Let(Box::new(strip_let(l))),
             Statement::Use(u) => Statement::Use(strip_use(u)),
             Statement::Expr(e) => Statement::Expr(strip_expr(e)),
         }
