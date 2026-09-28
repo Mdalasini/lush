@@ -1,0 +1,7 @@
+pub fn f(a,) {
+  a;
+}
+
+pub fn call() -> Int {
+  f(a,);
+}

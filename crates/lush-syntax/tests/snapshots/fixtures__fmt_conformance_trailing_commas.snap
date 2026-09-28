@@ -1,0 +1,11 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: formatted
+---
+pub fn f(a) {
+  a;
+}
+
+pub fn call() -> Int {
+  f(a);
+}

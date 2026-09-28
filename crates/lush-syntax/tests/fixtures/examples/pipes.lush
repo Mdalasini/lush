@@ -1,0 +1,8 @@
+import lush/string;
+
+pub fn demo() -> String {
+  "  Hello "
+  |> string.trim
+  |> string.uppercase
+  |> string.append(_, "!");
+}

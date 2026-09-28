@@ -1,0 +1,5 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: rendered
+---
+E0110:55..57: chained comparisons or equality are not allowed

@@ -7,3 +7,22 @@ Write commit subjects in the concise, imperative style of the existing history: 
 Pull requests should summarize the change, explain its rationale, link related discussion when available, and call out affected normative sections. Include test or manual review evidence; screenshots aren't needed for text-only changes.
 
 Tag PRs that don't require a second look as `skip review` to stop the automatic macroscope review.
+
+## Build and test
+
+This repository is a Rust workspace. The first implemented crate is `lush-syntax` (lexer, parser, AST, formatter).
+
+```bash
+cargo test --workspace --locked
+cargo test -p lush-syntax --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+Formatter snapshot updates (when intentionally changing output):
+
+```bash
+cargo install cargo-insta
+cargo insta review
+# or: cargo insta accept
+```

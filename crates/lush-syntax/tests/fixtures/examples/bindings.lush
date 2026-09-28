@@ -1,0 +1,11 @@
+pub fn demo(pair: #(Int, Int), s: String) -> Int {
+  let x = 5;
+  let #(a, b) = pair;
+  let assert Ok(v) = parse(s);
+  let assert Ok(w) = parse(s) as "config must parse";
+  x + a + b + v + w;
+}
+
+fn parse(s: String) -> Result(Int, Nil) {
+  Ok(1);
+}

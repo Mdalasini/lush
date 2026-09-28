@@ -1,0 +1,11 @@
+import app/user;
+import lush/list;
+import lush/dict.{type Dict};
+import lush/result.{try, map as result_map};
+import some/long/module as m;
+import github.com/alice/httpkit;
+
+pub fn demo() -> Nil {
+  user.new("ann");
+  Nil;
+}

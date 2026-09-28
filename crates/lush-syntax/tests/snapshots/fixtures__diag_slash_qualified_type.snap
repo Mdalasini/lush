@@ -1,0 +1,8 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: rendered
+---
+E0100:36..37: expected `)`, found `/`
+E0100:36..37: expected `{`, found `/`
+E0120:36..37: expected an expression, found `/`
+E0100:37..41: expected `;`, found type name `Next`

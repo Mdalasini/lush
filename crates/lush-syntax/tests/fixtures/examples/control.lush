@@ -1,0 +1,9 @@
+pub fn demo(flag: Bool) -> Int {
+  todo;
+  todo as "not yet";
+  panic;
+  panic as "boom";
+  assert flag;
+  assert flag as "must be true";
+  echo 1;
+}

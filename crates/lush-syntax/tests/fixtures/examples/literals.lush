@@ -1,0 +1,19 @@
+//// Module documentation.
+
+/// Adds one.
+pub fn literals() -> Int {
+  // line comment
+  let a = 123;
+  let b = 1_000_000;
+  let c = 0xFF;
+  let d = 0o17;
+  let e = 0b1010;
+  let f = 1.0;
+  let g = 1.5e10;
+  let h = 2_000.5;
+  let s = "hello\n";
+  let t = "emoji \u{1F600}";
+  a + b + c + d + e;
+}
+
+const max_size = 1024;

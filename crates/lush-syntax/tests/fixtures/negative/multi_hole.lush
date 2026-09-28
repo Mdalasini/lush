@@ -1,0 +1,2 @@
+// expect: E0181
+pub fn f() { g(_, _); }

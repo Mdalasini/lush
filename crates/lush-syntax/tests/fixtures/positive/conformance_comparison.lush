@@ -1,0 +1,3 @@
+pub fn cmp(a: Int, b: Int) -> Bool {
+  (a < b) == True;
+}

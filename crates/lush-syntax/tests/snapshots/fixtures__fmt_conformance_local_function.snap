@@ -1,0 +1,10 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: formatted
+---
+pub fn run() -> Int {
+  fn id(x) {
+    x;
+  }
+  id(1);
+}

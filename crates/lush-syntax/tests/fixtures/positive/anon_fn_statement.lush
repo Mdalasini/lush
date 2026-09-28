@@ -1,0 +1,4 @@
+pub fn f() -> Int {
+  fn(x) { x; };
+  fn(x) { x; }(1);
+}

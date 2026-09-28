@@ -1,0 +1,13 @@
+fn f() {
+  let x = 1; // trailing
+  case x {
+    _ -> 3; // after arm
+  };
+  // before close
+}
+
+type Option {
+  Some(Int)
+  // between variants
+  None
+}

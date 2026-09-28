@@ -1,0 +1,3 @@
+pub fn long_list() {
+  [first_element_name_here, second_element_name_here, third_element_name_here, fourth_element_name_here];
+}

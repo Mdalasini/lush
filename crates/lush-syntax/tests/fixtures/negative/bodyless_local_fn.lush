@@ -1,0 +1,5 @@
+// expect: E0100
+pub fn outer() {
+  fn id(x);
+  1;
+}

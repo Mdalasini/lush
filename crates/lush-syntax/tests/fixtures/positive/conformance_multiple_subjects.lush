@@ -1,0 +1,6 @@
+pub fn check(a: Int, b: Int) -> Bool {
+  case a, b {
+    1, 2 -> True;
+    _, _ -> False;
+  };
+}

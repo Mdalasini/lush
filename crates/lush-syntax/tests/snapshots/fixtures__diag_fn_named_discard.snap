@@ -1,0 +1,5 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: rendered
+---
+E0172:20..21: `_` cannot be used as a binding name here

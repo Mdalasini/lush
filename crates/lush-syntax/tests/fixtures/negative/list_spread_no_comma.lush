@@ -1,0 +1,4 @@
+// expect: E0100
+pub fn bad(x, xs) -> List(Int) {
+  [x ..xs];
+}

@@ -1,0 +1,7 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: formatted
+---
+import lush/actor;
+
+pub type Msg = actor.Next(Int)

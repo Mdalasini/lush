@@ -1,0 +1,8 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: formatted
+---
+pub fn long_binary() {
+  first_value_here + second_value_here + third_value_here + fourth_value_here
+    + fifth_value_here;
+}

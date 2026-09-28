@@ -1,0 +1,5 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: rendered
+---
+E0134:34..39: unknown bit-array segment option `bogus`

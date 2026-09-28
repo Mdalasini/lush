@@ -1,0 +1,5 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: rendered
+---
+E0132:30..36: tuples need at least two elements

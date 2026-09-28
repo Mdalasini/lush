@@ -1,0 +1,7 @@
+import lush/result;
+
+pub fn demo() -> Result(Int, Nil) {
+  use file <- result.try(fs.read("a.txt"));
+  use n <- result.try(int.parse(file));
+  Ok(n * 2);
+}

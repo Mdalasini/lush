@@ -1,0 +1,6 @@
+pub fn spreads(x: Int, xs: List(Int)) -> List(Int) {
+  let a = [x, ..xs];
+  let b = [..xs];
+  let c = [..xs,];
+  a;
+}
