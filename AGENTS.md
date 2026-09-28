@@ -10,21 +10,26 @@ Tag PRs that don't require a second look as `skip review` to stop the automatic 
 
 ## Build and test
 
-This repository is a Rust workspace. The first implemented crate is `lush-syntax` (lexer, parser, AST, formatter).
+This repository is a Rust workspace. Implemented crates:
+
+- `lush-syntax` — lexer, parser, AST, formatter (step 1)
+- `lush-types` — name resolution, desugaring, HM inference, exhaustiveness (step 2)
+- `lush-test-support` — shared `spec.md` fence inventory and fixture helpers
 
 ```bash
 cargo test --workspace --locked
 cargo test -p lush-syntax --locked
+cargo test -p lush-types --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-Formatter snapshot updates (when intentionally changing output):
+Formatter / diagnostic snapshot updates (when intentionally changing output):
 
 ```bash
 cargo install cargo-insta
 cargo insta review
-# or: cargo insta accept
+# or: INSTA_UPDATE=always cargo test -p lush-types --locked
 ```
 
 ## Agent skills
