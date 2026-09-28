@@ -488,3 +488,119 @@ pub fn main() {
         "expected Int range error, got {err:?}"
     );
 }
+
+#[test]
+fn rejects_function_equality() {
+    let err = typecheck_source(
+        r#"
+pub fn main() {
+  let f = fn(x) { x; };
+  f == f;
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("Eq constraint")
+        )),
+        "expected Eq failure for functions, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_nested_function_equality() {
+    let err = typecheck_source(
+        r#"
+pub fn main() {
+  let xs = [fn(x) { x; }];
+  xs == xs;
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("Eq constraint")
+        )),
+        "expected Eq failure for list of functions, got {err:?}"
+    );
+}
+
+#[test]
+fn accepts_structural_equality() {
+    typecheck_source(
+        r#"
+pub type Pair(a) {
+  Pair(a, a)
+}
+pub fn main() {
+  1 == 1;
+  "a" == "a";
+  #(1, True) == #(1, True);
+  [1, 2] == [1, 2];
+  Pair(1, 1) == Pair(1, 1);
+}
+"#,
+    )
+    .expect("eligible structural values should support Eq");
+}
+
+#[test]
+fn polymorphic_eq_helper_rejects_function_instantiation() {
+    let err = typecheck_source(
+        r#"
+pub fn same(a, b) {
+  a == b;
+}
+pub fn main() {
+  let f = fn(x) { x; };
+  same(f, f);
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("Eq constraint")
+        )),
+        "expected Eq failure via polymorphic helper, got {err:?}"
+    );
+}
+
+#[test]
+fn neg_constraint_accepts_int_and_float() {
+    typecheck_source(
+        r#"
+pub fn main() {
+  let a = -1;
+  let b = -1.5;
+  a;
+  b;
+}
+"#,
+    )
+    .expect("Neg on Int and Float");
+}
+
+#[test]
+fn neg_constraint_rejects_string() {
+    let err = typecheck_source(
+        r#"
+pub fn main() {
+  -"nope";
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("Neg constraint")
+        )),
+        "expected Neg failure for String, got {err:?}"
+    );
+}

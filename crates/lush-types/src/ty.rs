@@ -119,6 +119,52 @@ impl Type {
     }
 }
 
+/// Sealed built-in constraint (§4.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Constraint {
+    /// Structural equality / collection-key eligibility.
+    Eq(Type),
+    /// Numeric negation (`-` on a polymorphic operand).
+    Neg(Type),
+}
+
+impl Constraint {
+    /// Display form used in diagnostics: `where Eq(a)`.
+    pub fn display(&self) -> String {
+        match self {
+            Constraint::Eq(ty) => format!("where Eq({})", type_display(ty)),
+            Constraint::Neg(ty) => format!("where Neg({})", type_display(ty)),
+        }
+    }
+}
+
+/// Compact type display for constraint diagnostics.
+pub fn type_display(ty: &Type) -> String {
+    match ty {
+        Type::Var(v) => format!("'{v}"),
+        Type::Named { module, name, args } => {
+            let head = match module {
+                Some(m) => format!("{m}.{name}"),
+                None => name.clone(),
+            };
+            if args.is_empty() {
+                head
+            } else {
+                let inner: Vec<String> = args.iter().map(type_display).collect();
+                format!("{head}({})", inner.join(", "))
+            }
+        }
+        Type::Fn { params, ret } => {
+            let ps: Vec<String> = params.iter().map(type_display).collect();
+            format!("fn({}) -> {}", ps.join(", "), type_display(ret))
+        }
+        Type::Tuple(elems) => {
+            let inner: Vec<String> = elems.iter().map(type_display).collect();
+            format!("#({})", inner.join(", "))
+        }
+    }
+}
+
 /// Polymorphic type scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scheme {
@@ -126,6 +172,8 @@ pub struct Scheme {
     pub vars: Vec<u32>,
     /// Body.
     pub body: Type,
+    /// Sealed constraints on the scheme (`Eq` / `Neg`).
+    pub constraints: Vec<Constraint>,
 }
 
 impl Scheme {
@@ -134,6 +182,7 @@ impl Scheme {
         Scheme {
             vars: vec![],
             body: ty,
+            constraints: vec![],
         }
     }
 }
@@ -158,6 +207,14 @@ pub fn apply(subst: &Subst, ty: &Type) -> Type {
             ret: Box::new(apply(subst, ret)),
         },
         Type::Tuple(elems) => Type::Tuple(elems.iter().map(|e| apply(subst, e)).collect()),
+    }
+}
+
+/// Apply a substitution to a constraint.
+pub fn apply_constraint(subst: &Subst, c: &Constraint) -> Constraint {
+    match c {
+        Constraint::Eq(ty) => Constraint::Eq(apply(subst, ty)),
+        Constraint::Neg(ty) => Constraint::Neg(apply(subst, ty)),
     }
 }
 
@@ -203,5 +260,12 @@ pub fn free_vars(ty: &Type) -> Vec<u32> {
             }
             vs
         }
+    }
+}
+
+/// Free variables mentioned in a constraint.
+pub fn constraint_free_vars(c: &Constraint) -> Vec<u32> {
+    match c {
+        Constraint::Eq(ty) | Constraint::Neg(ty) => free_vars(ty),
     }
 }
