@@ -1,0 +1,13 @@
+---
+source: crates/lush-syntax/tests/diagnostics_render.rs
+expression: plain
+---
+[E0110] Error: chained comparisons or equality are not allowed
+   ╭─[ bad.lush:2:9 ]
+   │
+ 2 │   a < b < c;
+   │         ┬  
+   │         ╰── chained comparisons or equality are not allowed
+   │ 
+   │ Help: add parentheses, for example `(a < b) == True`
+───╯

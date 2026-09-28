@@ -1,0 +1,5 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: rendered
+---
+E0100:69..70: expected `;`, found `_`

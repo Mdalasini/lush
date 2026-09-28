@@ -1,0 +1,4 @@
+pub fn bad() -> Int {
+  let x = 1
+  x;
+}

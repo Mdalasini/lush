@@ -1,0 +1,20 @@
+pub type Shape {
+  Circle(radius: Float)
+  Rectangle(width: Float, height: Float)
+  Point
+}
+
+pub type User {
+  User(name: String, age: Int)
+}
+
+pub type Tree(a) {
+  Leaf
+  Node(left: Tree(a), value: a, right: Tree(a))
+}
+
+pub opaque type Email {
+  Email(String)
+}
+
+pub type Name = String

@@ -1,0 +1,378 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: outcome.module
+---
+Some(
+    Module {
+        items: [
+            Type(
+                TypeDef {
+                    public: true,
+                    opaque: false,
+                    name: UName {
+                        text: "User",
+                        span: Span {
+                            start: BytePos(
+                                9,
+                            ),
+                            end: BytePos(
+                                13,
+                            ),
+                        },
+                    },
+                    tvars: [],
+                    body: Adt(
+                        [
+                            Variant {
+                                name: UName {
+                                    text: "User",
+                                    span: Span {
+                                        start: BytePos(
+                                            18,
+                                        ),
+                                        end: BytePos(
+                                            22,
+                                        ),
+                                    },
+                                },
+                                fields: Some(
+                                    [
+                                        Field {
+                                            label: Some(
+                                                Name {
+                                                    text: "name",
+                                                    span: Span {
+                                                        start: BytePos(
+                                                            23,
+                                                        ),
+                                                        end: BytePos(
+                                                            27,
+                                                        ),
+                                                    },
+                                                },
+                                            ),
+                                            ty: TypeExpr {
+                                                kind: Named {
+                                                    name: Unqualified(
+                                                        UName {
+                                                            text: "String",
+                                                            span: Span {
+                                                                start: BytePos(
+                                                                    29,
+                                                                ),
+                                                                end: BytePos(
+                                                                    35,
+                                                                ),
+                                                            },
+                                                        },
+                                                    ),
+                                                    args: [],
+                                                },
+                                                span: Span {
+                                                    start: BytePos(
+                                                        29,
+                                                    ),
+                                                    end: BytePos(
+                                                        35,
+                                                    ),
+                                                },
+                                            },
+                                            span: Span {
+                                                start: BytePos(
+                                                    23,
+                                                ),
+                                                end: BytePos(
+                                                    35,
+                                                ),
+                                            },
+                                        },
+                                        Field {
+                                            label: Some(
+                                                Name {
+                                                    text: "age",
+                                                    span: Span {
+                                                        start: BytePos(
+                                                            37,
+                                                        ),
+                                                        end: BytePos(
+                                                            40,
+                                                        ),
+                                                    },
+                                                },
+                                            ),
+                                            ty: TypeExpr {
+                                                kind: Named {
+                                                    name: Unqualified(
+                                                        UName {
+                                                            text: "Int",
+                                                            span: Span {
+                                                                start: BytePos(
+                                                                    42,
+                                                                ),
+                                                                end: BytePos(
+                                                                    45,
+                                                                ),
+                                                            },
+                                                        },
+                                                    ),
+                                                    args: [],
+                                                },
+                                                span: Span {
+                                                    start: BytePos(
+                                                        42,
+                                                    ),
+                                                    end: BytePos(
+                                                        45,
+                                                    ),
+                                                },
+                                            },
+                                            span: Span {
+                                                start: BytePos(
+                                                    37,
+                                                ),
+                                                end: BytePos(
+                                                    45,
+                                                ),
+                                            },
+                                        },
+                                    ],
+                                ),
+                                span: Span {
+                                    start: BytePos(
+                                        18,
+                                    ),
+                                    end: BytePos(
+                                        45,
+                                    ),
+                                },
+                            },
+                        ],
+                    ),
+                    span: Span {
+                        start: BytePos(
+                            4,
+                        ),
+                        end: BytePos(
+                            48,
+                        ),
+                    },
+                },
+            ),
+            Fn(
+                FnDef {
+                    public: true,
+                    name: Name {
+                        text: "birthday",
+                        span: Span {
+                            start: BytePos(
+                                57,
+                            ),
+                            end: BytePos(
+                                65,
+                            ),
+                        },
+                    },
+                    params: [
+                        Param {
+                            label: None,
+                            name: Name {
+                                text: "user",
+                                span: Span {
+                                    start: BytePos(
+                                        66,
+                                    ),
+                                    end: BytePos(
+                                        70,
+                                    ),
+                                },
+                            },
+                            ty: Some(
+                                TypeExpr {
+                                    kind: Named {
+                                        name: Unqualified(
+                                            UName {
+                                                text: "User",
+                                                span: Span {
+                                                    start: BytePos(
+                                                        72,
+                                                    ),
+                                                    end: BytePos(
+                                                        76,
+                                                    ),
+                                                },
+                                            },
+                                        ),
+                                        args: [],
+                                    },
+                                    span: Span {
+                                        start: BytePos(
+                                            72,
+                                        ),
+                                        end: BytePos(
+                                            76,
+                                        ),
+                                    },
+                                },
+                            ),
+                            span: Span {
+                                start: BytePos(
+                                    66,
+                                ),
+                                end: BytePos(
+                                    76,
+                                ),
+                            },
+                        },
+                    ],
+                    return_type: Some(
+                        TypeExpr {
+                            kind: Named {
+                                name: Unqualified(
+                                    UName {
+                                        text: "User",
+                                        span: Span {
+                                            start: BytePos(
+                                                81,
+                                            ),
+                                            end: BytePos(
+                                                85,
+                                            ),
+                                        },
+                                    },
+                                ),
+                                args: [],
+                            },
+                            span: Span {
+                                start: BytePos(
+                                    81,
+                                ),
+                                end: BytePos(
+                                    85,
+                                ),
+                            },
+                        },
+                    ),
+                    body: Block {
+                        statements: [
+                            Expr(
+                                Expr {
+                                    kind: RecordUpdate {
+                                        constructor: ConstructorRef {
+                                            module: None,
+                                            name: UName {
+                                                text: "User",
+                                                span: Span {
+                                                    start: BytePos(
+                                                        90,
+                                                    ),
+                                                    end: BytePos(
+                                                        94,
+                                                    ),
+                                                },
+                                            },
+                                            span: Span {
+                                                start: BytePos(
+                                                    90,
+                                                ),
+                                                end: BytePos(
+                                                    94,
+                                                ),
+                                            },
+                                        },
+                                        base: Expr {
+                                            kind: Var(
+                                                Name {
+                                                    text: "user",
+                                                    span: Span {
+                                                        start: BytePos(
+                                                            97,
+                                                        ),
+                                                        end: BytePos(
+                                                            101,
+                                                        ),
+                                                    },
+                                                },
+                                            ),
+                                            span: Span {
+                                                start: BytePos(
+                                                    97,
+                                                ),
+                                                end: BytePos(
+                                                    101,
+                                                ),
+                                            },
+                                        },
+                                        fields: [
+                                            (
+                                                Name {
+                                                    text: "age",
+                                                    span: Span {
+                                                        start: BytePos(
+                                                            103,
+                                                        ),
+                                                        end: BytePos(
+                                                            106,
+                                                        ),
+                                                    },
+                                                },
+                                                Expr {
+                                                    kind: Int(
+                                                        IntLit {
+                                                            digits: "31",
+                                                            base: Decimal,
+                                                            raw: "31",
+                                                        },
+                                                    ),
+                                                    span: Span {
+                                                        start: BytePos(
+                                                            108,
+                                                        ),
+                                                        end: BytePos(
+                                                            110,
+                                                        ),
+                                                    },
+                                                },
+                                            ),
+                                        ],
+                                    },
+                                    span: Span {
+                                        start: BytePos(
+                                            90,
+                                        ),
+                                        end: BytePos(
+                                            111,
+                                        ),
+                                    },
+                                },
+                            ),
+                        ],
+                        span: Span {
+                            start: BytePos(
+                                86,
+                            ),
+                            end: BytePos(
+                                114,
+                            ),
+                        },
+                    },
+                    span: Span {
+                        start: BytePos(
+                            54,
+                        ),
+                        end: BytePos(
+                            114,
+                        ),
+                    },
+                },
+            ),
+        ],
+        span: Span {
+            start: BytePos(
+                0,
+            ),
+            end: BytePos(
+                115,
+            ),
+        },
+    },
+)

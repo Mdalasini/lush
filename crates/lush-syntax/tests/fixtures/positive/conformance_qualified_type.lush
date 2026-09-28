@@ -1,0 +1,3 @@
+import lush/actor;
+
+pub type Msg = actor.Next(Int)

@@ -1,0 +1,6 @@
+pub fn bad(x: Int) -> Int {
+  case x {
+    0 -> 0,
+    _ -> 1;
+  };
+}

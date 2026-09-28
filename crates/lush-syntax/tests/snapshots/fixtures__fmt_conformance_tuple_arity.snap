@@ -1,0 +1,7 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: formatted
+---
+pub fn pair() -> #(Int, Int) {
+  #(1, 2);
+}

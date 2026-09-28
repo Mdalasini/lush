@@ -1,0 +1,10 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: rendered
+---
+E0100:38..40: expected `]`, found `..`
+E0100:38..40: expected `;`, found `..`
+E0120:38..40: expected an expression, found `..`
+E0100:40..42: expected `;`, found `<value>`
+E0100:42..43: expected `;`, found `]`
+E0120:42..43: expected an expression, found `]`

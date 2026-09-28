@@ -1,0 +1,6 @@
+pub fn demo(n: Int) -> BitArray {
+  <<1, 2, 3>>;
+  <<"text":utf8>>;
+  <<n:size(16)>>;
+  <<n:size(16)-signed-little>>;
+}

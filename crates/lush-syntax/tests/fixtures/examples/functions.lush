@@ -1,0 +1,18 @@
+pub fn add(a: Int, b: Int) -> Int {
+  a + b;
+}
+
+pub fn replace(in string: String, each pattern: String, with replacement: String) -> String {
+  string;
+}
+
+pub fn demo() -> List(Int) {
+  let _ = replace(in: "a,b", each: ",", with: " ");
+  let inc = fn(x) {
+    x + 1;
+  };
+  let add_five = add(5, _);
+  list.map([1, 2, 3], fn(x) {
+    x * 2;
+  });
+}

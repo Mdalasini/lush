@@ -1,0 +1,6 @@
+pub fn run() -> Int {
+  fn id(x) {
+    x;
+  }
+  id(1);
+}

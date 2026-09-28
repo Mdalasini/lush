@@ -1,0 +1,11 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: formatted
+---
+pub type User {
+  User(name: String, age: Int)
+}
+
+pub fn birthday(user: User) -> User {
+  User(..user, age: 31);
+}

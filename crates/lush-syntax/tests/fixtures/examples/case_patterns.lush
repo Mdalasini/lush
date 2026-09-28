@@ -1,0 +1,36 @@
+pub type Shape {
+  Circle(radius: Float)
+  Rectangle(width: Float, height: Float)
+  Point
+}
+
+pub type User {
+  User(name: String, age: Int)
+}
+
+pub fn area(shape: Shape) -> Float {
+  case shape {
+    Circle(r) -> 3.14 *. r *. r;
+    Rectangle(w, h) -> w *. h;
+    Point -> 0.0;
+  };
+}
+
+pub fn demo(user: User, n: Int, bits: BitArray) -> Int {
+  case user {
+    User(name: n, ..) -> 1;
+  };
+  case n {
+    1 | 2 | 3 -> 0;
+    n if n > 0 -> n;
+    _ -> -1;
+  };
+  case "hello world" {
+    "hello " <> name -> 1;
+    _ -> 0;
+  };
+  case bits {
+    <<0x1, n:size(8), rest:bytes>> -> n;
+    _ -> 0;
+  };
+}

@@ -1,0 +1,13 @@
+---
+source: crates/lush-syntax/tests/diagnostics_render.rs
+expression: rendered
+---
+[E0100] Error: expected `;`, found `<value>`
+   ╭─[ bad.lush:3:3 ]
+   │
+ 3 │   x;
+   │   ┬  
+   │   ╰── expected `;`, found `<value>`
+   │ 
+   │ Help: every `let` statement ends with `;`
+───╯
