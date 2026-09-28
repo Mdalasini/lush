@@ -1,9 +1,9 @@
-//! Early type-checker prototype for Lush (`spec.md` §15.3 step 2 start).
+//! Type checker for Lush (`spec.md` §15.3 step 2).
 //!
-//! Provides enough inference, prelude stubs, and `use` desugaring to type-check
-//! complete documentation modules from §11.4. This is not yet a full
-//! Hindley-Milner implementation of §4.3 (exhaustiveness, sealed `Eq`/`Neg`
-//! constraints, and complete generics remain future work).
+//! Implements Hindley-Milner inference with a syntactic value restriction
+//! (§4.3), prelude stubs, and `use` desugaring sufficient to type-check
+//! complete documentation modules from §11.4. Exhaustiveness and sealed
+//! `Eq`/`Neg` constraints remain follow-on work.
 
 #![deny(missing_docs)]
 

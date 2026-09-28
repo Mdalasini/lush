@@ -488,3 +488,127 @@ pub fn main() {
         "expected Int range error, got {err:?}"
     );
 }
+
+#[test]
+fn let_bound_identity_is_polymorphic() {
+    typecheck_source(
+        r#"
+pub fn main() {
+  let id = fn(x) { x; };
+  let a = id(1);
+  let b = id("hi");
+  a;
+}
+"#,
+    )
+    .expect("non-expansive let-bound fn should generalize");
+}
+
+#[test]
+fn expansive_call_binding_stays_monomorphic() {
+    let err = typecheck_source(
+        r#"
+pub fn id(x) { x; }
+pub fn wrap(f) { f; }
+pub fn main() {
+  let f = wrap(id);
+  let a = f(1);
+  let b = f("hi");
+  a;
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(e, TypeError::Mismatch { .. })),
+        "expansive let binding must stay monomorphic, got {err:?}"
+    );
+}
+
+#[test]
+fn subject_from_new_subject_is_monomorphic() {
+    let err = typecheck_source(
+        r#"
+import lush/process;
+pub fn as_int(s: Subject(Int)) -> Subject(Int) { s; }
+pub fn as_str(s: Subject(String)) -> Subject(String) { s; }
+pub fn main() {
+  let s = process.new_subject();
+  as_int(s);
+  as_str(s);
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(e, TypeError::Mismatch { .. })),
+        "one new_subject() result must not be both Subject(Int) and Subject(String), got {err:?}"
+    );
+}
+
+#[test]
+fn subject_alias_and_aggregate_stay_monomorphic() {
+    let err = typecheck_source(
+        r#"
+import lush/process;
+pub fn as_int(s: Subject(Int)) -> Subject(Int) { s; }
+pub fn as_str(s: Subject(String)) -> Subject(String) { s; }
+pub fn take_int_pair(p: #(Subject(Int), Int)) -> Nil { Nil; }
+pub fn take_str_pair(p: #(Subject(String), Int)) -> Nil { Nil; }
+pub fn main() {
+  let s = process.new_subject();
+  let alias = s;
+  let pair = #(s, 1);
+  as_int(alias);
+  as_str(alias);
+  take_int_pair(pair);
+  take_str_pair(pair);
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(e, TypeError::Mismatch { .. })),
+        "aliases/aggregates of one subject must stay monomorphic, got {err:?}"
+    );
+}
+
+#[test]
+fn subject_captured_by_closure_stays_monomorphic() {
+    let err = typecheck_source(
+        r#"
+import lush/process;
+pub fn as_int(s: Subject(Int)) -> Subject(Int) { s; }
+pub fn as_str(s: Subject(String)) -> Subject(String) { s; }
+pub fn main() {
+  let s = process.new_subject();
+  let get = fn() { s; };
+  as_int(get());
+  as_str(get());
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(e, TypeError::Mismatch { .. })),
+        "closure-captured subject must stay monomorphic, got {err:?}"
+    );
+}
+
+#[test]
+fn polymorphic_subject_factory_is_allowed() {
+    typecheck_source(
+        r#"
+import lush/process;
+pub fn fresh() {
+  process.new_subject();
+}
+pub fn main() {
+  let a: Subject(Int) = fresh();
+  let b: Subject(String) = fresh();
+  a;
+}
+"#,
+    )
+    .expect("fn returning new_subject() may be generalized");
+}
