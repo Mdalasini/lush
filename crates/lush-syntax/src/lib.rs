@@ -60,7 +60,7 @@ pub fn format_source(source: &str) -> Result<String, Vec<Diagnostic>> {
             .collect());
     }
     let module = outcome.module.expect("ok implies module");
-    Ok(formatter::format_module(&module, &outcome.tokens))
+    Ok(formatter::format_module(&module, &outcome.source, &outcome.tokens))
 }
 
 /// Format and verify idempotence + round-trip equivalence (ignoring spans).

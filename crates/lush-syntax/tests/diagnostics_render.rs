@@ -11,7 +11,7 @@ fn chained_comparison_renders_snippet() {
         .iter()
         .find(|d| d.code == "E0110")
         .expect("expected E0110");
-    let rendered = err.render("bad.lush", &outcome.source);
+    let rendered = err.render("bad.lush", &outcome.source, true);
     // Strip ANSI for a stable snapshot.
     let plain = strip_ansi(&rendered);
     insta::assert_snapshot!("render_chained_comparison", plain);
@@ -26,7 +26,7 @@ fn missing_semicolon_renders_hint() {
         .diagnostics
         .iter()
         .filter(|d| d.severity == lush_syntax::diagnostic::Severity::Error)
-        .map(|d| strip_ansi(&d.render("bad.lush", &outcome.source)))
+        .map(|d| strip_ansi(&d.render("bad.lush", &outcome.source, true)))
         .collect::<Vec<_>>()
         .join("\n---\n");
     insta::assert_snapshot!("render_missing_semi", rendered);

@@ -8,13 +8,14 @@ use crate::token::{SpannedToken, TriviaKind};
 const INDENT: &str = "  ";
 const SOFT_LIMIT: usize = 80;
 
-pub fn format_module(module: &Module, tokens: &[SpannedToken]) -> String {
-    let mut f = Formatter::new(tokens);
+pub fn format_module(module: &Module, source: &str, tokens: &[SpannedToken]) -> String {
+    let mut f = Formatter::new(source, tokens);
     f.fmt_module(module);
     f.finish()
 }
 
 struct Formatter<'a> {
+    source: &'a str,
     tokens: &'a [SpannedToken],
     /// Index of the next token whose leading trivia has not been emitted.
     trivia_idx: usize,
@@ -25,8 +26,9 @@ struct Formatter<'a> {
 }
 
 impl<'a> Formatter<'a> {
-    fn new(tokens: &'a [SpannedToken]) -> Self {
+    fn new(source: &'a str, tokens: &'a [SpannedToken]) -> Self {
         Self {
+            source,
             tokens,
             trivia_idx: 0,
             out: String::new(),
@@ -70,9 +72,10 @@ impl<'a> Formatter<'a> {
     fn emit_token_comments(&mut self, tok: &SpannedToken) {
         let mut pending_blank = false;
         for tr in &tok.leading {
+            let text = &self.source[tr.span.range()];
             match tr.kind {
                 TriviaKind::Whitespace => {
-                    let newlines = tr.text.chars().filter(|c| *c == '\n').count();
+                    let newlines = text.chars().filter(|c| *c == '\n').count();
                     if newlines >= 2 {
                         pending_blank = true;
                     }
@@ -84,7 +87,7 @@ impl<'a> Formatter<'a> {
                         self.newline();
                     }
                     pending_blank = false;
-                    self.push_raw(&tr.text);
+                    self.push_raw(text);
                     self.newline();
                 }
             }

@@ -136,7 +136,10 @@ fn token_stream_snapshot_literals() {
                 .leading
                 .iter()
                 .filter(|tr| !matches!(tr.kind, lush_syntax::token::TriviaKind::Whitespace))
-                .map(|tr| format!("{:?}:{}", tr.kind, tr.text))
+                .map(|tr| {
+                    let text = &outcome.source[tr.span.range()];
+                    format!("{:?}:{}", tr.kind, text)
+                })
                 .collect();
             format!("{:?} @{} trivia={:?}", t.kind, t.span, trivia)
         })
@@ -209,21 +212,29 @@ fn round_trip_equivalence_helper() {
 
 #[test]
 fn deep_nesting_does_not_abort() {
-    let inner = format!("{}1{}", "(".repeat(300), ")".repeat(300));
-    let src = format!("pub fn f() {{ {inner}; }}\n");
-    let outcome = parse_module(&src);
-    assert!(
-        outcome
-            .diagnostics
-            .iter()
-            .any(|d| d.code == lush_syntax::codes::E0190_TOO_DEEP),
-        "expected E0190 for deep nesting, got: {:?}",
-        outcome
-            .diagnostics
-            .iter()
-            .map(|d| &d.code)
-            .collect::<Vec<_>>()
-    );
-    // Must complete without aborting / panicking.
-    assert!(!outcome.ok());
+    // Debug builds use more stack per recursive-descent frame than release;
+    // run on a larger stack so the depth limit (not the OS stack) is what fires.
+    let handle = std::thread::Builder::new()
+        .name("deep-nesting".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let inner = format!("{}1{}", "(".repeat(300), ")".repeat(300));
+            let src = format!("pub fn f() {{ {inner}; }}\n");
+            let outcome = parse_module(&src);
+            assert!(
+                outcome
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == lush_syntax::codes::E0190_TOO_DEEP),
+                "expected E0190 for deep nesting, got: {:?}",
+                outcome
+                    .diagnostics
+                    .iter()
+                    .map(|d| &d.code)
+                    .collect::<Vec<_>>()
+            );
+            assert!(!outcome.ok());
+        })
+        .expect("spawn deep-nesting thread");
+    handle.join().expect("deep-nesting thread panicked");
 }
