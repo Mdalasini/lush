@@ -5,12 +5,15 @@
 
 #![deny(missing_docs)]
 
+pub mod ast;
 pub mod error;
 pub mod lexer;
+pub mod parser;
 pub mod span;
 
 pub use error::SyntaxError;
 pub use lexer::{lex, lex_normalized, lex_significant, Token, TokenSpan};
+pub use parser::parse_module;
 pub use span::Span;
 
 /// Crate version used by tooling and diagnostics.
