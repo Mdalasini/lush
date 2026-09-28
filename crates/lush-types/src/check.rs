@@ -231,10 +231,7 @@ impl Checker {
             .filter(|(_, d)| **d == 0)
             .map(|(n, _)| n.clone())
             .collect();
-        let values: HashMap<String, &Expr> = defs
-            .iter()
-            .map(|(n, _, v)| (n.clone(), *v))
-            .collect();
+        let values: HashMap<String, &Expr> = defs.iter().map(|(n, _, v)| (n.clone(), *v)).collect();
         while let Some(name) = queue.pop() {
             if let Some(value) = values.get(&name) {
                 match eval_const_expr(value, &self.const_names, &self.const_vals) {
@@ -582,16 +579,13 @@ impl Checker {
                         }
                         other => {
                             if fields.is_empty() {
-                                if let Err(e) = unify(&mut self.subst, &other, &ty, pattern.span)
-                                {
+                                if let Err(e) = unify(&mut self.subst, &other, &ty, pattern.span) {
                                     self.errors.push(e);
                                 }
                             } else {
                                 self.errors.push(TypeError::Other {
                                     span: pattern.span,
-                                    message: format!(
-                                        "constructor `{name}` does not take fields"
-                                    ),
+                                    message: format!("constructor `{name}` does not take fields"),
                                 });
                             }
                         }
@@ -727,8 +721,9 @@ impl Checker {
                             if let Some(Some(first_label)) =
                                 labels.as_deref().and_then(|ls| ls.first())
                             {
-                                if let Some(arg) =
-                                    ordered.iter().find(|a| a.label.as_ref() == Some(first_label))
+                                if let Some(arg) = ordered
+                                    .iter()
+                                    .find(|a| a.label.as_ref() == Some(first_label))
                                 {
                                     self.errors.push(TypeError::Other {
                                         span: arg.span,
@@ -1284,10 +1279,12 @@ fn is_irrefutable(pattern: &Pattern) -> bool {
 }
 
 fn validate_int_literal(lit: &str, span: Span) -> Result<(), TypeError> {
-    parse_int_literal(lit).map(|_| ()).ok_or_else(|| TypeError::Other {
-        span,
-        message: format!("integer literal `{lit}` out of Int range"),
-    })
+    parse_int_literal(lit)
+        .map(|_| ())
+        .ok_or_else(|| TypeError::Other {
+            span,
+            message: format!("integer literal `{lit}` out of Int range"),
+        })
 }
 
 fn validate_float_literal(lit: &str, span: Span) -> Result<(), TypeError> {
@@ -1384,7 +1381,9 @@ fn eval_const_expr(
     match &expr.kind {
         ExprKind::Int(lit) => {
             validate_int_literal(lit, expr.span)?;
-            Ok(ConstVal::Int(parse_int_literal(lit).expect("validated int")))
+            Ok(ConstVal::Int(
+                parse_int_literal(lit).expect("validated int"),
+            ))
         }
         ExprKind::Float(lit) => {
             validate_float_literal(lit, expr.span)?;
@@ -1423,12 +1422,14 @@ fn eval_const_expr(
                     }
                 }
                 match eval_const_expr(inner, const_names, const_env)? {
-                    ConstVal::Int(i) => i.checked_neg().map(ConstVal::Int).ok_or_else(|| {
-                        TypeError::Other {
-                            span: expr.span,
-                            message: "integer overflow in constant".into(),
-                        }
-                    }),
+                    ConstVal::Int(i) => {
+                        i.checked_neg()
+                            .map(ConstVal::Int)
+                            .ok_or_else(|| TypeError::Other {
+                                span: expr.span,
+                                message: "integer overflow in constant".into(),
+                            })
+                    }
                     ConstVal::Float(f) => {
                         let r = -f;
                         if r.is_finite() {
@@ -1507,47 +1508,50 @@ fn eval_const_expr(
     }
 }
 
-fn eval_const_binop(op: BinOp, left: ConstVal, right: ConstVal, span: Span) -> Result<ConstVal, TypeError> {
+fn eval_const_binop(
+    op: BinOp,
+    left: ConstVal,
+    right: ConstVal,
+    span: Span,
+) -> Result<ConstVal, TypeError> {
     match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-            match (left, right) {
-                (ConstVal::Int(a), ConstVal::Int(b)) => {
-                    let result = match op {
-                        BinOp::Add => a.checked_add(b),
-                        BinOp::Sub => a.checked_sub(b),
-                        BinOp::Mul => a.checked_mul(b),
-                        BinOp::Div => {
-                            if b == 0 || (a == i64::MIN && b == -1) {
-                                return Err(TypeError::Other {
-                                    span,
-                                    message: "integer division error in constant".into(),
-                                });
-                            }
-                            Some(a / b)
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => match (left, right) {
+            (ConstVal::Int(a), ConstVal::Int(b)) => {
+                let result = match op {
+                    BinOp::Add => a.checked_add(b),
+                    BinOp::Sub => a.checked_sub(b),
+                    BinOp::Mul => a.checked_mul(b),
+                    BinOp::Div => {
+                        if b == 0 || (a == i64::MIN && b == -1) {
+                            return Err(TypeError::Other {
+                                span,
+                                message: "integer division error in constant".into(),
+                            });
                         }
-                        BinOp::Rem => {
-                            if b == 0 || (a == i64::MIN && b == -1) {
-                                return Err(TypeError::Other {
-                                    span,
-                                    message: "integer remainder error in constant".into(),
-                                });
-                            }
-                            Some(a % b)
+                        Some(a / b)
+                    }
+                    BinOp::Rem => {
+                        if b == 0 || (a == i64::MIN && b == -1) {
+                            return Err(TypeError::Other {
+                                span,
+                                message: "integer remainder error in constant".into(),
+                            });
                         }
-                        _ => unreachable!(),
-                    };
-                    result.map(ConstVal::Int).ok_or_else(|| TypeError::Other {
-                        span,
-                        message: "integer overflow in constant".into(),
-                    })
-                }
-                (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
-                _ => Err(TypeError::Other {
+                        Some(a % b)
+                    }
+                    _ => unreachable!(),
+                };
+                result.map(ConstVal::Int).ok_or_else(|| TypeError::Other {
                     span,
-                    message: "invalid operands for integer operator in constant".into(),
-                }),
+                    message: "integer overflow in constant".into(),
+                })
             }
-        }
+            (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
+            _ => Err(TypeError::Other {
+                span,
+                message: "invalid operands for integer operator in constant".into(),
+            }),
+        },
         BinOp::AddFloat | BinOp::SubFloat | BinOp::MulFloat | BinOp::DivFloat => {
             match (left, right) {
                 (ConstVal::Float(a), ConstVal::Float(b)) => {
@@ -1602,22 +1606,20 @@ fn eval_const_binop(op: BinOp, left: ConstVal, right: ConstVal, span: Span) -> R
                 message: "invalid operands for integer comparison in constant".into(),
             }),
         },
-        BinOp::LtFloat | BinOp::LeFloat | BinOp::GtFloat | BinOp::GeFloat => {
-            match (left, right) {
-                (ConstVal::Float(a), ConstVal::Float(b)) => Ok(ConstVal::Bool(match op {
-                    BinOp::LtFloat => a < b,
-                    BinOp::LeFloat => a <= b,
-                    BinOp::GtFloat => a > b,
-                    BinOp::GeFloat => a >= b,
-                    _ => unreachable!(),
-                })),
-                (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
-                _ => Err(TypeError::Other {
-                    span,
-                    message: "invalid operands for float comparison in constant".into(),
-                }),
-            }
-        }
+        BinOp::LtFloat | BinOp::LeFloat | BinOp::GtFloat | BinOp::GeFloat => match (left, right) {
+            (ConstVal::Float(a), ConstVal::Float(b)) => Ok(ConstVal::Bool(match op {
+                BinOp::LtFloat => a < b,
+                BinOp::LeFloat => a <= b,
+                BinOp::GtFloat => a > b,
+                BinOp::GeFloat => a >= b,
+                _ => unreachable!(),
+            })),
+            (ConstVal::Opaque, _) | (_, ConstVal::Opaque) => Ok(ConstVal::Opaque),
+            _ => Err(TypeError::Other {
+                span,
+                message: "invalid operands for float comparison in constant".into(),
+            }),
+        },
         BinOp::Eq | BinOp::NotEq => match (left, right) {
             (ConstVal::Int(a), ConstVal::Int(b)) => Ok(ConstVal::Bool(if op == BinOp::Eq {
                 a == b
