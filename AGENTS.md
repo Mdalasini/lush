@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`spec.md` is the normative source of truth and `README.md` is the project entry point. The Rust workspace is rooted at `Cargo.toml` with crates under `crates/` (currently `lush-syntax`). Planned directories from `spec.md` §15.1 (`stdlib/`, `tests/`, and additional crates) are added as those stages land. Keep specification changes in `spec.md`; avoid duplicating normative language behavior in separate documents.
+`spec.md` is the normative source of truth and `README.md` is the project entry point. The Rust workspace is rooted at `Cargo.toml` with crates under `crates/` (currently `lush-syntax`, `lush-types`). Planned directories from `spec.md` §15.1 (`stdlib/`, `tests/`, and additional crates) are added as those stages land. Keep specification changes in `spec.md`; avoid duplicating normative language behavior in separate documents.
 
 ## Build, Test, and Development Commands
 

@@ -1,0 +1,8 @@
+---
+source: crates/lush-syntax/src/parser.rs
+expression: "m.imports[0].path.clone()"
+---
+[
+    "lush",
+    "list",
+]

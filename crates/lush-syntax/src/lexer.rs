@@ -101,6 +101,10 @@ pub enum Token {
     #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?")]
     Float,
     /// String literal with escapes.
+    ///
+    /// TODO(lexer): validate escape sequences after lexing (`\n`, `\r`, `\t`,
+    /// `\"`, `\\`, `\u{...}`). Invalid escapes should become lex errors rather
+    /// than silently succeeding as a `String` token.
     #[regex(r#""([^"\\]|\\.)*""#)]
     String,
 
@@ -235,13 +239,13 @@ pub enum Token {
     Bang,
 }
 
-/// Lex `source` into tokens, normalizing `\r\n` to `\n` first.
+/// Lex `source` into tokens. `\r` is skipped as whitespace, so CRLF keeps
+/// original byte offsets for diagnostics.
 pub fn lex(source: &str) -> Result<Vec<TokenSpan>, Vec<SyntaxError>> {
-    let normalized = source.replace("\r\n", "\n");
-    lex_normalized(&normalized)
+    lex_normalized(source)
 }
 
-/// Lex already-normalized `\n`-only source.
+/// Lex source text (same as [`lex`]; name kept for call sites).
 pub fn lex_normalized(source: &str) -> Result<Vec<TokenSpan>, Vec<SyntaxError>> {
     let mut lexer = Token::lexer(source);
     let mut tokens = Vec::new();
@@ -390,10 +394,30 @@ mod tests {
     }
 
     #[test]
-    fn crlf_normalized() {
-        let tokens = lex("let x = 1;\r\n").unwrap();
-        assert!(tokens.iter().any(|t| t.kind == Token::Let));
-        assert!(tokens.iter().any(|t| t.kind == Token::Semicolon));
+    fn crlf_preserves_byte_offsets() {
+        // `\r` is skipped as whitespace; spans still point into the original buffer.
+        let source = "let x = 1;\r\nfn";
+        let tokens = lex(source).unwrap();
+        let let_tok = tokens.iter().find(|t| t.kind == Token::Let).unwrap();
+        assert_eq!(let_tok.span.start, 0);
+        assert_eq!(let_tok.span.slice(source), "let");
+        let fn_tok = tokens.iter().find(|t| t.kind == Token::Fn).unwrap();
+        assert_eq!(fn_tok.span.slice(source), "fn");
+        // Byte offset of `fn` accounts for the `\r` that was skipped, not rewritten.
+        assert_eq!(&source[fn_tok.span.start..fn_tok.span.end], "fn");
+    }
+
+    #[test]
+    fn number_then_ident_is_two_tokens() {
+        // TODO(lexer): `123abc` should be a dedicated lex error (invalid literal),
+        // not silently split into `Int` + `Ident`. Document current behavior until then.
+        assert_eq!(kinds("123abc"), vec![Token::Int, Token::Ident]);
+    }
+
+    #[test]
+    fn invalid_string_escape_currently_accepted() {
+        // TODO(lexer): `"\q"` should fail once escape validation lands.
+        assert_eq!(kinds(r#""\q""#), vec![Token::String]);
     }
 
     #[test]

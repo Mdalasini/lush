@@ -6,7 +6,8 @@ normative language definition lives in [`spec.md`](spec.md).
 ## Status
 
 Implementation is underway, following the staged build order in `spec.md` §15.3.
-The first crate is `lush-syntax` (lexer, parser, AST, formatter).
+Current crates: `lush-syntax` (lexer, parser, AST, formatter) and `lush-types`
+(early type-checker prototype for complete documentation modules).
 
 ## Development
 
