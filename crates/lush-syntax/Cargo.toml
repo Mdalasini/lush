@@ -10,3 +10,4 @@ ariadne = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true, features = ["yaml"] }
+lush-test-support = { workspace = true }

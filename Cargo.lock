@@ -99,6 +99,24 @@ version = "0.1.0"
 dependencies = [
  "ariadne",
  "insta",
+ "lush-test-support",
+]
+
+[[package]]
+name = "lush-test-support"
+version = "0.1.0"
+dependencies = [
+ "lush-syntax",
+]
+
+[[package]]
+name = "lush-types"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
+ "insta",
+ "lush-syntax",
+ "lush-test-support",
 ]
 
 [[package]]

@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/lush-syntax"]
+members = [
+    "crates/lush-syntax",
+    "crates/lush-types",
+    "crates/lush-test-support",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,3 +15,5 @@ repository = "https://github.com/Mdalasini/lush"
 [workspace.dependencies]
 ariadne = "0.5"
 insta = "1.42"
+lush-syntax = { path = "crates/lush-syntax" }
+lush-test-support = { path = "crates/lush-test-support" }

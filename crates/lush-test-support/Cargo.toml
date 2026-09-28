@@ -1,0 +1,12 @@
+[package]
+name = "lush-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared fixture and spec.md fence inventory helpers for Lush crate tests"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+lush-syntax = { workspace = true }

@@ -2,45 +2,15 @@
 
 use lush_syntax::ast::equiv;
 use lush_syntax::{format_round_trip, format_source, parse_module};
+use lush_test_support::{
+    assert_fence_lines_preserved, expected_codes, extract_lush_fences, read_lush_files,
+    read_spec_md, spec_fence_inventory, wrap_as_expr, wrap_mixed, SpecFenceKind,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
-
-fn read_lush_files(dir: &Path) -> Vec<(String, String)> {
-    let mut files = Vec::new();
-    if !dir.exists() {
-        return files;
-    }
-    let mut entries: Vec<_> = fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "lush"))
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let path = entry.path();
-        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-        let src = fs::read_to_string(&path).unwrap();
-        files.push((name, src));
-    }
-    files
-}
-
-/// Leading `// expect: E0xxx` lines list required diagnostic codes.
-fn expected_codes(src: &str) -> Vec<String> {
-    src.lines()
-        .take_while(|line| line.trim_start().starts_with("//"))
-        .filter_map(|line| {
-            let trimmed = line.trim_start().trim_start_matches("//").trim();
-            trimmed
-                .strip_prefix("expect:")
-                .map(|rest| rest.trim().to_string())
-        })
-        .filter(|c| !c.is_empty())
-        .collect()
 }
 
 #[test]
@@ -331,111 +301,9 @@ fn mixed_comparison_equality_rejected() {
     assert_eq!(e0110, 1, "expected exactly one E0110, got {e0110}");
 }
 
-/// How a ` ```lush ` fence from `spec.md` is exercised by the syntax crate.
-#[derive(Clone, Copy)]
-enum SpecFenceKind {
-    /// Complete module; parse unchanged.
-    Module,
-    /// Mixed module items + statements: relocate module-level lines above a wrapper fn.
-    WrapMixed,
-    /// Expression fragment; wrap as a single expression statement.
-    WrapExpr,
-    /// API pseudocode / signature-only illustrations (§11.4).
-    Pseudocode,
-    /// Contains illustrative placeholders (`...`) that are not source tokens.
-    Placeholder,
-}
-
-fn spec_fence_inventory() -> &'static [SpecFenceKind] {
-    use SpecFenceKind::*;
-    &[
-        Module,      // 0 types
-        WrapMixed,   // 1 bindings (`const` + `let`s)
-        Placeholder, // 2 functions (`...;`)
-        WrapExpr,    // 3 pipes
-        WrapExpr,    // 4 case
-        WrapMixed,   // 5 use
-        WrapMixed,   // 6 imports + trailing call
-        Module,      // 7 Msg type
-        WrapMixed,   // 8 selector
-        Pseudocode,  // 9 process API
-        Pseudocode,  // 10 actor API
-        Module,      // 11 actor example
-        Pseudocode,  // 12 supervisor API
-        WrapMixed,   // 13 task await
-        Pseudocode,  // 14 task API
-        Module,      // 15 fib
-        Module,      // 16 million processes
-        Module,      // 17 supervised worker
-    ]
-}
-
-fn extract_lush_fences(spec: &str) -> Vec<String> {
-    let mut fences = Vec::new();
-    let mut rest = spec;
-    while let Some(start) = rest.find("```lush\n") {
-        rest = &rest[start + "```lush\n".len()..];
-        let Some(end) = rest.find("```") else {
-            break;
-        };
-        fences.push(rest[..end].to_string());
-        rest = &rest[end + 3..];
-    }
-    fences
-}
-
-/// Relocate single-line module items above a wrapper function; keep the rest inside.
-/// Does not drop or rewrite fence tokens (§11.4).
-fn wrap_mixed(body: &str) -> String {
-    let (module, stmts): (Vec<_>, Vec<_>) = body.lines().partition(|l| {
-        let t = l.trim_start();
-        [
-            "import ",
-            "const ",
-            "pub const ",
-            "type ",
-            "pub type ",
-            "pub opaque type ",
-            "opaque type ",
-        ]
-        .iter()
-        .any(|p| t.starts_with(p))
-    });
-    format!(
-        "{}\npub fn __spec_snippet() {{\n{}\n}}\n",
-        module.join("\n"),
-        stmts.join("\n")
-    )
-}
-
-fn wrap_as_expr(expr: &str) -> String {
-    // Preserve fence lines verbatim; only ensure the expression statement ends in `;`.
-    let body = expr.trim_end();
-    let body = if body.ends_with(';') {
-        body.to_string()
-    } else {
-        format!("{body};")
-    };
-    format!("pub fn __spec_snippet() {{\n{body}\n}}\n")
-}
-
-fn assert_fence_lines_preserved(fence: &str, src: &str, fence_index: usize) {
-    for (line_no, line) in fence.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        assert!(
-            src.contains(line),
-            "spec.md lush fence #{fence_index} line {} was dropped by the wrapper:\n  {line:?}\n--- source ---\n{src}",
-            line_no + 1
-        );
-    }
-}
-
 #[test]
 fn spec_md_lush_fences_parse() {
-    let spec_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec.md");
-    let spec = fs::read_to_string(&spec_path).expect("read spec.md");
+    let spec = read_spec_md(Path::new(env!("CARGO_MANIFEST_DIR")));
     let fences = extract_lush_fences(&spec);
     let inventory = spec_fence_inventory();
     assert_eq!(
