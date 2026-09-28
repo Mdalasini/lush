@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: CI / tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain placeholder status
+        run: |
+          echo "No Lush implementation or automated tests exist yet."
+          echo "This placeholder keeps the required CI / tests check green until test commands are added."
