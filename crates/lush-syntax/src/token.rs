@@ -12,11 +12,13 @@ pub struct SpannedToken {
 }
 
 /// Non-significant lexical material preserved for formatting.
+///
+/// Text is recovered by slicing the normalised source with [`Span`]; storing
+/// only the span avoids one allocation per whitespace/comment run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trivia {
     pub kind: TriviaKind,
     pub span: Span,
-    pub text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +230,19 @@ impl TokenKind {
             | TokenKind::Int(_)
             | TokenKind::Float(_)
             | TokenKind::String(_) => "<value>",
+        }
+    }
+
+    /// Human-readable description for diagnostics (§11.6).
+    pub fn describe(&self) -> String {
+        match self {
+            TokenKind::Ident(s) => format!("identifier `{s}`"),
+            TokenKind::UIdent(s) => format!("type name `{s}`"),
+            TokenKind::Int(i) => format!("integer `{}`", i.raw),
+            TokenKind::Float(f) => format!("float `{}`", f.raw),
+            TokenKind::String(s) => format!("string `{}`", s.raw.escape_default()),
+            TokenKind::Eof => "end of file".into(),
+            other => format!("`{}`", other.as_str()),
         }
     }
 }
