@@ -373,22 +373,34 @@ fn desugar_expr(
                 .iter()
                 .filter(|a| matches!(a.value, ArgValue::Hole))
                 .count();
-            // Nested holes: hole inside a non-hole arg expression
-            let mut nested = false;
-            for a in args.iter() {
+            // A `_` belongs to the innermost enclosing *call*. Nested captures such
+            // as `f(g(_))` / `add(5, _)` are valid; a hole together with a nested
+            // hole (`f(_, g(_))`) or a hole under a non-call (`f(1 + _)`) is not.
+            let nested = args.iter().any(|a| {
                 if let ArgValue::Expr(e) = &a.value {
-                    if contains_hole(e) {
-                        nested = true;
-                    }
+                    contains_hole(e)
+                } else {
+                    false
                 }
-            }
-            if nested {
+            });
+            if hole_count >= 1 && nested {
                 sink.error(
                     codes::E1101_NESTED_HOLE,
-                    "nested placeholders are not allowed (e.g. `f(g(_))`)",
+                    "nested placeholders are not allowed when the outer call also has `_`",
                     expr.span,
-                    Some("capture only direct arguments: `f(_)` or `g(_)`, not nested".into()),
+                    Some(
+                        "each `_` belongs to the innermost call; write `f(g(_))` or `f(_)`, not `f(_, g(_))`"
+                            .into(),
+                    ),
                 );
+            } else if nested && hole_count == 0 {
+                // Innermost-first: desugar argument expressions so nested captures
+                // form before this call is considered.
+                for a in args.iter_mut() {
+                    if let ArgValue::Expr(e) = &mut a.value {
+                        desugar_expr(e, sink, used, gensyms);
+                    }
+                }
             }
             if hole_count > 1 {
                 sink.error(
@@ -463,7 +475,14 @@ fn desugar_expr(
                     },
                     span: expr.span,
                 };
-            } else {
+            } else if hole_count == 0 && !nested {
+                for a in args.iter_mut() {
+                    if let ArgValue::Expr(e) = &mut a.value {
+                        desugar_expr(e, sink, used, gensyms);
+                    }
+                }
+            } else if hole_count >= 1 {
+                // Error path: still desugar remaining exprs for further diagnostics
                 for a in args.iter_mut() {
                     if let ArgValue::Expr(e) = &mut a.value {
                         desugar_expr(e, sink, used, gensyms);

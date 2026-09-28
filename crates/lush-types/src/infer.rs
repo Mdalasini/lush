@@ -1,6 +1,7 @@
 //! Hindley–Milner inference with value restriction and sealed constraints.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 
 use lush_syntax::ast::*;
 use lush_syntax::span::Span;
@@ -25,6 +26,8 @@ pub struct InferCtx<'a> {
     pub resolved: &'a mut ResolvedModule,
     pub level: u32,
     pub env: Vec<HashMap<String, Scheme>>,
+    /// Shared monomorphic type nodes for DAG-shaped lets (let-doubling).
+    pub shared_env: Vec<HashMap<String, Rc<Type>>>,
     /// Names currently being defined in an SCC (monomorphic).
     pub scc: HashSet<String>,
     pub used_values: HashSet<String>,
@@ -40,19 +43,35 @@ pub struct InferCtx<'a> {
     pub deps: &'a BTreeMap<String, ModuleInterface>,
     /// When set, argument unification failures are reported as polymorphic recursion.
     pub scc_rec_call: bool,
+    /// Names currently being bound by a `let` (for E1012 anon self-ref).
+    pub binding_names: HashSet<String>,
 }
 
 impl<'a> InferCtx<'a> {
     pub fn push_scope(&mut self) {
         self.env.push(HashMap::new());
+        self.shared_env.push(HashMap::new());
     }
     pub fn pop_scope(&mut self) {
         self.env.pop();
+        self.shared_env.pop();
     }
     pub fn define_local(&mut self, name: String, scheme: Scheme) {
+        let shared = Rc::new(scheme.body.clone());
         if let Some(scope) = self.env.last_mut() {
-            scope.insert(name, scheme);
+            scope.insert(name.clone(), scheme);
         }
+        if let Some(scope) = self.shared_env.last_mut() {
+            scope.insert(name, shared);
+        }
+    }
+    pub fn lookup_shared(&self, name: &str) -> Option<Rc<Type>> {
+        for scope in self.shared_env.iter().rev() {
+            if let Some(t) = scope.get(name) {
+                return Some(t.clone());
+            }
+        }
+        None
     }
     pub fn lookup_value(
         &mut self,
@@ -97,7 +116,7 @@ pub fn infer_module(
     entry: bool,
 ) -> ModuleInterface {
     // Elaborate type definitions
-    elaborate_types(path, module, resolved, store, sink);
+    elaborate_types(path, module, resolved, store, sink, deps);
 
     let mut ctx = InferCtx {
         store,
@@ -105,6 +124,7 @@ pub fn infer_module(
         resolved,
         level: 0,
         env: vec![HashMap::new()],
+        shared_env: vec![HashMap::new()],
         scc: HashSet::new(),
         used_values: HashSet::new(),
         used_types: HashSet::new(),
@@ -115,6 +135,7 @@ pub fn infer_module(
         defining_opaques: HashSet::new(),
         deps,
         scc_rec_call: false,
+        binding_names: HashSet::new(),
     };
     for (name, t) in ctx.resolved.types.clone() {
         if t.from_module == path {
@@ -152,7 +173,12 @@ pub fn infer_module(
             .remove(&c.name.text)
             .unwrap_or_else(|| c.value.clone());
         if let Some(val) = const_eval::eval_const_expr(&expr, &mut ctx.const_env, ctx.sink) {
-            let ty = const_value_type(&val);
+            // Empty lists/are polymorphic at the type level; keep a free variable so
+            // public expansive bindings can surface E1304 rather than silently using Error.
+            let ty = match &val {
+                ConstValue::List(items) if items.is_empty() => Type::list(ctx.store.fresh_var(0)),
+                _ => const_value_type(&val),
+            };
             if let Some(ann) = &c.ty {
                 let ann_ty = translate_type_expr(&mut ctx, ann, &HashMap::new());
                 let mut u = Unifier::new(ctx.store, ctx.sink);
@@ -183,6 +209,11 @@ pub fn infer_module(
             ctx.const_env.types.insert(c.name.text.clone(), ty);
         }
         ctx.const_env.visiting.pop();
+    }
+
+    // Const-to-const references count as uses for unused-private warnings.
+    for c in &consts {
+        mark_const_refs_used(&mut ctx, &c.value);
     }
 
     // Functions: dependency SCCs
@@ -232,7 +263,17 @@ pub fn infer_module(
     // Warnings: unused imports, unused private, unused values handled during infer
     warn_unused(&mut ctx, module);
 
-    build_interface(path, &ctx)
+    // E1306: inference work budget (distinct from exhaustiveness E1451).
+    if ctx.store.work > crate::limits::MAX_EXHAUST_WORK.saturating_mul(4) {
+        ctx.sink.error(
+            codes::E1306_TOO_COMPLEX,
+            "type checking exceeded the work budget for this module",
+            Span::default(),
+            Some("simplify large definitions or split the module".into()),
+        );
+    }
+
+    build_interface(path, &mut ctx)
 }
 
 fn types_compat(store: &mut TypeStore, a: &Type, b: &Type) -> bool {
@@ -258,10 +299,10 @@ fn const_value_type(v: &ConstValue) -> Type {
         ConstValue::String(_) => Type::String,
         ConstValue::Bool(_) => Type::Bool,
         ConstValue::Nil => Type::Nil,
-        ConstValue::Tuple(xs) => Type::Tuple(xs.iter().map(const_value_type).collect()),
+        ConstValue::Tuple(xs) => Type::tuple(xs.iter().map(const_value_type).collect()),
         ConstValue::List(xs) => {
             let elem = xs.first().map(const_value_type).unwrap_or(Type::Error);
-            Type::List(Box::new(elem))
+            Type::list(elem)
         }
         ConstValue::Adt { .. } => Type::Error, // nominal filled elsewhere
     }
@@ -273,6 +314,7 @@ fn elaborate_types(
     resolved: &mut ResolvedModule,
     store: &mut TypeStore,
     sink: &mut TypeSink,
+    deps: &BTreeMap<String, ModuleInterface>,
 ) {
     for item in &module.items {
         let ModuleItem::Type(td) = item else { continue };
@@ -288,7 +330,8 @@ fn elaborate_types(
                 if td.opaque {
                     continue; // already errored
                 }
-                let body = translate_type_expr_raw(store, sink, resolved, te, &tvar_rigids, path);
+                let body =
+                    translate_type_expr_raw(store, sink, resolved, te, &tvar_rigids, path, deps);
                 if let Some(info) = store.defs.get_mut(&ti.def) {
                     info.alias_body = Some(body);
                     info.kind = TypeDefKind::Alias;
@@ -327,6 +370,7 @@ fn elaborate_types(
                                 &f.ty,
                                 &tvar_rigids,
                                 path,
+                                deps,
                             );
                             // Check undeclared tvars — handled in translate
                             fields.push(FieldInfo {
@@ -346,18 +390,12 @@ fn elaborate_types(
                         .iter()
                         .filter_map(|p| tvar_rigids.get(&p.text).cloned())
                         .collect();
-                    let ret = Type::App {
-                        def: ti.def,
-                        args: app_args,
-                    };
+                    let ret = Type::app(ti.def, app_args);
                     let param_tys: Vec<Type> = fields.iter().map(|f| f.ty.clone()).collect();
                     let body_ty = if param_tys.is_empty() {
                         ret
                     } else {
-                        Type::Fun {
-                            params: param_tys.clone(),
-                            ret: Box::new(ret),
-                        }
+                        Type::fun(param_tys.clone(), ret)
                     };
                     let pairs: Vec<_> = tvar_rigids
                         .values()
@@ -456,6 +494,7 @@ fn translate_type_expr_raw(
     te: &TypeExpr,
     rigids: &HashMap<String, Type>,
     _path: &str,
+    deps: &BTreeMap<String, ModuleInterface>,
 ) -> Type {
     match &te.kind {
         TypeKind::Var(n) => {
@@ -490,7 +529,7 @@ fn translate_type_expr_raw(
             };
             let args_t: Vec<Type> = args
                 .iter()
-                .map(|a| translate_type_expr_raw(store, sink, resolved, a, rigids, _path))
+                .map(|a| translate_type_expr_raw(store, sink, resolved, a, rigids, _path, deps))
                 .collect();
             match tname.as_str() {
                 "Int" | "Float" | "String" | "Bool" | "Nil" | "BitArray" if args_t.is_empty() => {
@@ -513,39 +552,36 @@ fn translate_type_expr_raw(
                         );
                         return Type::Error;
                     }
-                    return Type::List(Box::new(args_t.into_iter().next().unwrap()));
+                    return Type::list(args_t.into_iter().next().unwrap());
                 }
                 _ => {}
             }
             // Resolve type name
             let def = if let Some(m) = &module_qual {
-                // Look up module alias
+                // Look up module alias → dependency interface type.
                 let mod_path = resolved
                     .values
                     .get(m)
                     .and_then(|v| v.from_module.strip_prefix("module:").map(|s| s.to_string()));
-                // Prefer types imported under qualified access — search by from_module
-                resolved
-                    .types
-                    .iter()
-                    .find(|(n, t)| {
-                        *n == &tname
-                            && (mod_path
-                                .as_ref()
-                                .map(|p| &t.from_module == p)
-                                .unwrap_or(false)
-                                || t.from_module.ends_with(m.as_str()))
-                    })
-                    .map(|(_, t)| t.def)
-                    .or_else(|| {
-                        // Also allow type imported selectively with same name
-                        resolved.types.get(&tname).map(|t| t.def)
-                    })
+                if let Some(path) = &mod_path {
+                    if let Some(t) = deps.get(path).and_then(|iface| iface.types.get(&tname)) {
+                        Some(t.def)
+                    } else {
+                        resolved
+                            .types
+                            .iter()
+                            .find(|(n, t)| *n == &tname && &t.from_module == path)
+                            .map(|(_, t)| t.def)
+                            .or_else(|| resolved.types.get(&tname).map(|t| t.def))
+                    }
+                } else {
+                    // Unknown alias — still try selective import of the bare name.
+                    resolved.types.get(&tname).map(|t| t.def)
+                }
             } else {
                 resolved.types.get(&tname).map(|t| t.def)
             };
             let Some(def) = def else {
-                // Subject without import?
                 sink.error(
                     codes::E1001_UNKNOWN_TYPE,
                     format!("unknown type `{tname}`"),
@@ -567,28 +603,29 @@ fn translate_type_expr_raw(
                 );
                 return Type::Error;
             }
-            // Expand alias
+            // Expand alias (including parameterised aliases)
             if let Some(info) = store.defs.get(&def) {
                 if info.kind == TypeDefKind::Alias {
                     if let Some(body) = &info.alias_body {
-                        // Substitute params — simplified return body if no params
                         if info.params.is_empty() {
                             return body.clone();
                         }
+                        // Substitute type arguments into the alias body.
+                        let params = info.params.clone();
+                        let body = body.clone();
+                        return subst_params_store(store, &body, &params, &args_t);
                     }
                 }
             }
-            Type::App { def, args: args_t }
+            Type::app(def, args_t)
         }
-        TypeKind::Fn { params, ret } => Type::Fun {
-            params: params
+        TypeKind::Fn { params, ret } => Type::fun(
+            params
                 .iter()
-                .map(|p| translate_type_expr_raw(store, sink, resolved, p, rigids, _path))
+                .map(|p| translate_type_expr_raw(store, sink, resolved, p, rigids, _path, deps))
                 .collect(),
-            ret: Box::new(translate_type_expr_raw(
-                store, sink, resolved, ret, rigids, _path,
-            )),
-        },
+            translate_type_expr_raw(store, sink, resolved, ret, rigids, _path, deps),
+        ),
         TypeKind::Tuple(ts) => {
             if ts.len() < 2 {
                 sink.error(
@@ -599,9 +636,9 @@ fn translate_type_expr_raw(
                 );
                 return Type::Error;
             }
-            Type::Tuple(
+            Type::tuple(
                 ts.iter()
-                    .map(|t| translate_type_expr_raw(store, sink, resolved, t, rigids, _path))
+                    .map(|t| translate_type_expr_raw(store, sink, resolved, t, rigids, _path, deps))
                     .collect(),
             )
         }
@@ -613,6 +650,7 @@ fn translate_type_expr(
     te: &TypeExpr,
     rigids: &HashMap<String, Type>,
 ) -> Type {
+    mark_type_names_used(ctx, te);
     translate_type_expr_raw(
         ctx.store,
         ctx.sink,
@@ -620,77 +658,220 @@ fn translate_type_expr(
         te,
         rigids,
         &ctx.module_path,
+        ctx.deps,
     )
 }
 
+fn mark_type_names_used(ctx: &mut InferCtx<'_>, te: &TypeExpr) {
+    match &te.kind {
+        TypeKind::Named { name, args } => {
+            match name {
+                TypeName::Unqualified(u) => {
+                    ctx.used_types.insert(u.text.clone());
+                    if let Some(t) = ctx.resolved.types.get(&u.text) {
+                        // Mark the module import as used when the type comes from elsewhere.
+                        if t.from_module != ctx.module_path && !t.from_module.is_empty() {
+                            let seg = t.from_module.rsplit('/').next().unwrap_or(&t.from_module);
+                            ctx.resolved.imports_used.insert(format!("mod:{seg}"));
+                            ctx.resolved.imports_used.insert(t.from_module.clone());
+                        }
+                    }
+                }
+                TypeName::Qualified { module, name } => {
+                    ctx.used_types.insert(name.text.clone());
+                    ctx.resolved
+                        .imports_used
+                        .insert(format!("mod:{}", module.text));
+                }
+            }
+            for a in args {
+                mark_type_names_used(ctx, a);
+            }
+        }
+        TypeKind::Var(_) => {}
+        TypeKind::Fn { params, ret } => {
+            for p in params {
+                mark_type_names_used(ctx, p);
+            }
+            mark_type_names_used(ctx, ret);
+        }
+        TypeKind::Tuple(ts) => {
+            for t in ts {
+                mark_type_names_used(ctx, t);
+            }
+        }
+    }
+}
+
 fn fn_deps(fns: &[&FnDef]) -> BTreeMap<String, Vec<String>> {
-    let names: HashSet<_> = fns.iter().map(|f| f.name.text.clone()).collect();
+    let names: HashSet<_> = fns.iter().map(|f| f.name.text.as_str()).collect();
     let mut deps = BTreeMap::new();
     for f in fns {
         let mut used = HashSet::new();
-        walk_expr_names_in_block(&f.body, &mut used);
-        let d: Vec<_> = used.into_iter().filter(|n| names.contains(n)).collect();
+        let mut locals = HashSet::new();
+        // Parameters shadow top-level names.
+        for p in &f.params {
+            locals.insert(p.name.text.as_str());
+        }
+        walk_expr_names_scoped(&f.body, &mut used, &mut locals);
+        let d: Vec<_> = used
+            .into_iter()
+            .filter(|n| names.contains(n.as_str()))
+            .collect();
         deps.insert(f.name.text.clone(), d);
     }
     deps
 }
 
-fn walk_expr_names_in_block(b: &Block, out: &mut HashSet<String>) {
+fn walk_expr_names_scoped<'a>(
+    b: &'a Block,
+    out: &mut HashSet<String>,
+    locals: &mut HashSet<&'a str>,
+) {
     for s in &b.statements {
         match s {
-            Statement::Expr(e) => {
-                walk_expr_names(e, out);
-            }
+            Statement::Expr(e) => walk_expr_names_scoped_expr(e, out, locals),
             Statement::Let(l) => {
-                walk_expr_names(&l.value, out);
+                walk_expr_names_scoped_expr(&l.value, out, locals);
+                bind_pat_names(&l.pattern, locals);
             }
-            Statement::Fn(f) => walk_expr_names_in_block(&f.body, out),
-            Statement::Use(u) => walk_expr_names(&u.value, out),
+            Statement::Fn(f) => {
+                let mut nested = locals.clone();
+                for p in &f.params {
+                    nested.insert(p.name.text.as_str());
+                }
+                nested.insert(f.name.text.as_str());
+                walk_expr_names_scoped(&f.body, out, &mut nested);
+            }
+            Statement::Use(u) => walk_expr_names_scoped_expr(&u.value, out, locals),
         }
     }
 }
 
-fn walk_expr_names(e: &Expr, out: &mut HashSet<String>) {
-    match &e.kind {
-        ExprKind::Var(n) => {
-            out.insert(n.text.clone());
+fn bind_pat_names<'a>(p: &'a Pattern, locals: &mut HashSet<&'a str>) {
+    match &p.kind {
+        PatternKind::Var(n) | PatternKind::UnderscoreName(n) => {
+            locals.insert(n.text.as_str());
         }
-        ExprKind::Call { callee, args } => {
-            walk_expr_names(callee, out);
+        PatternKind::Alias { pattern, name } => {
+            locals.insert(name.text.as_str());
+            bind_pat_names(pattern, locals);
+        }
+        PatternKind::Tuple(ps) => {
+            for p in ps {
+                bind_pat_names(p, locals);
+            }
+        }
+        PatternKind::List { items, spread } => {
+            for p in items {
+                bind_pat_names(p, locals);
+            }
+            if let Some(s) = spread {
+                bind_pat_names(s, locals);
+            }
+        }
+        PatternKind::Constructor {
+            args: Some(args), ..
+        } => {
             for a in args {
-                if let ArgValue::Expr(e) = &a.value {
-                    walk_expr_names(e, out);
+                if let Some(p) = &a.pattern {
+                    bind_pat_names(p, locals);
                 }
             }
         }
-        ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
-            walk_expr_names(left, out);
-            walk_expr_names(right, out);
+        PatternKind::StringPrefix { rest, .. } => bind_pat_names(rest, locals),
+        PatternKind::BitArray(segs) => {
+            for s in segs {
+                bind_pat_names(&s.pattern, locals);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_expr_names_scoped_expr<'a>(
+    e: &'a Expr,
+    out: &mut HashSet<String>,
+    locals: &HashSet<&'a str>,
+) {
+    match &e.kind {
+        ExprKind::Var(n) => {
+            if !locals.contains(n.text.as_str()) {
+                out.insert(n.text.clone());
+            }
+        }
+        ExprKind::Call { callee, args } => {
+            walk_expr_names_scoped_expr(callee, out, locals);
+            for a in args {
+                if let ArgValue::Expr(e) = &a.value {
+                    walk_expr_names_scoped_expr(e, out, locals);
+                }
+            }
+        }
+        ExprKind::Pipe { left, right } | ExprKind::Binary { left, right, .. } => {
+            walk_expr_names_scoped_expr(left, out, locals);
+            walk_expr_names_scoped_expr(right, out, locals);
         }
         ExprKind::Unary { expr, .. }
         | ExprKind::Paren(expr)
         | ExprKind::Echo(expr)
         | ExprKind::Field { base: expr, .. }
-        | ExprKind::Assert { expr, .. } => walk_expr_names(expr, out),
+        | ExprKind::Assert { expr, .. } => walk_expr_names_scoped_expr(expr, out, locals),
         ExprKind::Tuple(xs) | ExprKind::List { items: xs, .. } => {
-            for e in xs {
-                walk_expr_names(e, out);
+            for x in xs {
+                walk_expr_names_scoped_expr(x, out, locals);
+            }
+            if let ExprKind::List {
+                spread: Some(s), ..
+            } = &e.kind
+            {
+                walk_expr_names_scoped_expr(s, out, locals);
             }
         }
-        ExprKind::Fn { body, .. } => walk_expr_names_in_block(body, out),
-        ExprKind::Block(b) => walk_expr_names_in_block(b, out),
+        ExprKind::Fn { params, body, .. } => {
+            let mut nested = locals.clone();
+            for p in params {
+                nested.insert(p.name.text.as_str());
+            }
+            walk_expr_names_scoped(body, out, &mut nested);
+        }
+        ExprKind::Block(b) => {
+            let mut nested = locals.clone();
+            walk_expr_names_scoped(b, out, &mut nested);
+        }
         ExprKind::Case { subjects, clauses } => {
             for s in subjects {
-                walk_expr_names(s, out);
+                walk_expr_names_scoped_expr(s, out, locals);
             }
             for c in clauses {
-                walk_expr_names(&c.body, out);
+                let mut nested = locals.clone();
+                for row in &c.patterns {
+                    for p in &row.patterns {
+                        bind_pat_names(p, &mut nested);
+                    }
+                }
+                if let Some(g) = &c.guard {
+                    walk_expr_names_scoped_expr(g, out, &nested);
+                }
+                walk_expr_names_scoped_expr(&c.body, out, &nested);
             }
         }
         ExprKind::RecordUpdate { base, fields, .. } => {
-            walk_expr_names(base, out);
+            walk_expr_names_scoped_expr(base, out, locals);
             for (_, e) in fields {
-                walk_expr_names(e, out);
+                walk_expr_names_scoped_expr(e, out, locals);
+            }
+        }
+        ExprKind::BitArray(segs) => {
+            for s in segs {
+                walk_expr_names_scoped_expr(&s.value, out, locals);
+            }
+        }
+        ExprKind::Constructor(c) => {
+            if let Some(m) = &c.module {
+                if !locals.contains(m.text.as_str()) {
+                    out.insert(m.text.clone());
+                }
             }
         }
         _ => {}
@@ -698,65 +879,83 @@ fn walk_expr_names(e: &Expr, out: &mut HashSet<String>) {
 }
 
 fn strong_components(deps: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
-    // Tarjan simplified: Kosaraju
-    let mut nodes: Vec<_> = deps.keys().cloned().collect();
+    // Iterative Tarjan over integer node ids (no recursive DFS).
+    let mut nodes: Vec<String> = deps.keys().cloned().collect();
     nodes.sort();
-    let mut order = Vec::new();
-    let mut seen = HashSet::new();
-    fn dfs1(
-        n: &str,
-        deps: &BTreeMap<String, Vec<String>>,
-        seen: &mut HashSet<String>,
-        order: &mut Vec<String>,
-    ) {
-        if !seen.insert(n.to_string()) {
-            return;
-        }
-        if let Some(ds) = deps.get(n) {
-            for d in ds {
-                dfs1(d, deps, seen, order);
+    let index_of: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    let n = nodes.len();
+    let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
+    for (name, ds) in deps {
+        let Some(&u) = index_of.get(name.as_str()) else {
+            continue;
+        };
+        for d in ds {
+            if let Some(&v) = index_of.get(d.as_str()) {
+                adj[u].push(v);
             }
         }
-        order.push(n.to_string());
     }
-    for n in &nodes {
-        dfs1(n, deps, &mut seen, &mut order);
-    }
-    let mut rev: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (k, vs) in deps {
-        rev.entry(k.clone()).or_default();
-        for v in vs {
-            rev.entry(v.clone()).or_default().push(k.clone());
-        }
-    }
-    let mut seen = HashSet::new();
-    let mut sccs = Vec::new();
-    for n in order.into_iter().rev() {
-        if seen.contains(&n) {
+
+    let mut indices = vec![None; n];
+    let mut lowlink = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut sccs: Vec<Vec<String>> = Vec::new();
+    let mut next_index = 0usize;
+
+    // Explicit DFS stack: (node, next_edge_idx, entering)
+    for start in 0..n {
+        if indices[start].is_some() {
             continue;
         }
-        let mut comp = Vec::new();
-        fn dfs2(
-            n: &str,
-            rev: &BTreeMap<String, Vec<String>>,
-            seen: &mut HashSet<String>,
-            comp: &mut Vec<String>,
-        ) {
-            if !seen.insert(n.to_string()) {
-                return;
-            }
-            comp.push(n.to_string());
-            if let Some(ds) = rev.get(n) {
-                for d in ds {
-                    dfs2(d, rev, seen, comp);
+        let mut work: Vec<(usize, usize)> = vec![(start, 0)];
+        indices[start] = Some(next_index);
+        lowlink[start] = next_index;
+        next_index += 1;
+        stack.push(start);
+        on_stack[start] = true;
+
+        while let Some((v, edge_i)) = work.pop() {
+            if edge_i < adj[v].len() {
+                work.push((v, edge_i + 1));
+                let w = adj[v][edge_i];
+                if indices[w].is_none() {
+                    indices[w] = Some(next_index);
+                    lowlink[w] = next_index;
+                    next_index += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(indices[w].unwrap());
+                }
+            } else {
+                // Post-order: update parent lowlink and maybe pop SCC
+                if let Some(&(parent, _)) = work.last() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[v]);
+                }
+                if lowlink[v] == indices[v].unwrap() {
+                    let mut comp = Vec::new();
+                    loop {
+                        let w = stack.pop().unwrap();
+                        on_stack[w] = false;
+                        comp.push(nodes[w].clone());
+                        if w == v {
+                            break;
+                        }
+                    }
+                    sccs.push(comp);
                 }
             }
         }
-        dfs2(&n, &rev, &mut seen, &mut comp);
-        sccs.push(comp);
     }
-    // Kosaraju yields SCCs in reverse topological order for "uses" edges;
-    // infer callees before callers so schemes are ready at call sites.
+
+    // Tarjan emits SCCs in reverse topological order of the condensation;
+    // reverse so callees are inferred before callers.
     sccs.reverse();
     sccs
 }
@@ -764,11 +963,12 @@ fn strong_components(deps: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
 fn infer_fn_scc(ctx: &mut InferCtx<'_>, fns: &[&FnDef], scc: &[String]) {
     ctx.scc = scc.iter().cloned().collect();
     ctx.level += 1;
+    let by_name: HashMap<&str, &FnDef> = fns.iter().map(|f| (f.name.text.as_str(), *f)).collect();
     // Assign fresh mono types
     let mut mono: HashMap<String, Type> = HashMap::new();
     let mut rigid_maps: HashMap<String, HashMap<String, Type>> = HashMap::new();
     for name in scc {
-        let f = fns.iter().find(|f| f.name.text == *name).unwrap();
+        let f = by_name.get(name.as_str()).copied().unwrap();
         // Share annotation rigids across params + return
         let mut names = HashSet::new();
         for p in &f.params {
@@ -800,10 +1000,7 @@ fn infer_fn_scc(ctx: &mut InferCtx<'_>, fns: &[&FnDef], scc: &[String]) {
             ctx.store.fresh_var(ctx.level)
         };
         rigid_maps.insert(name.clone(), rigids);
-        let ty = Type::Fun {
-            params: params.clone(),
-            ret: Box::new(ret.clone()),
-        };
+        let ty = Type::fun(params.clone(), ret.clone());
         mono.insert(name.clone(), ty.clone());
         ctx.define_local(name.clone(), Scheme::mono(ty));
         // Warn unannotated pub
@@ -824,19 +1021,19 @@ fn infer_fn_scc(ctx: &mut InferCtx<'_>, fns: &[&FnDef], scc: &[String]) {
     }
     // Infer bodies
     for name in scc {
-        let f = fns.iter().find(|f| f.name.text == *name).unwrap();
+        let f = by_name.get(name.as_str()).copied().unwrap();
         ctx.push_scope();
         let Type::Fun { params, ret } = mono.get(name).unwrap().clone() else {
             unreachable!()
         };
         for (p, ty) in f.params.iter().zip(params.iter()) {
-            ctx.define_local(p.name.text.clone(), Scheme::mono(ty.clone()));
+            ctx.define_local(p.name.text.clone(), Scheme::mono((**ty).clone()));
         }
         let body_ty = infer_block(ctx, &f.body, true);
         let mut u = Unifier::new(ctx.store, ctx.sink);
         u.unify(
             &body_ty,
-            &ret,
+            ret.as_ref(),
             f.body.span,
             f.return_type
                 .as_ref()
@@ -949,7 +1146,16 @@ fn infer_block(ctx: &mut InferCtx<'_>, block: &Block, _is_fn_body: bool) -> Type
         }
         match &stmts[i] {
             Statement::Let(l) => {
+                // Collect pattern-bound names so anonymous RHS self-refs get E1012.
+                let mut names = HashSet::new();
+                collect_pat_bind_names(&l.pattern, &mut names);
+                for n in &names {
+                    ctx.binding_names.insert(n.clone());
+                }
                 let val_ty = infer_expr(ctx, &l.value);
+                for n in &names {
+                    ctx.binding_names.remove(n);
+                }
                 if let Some(ann) = &l.ty {
                     let ann_ty = translate_with_annotation_rigids(ctx, ann);
                     let mut u = Unifier::new(ctx.store, ctx.sink);
@@ -969,7 +1175,7 @@ fn infer_block(ctx: &mut InferCtx<'_>, block: &Block, _is_fn_body: bool) -> Type
                     work: 0,
                 };
                 ex.check_irrefutable(&l.pattern, &val_ty, l.assert);
-                bind_pattern(ctx, &l.pattern, &val_ty, is_expansive(&l.value));
+                infer_pattern(ctx, &l.pattern, &val_ty, is_expansive(&l.value));
                 last_ty = Type::Nil;
             }
             Statement::Expr(e) => {
@@ -1023,10 +1229,7 @@ fn infer_local_fn_group(ctx: &mut InferCtx<'_>, group: &[&FnDef], names: &[Strin
             .as_ref()
             .map(|t| translate_with_annotation_rigids(ctx, t))
             .unwrap_or_else(|| ctx.store.fresh_var(ctx.level));
-        let ty = Type::Fun {
-            params,
-            ret: Box::new(ret),
-        };
+        let ty = Type::fun(params, ret);
         mono.insert(f.name.text.clone(), ty.clone());
         ctx.define_local(f.name.text.clone(), Scheme::mono(ty));
     }
@@ -1035,12 +1238,12 @@ fn infer_local_fn_group(ctx: &mut InferCtx<'_>, group: &[&FnDef], names: &[Strin
         let Type::Fun { params, ret } = mono.get(&f.name.text).unwrap().clone() else {
             unreachable!()
         };
-        for (p, ty) in f.params.iter().zip(params) {
-            ctx.define_local(p.name.text.clone(), Scheme::mono(ty));
+        for (p, ty) in f.params.iter().zip(params.iter()) {
+            ctx.define_local(p.name.text.clone(), Scheme::mono((**ty).clone()));
         }
         let body_ty = infer_block(ctx, &f.body, true);
         let mut u = Unifier::new(ctx.store, ctx.sink);
-        u.unify(&body_ty, &ret, f.body.span, None);
+        u.unify(&body_ty, ret.as_ref(), f.body.span, None);
         ctx.pop_scope();
     }
     ctx.level -= 1;
@@ -1048,6 +1251,47 @@ fn infer_local_fn_group(ctx: &mut InferCtx<'_>, group: &[&FnDef], names: &[Strin
         let ty = mono.get(name).unwrap();
         let scheme = unify::generalise(ctx.store, ty, ctx.level, false);
         ctx.define_local(name.clone(), scheme);
+    }
+}
+
+fn collect_pat_bind_names(p: &Pattern, out: &mut HashSet<String>) {
+    match &p.kind {
+        PatternKind::Var(n) | PatternKind::UnderscoreName(n) => {
+            out.insert(n.text.clone());
+        }
+        PatternKind::Alias { pattern, name } => {
+            out.insert(name.text.clone());
+            collect_pat_bind_names(pattern, out);
+        }
+        PatternKind::Tuple(ps) => {
+            for p in ps {
+                collect_pat_bind_names(p, out);
+            }
+        }
+        PatternKind::List { items, spread } => {
+            for p in items {
+                collect_pat_bind_names(p, out);
+            }
+            if let Some(s) = spread {
+                collect_pat_bind_names(s, out);
+            }
+        }
+        PatternKind::Constructor {
+            args: Some(args), ..
+        } => {
+            for a in args {
+                if let Some(p) = &a.pattern {
+                    collect_pat_bind_names(p, out);
+                }
+            }
+        }
+        PatternKind::StringPrefix { rest, .. } => collect_pat_bind_names(rest, out),
+        PatternKind::BitArray(segs) => {
+            for s in segs {
+                collect_pat_bind_names(&s.pattern, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1080,104 +1324,444 @@ fn is_expansive(e: &Expr) -> bool {
     }
 }
 
-fn bind_pattern(ctx: &mut InferCtx<'_>, pat: &Pattern, ty: &Type, expansive: bool) {
+fn infer_pattern(ctx: &mut InferCtx<'_>, pat: &Pattern, expected: &Type, expansive: bool) {
     match &pat.kind {
         PatternKind::Var(n) => {
-            let scheme = unify::generalise(ctx.store, ty, ctx.level, expansive);
+            let scheme = unify::generalise(ctx.store, expected, ctx.level, expansive);
             ctx.define_local(n.text.clone(), scheme);
             ctx.local_bindings.push((n.text.clone(), n.span, false));
         }
         PatternKind::UnderscoreName(n) => {
-            let scheme = unify::generalise(ctx.store, ty, ctx.level, expansive);
+            let scheme = unify::generalise(ctx.store, expected, ctx.level, expansive);
             ctx.define_local(n.text.clone(), scheme);
-            // `_name` suppresses unused warnings
             ctx.local_bindings.push((n.text.clone(), n.span, true));
         }
         PatternKind::Discard => {}
         PatternKind::Alias { pattern, name } => {
-            let scheme = unify::generalise(ctx.store, ty, ctx.level, expansive);
+            let scheme = unify::generalise(ctx.store, expected, ctx.level, expansive);
             ctx.define_local(name.text.clone(), scheme);
             ctx.local_bindings
                 .push((name.text.clone(), name.span, false));
-            bind_pattern(ctx, pattern, ty, expansive);
+            infer_pattern(ctx, pattern, expected, expansive);
+        }
+        PatternKind::Int(lit) => {
+            let base = match lit.base {
+                IntBase::Decimal => 10,
+                IntBase::Hex => 16,
+                IntBase::Octal => 8,
+                IntBase::Binary => 2,
+            };
+            let _ = const_eval::check_int_lit(&lit.digits, base, false, pat.span, ctx.sink);
+            let mut u = Unifier::new(ctx.store, ctx.sink);
+            u.unify(expected, &Type::Int, pat.span, None);
+        }
+        PatternKind::Float(lit) => {
+            if crate::numeric::parse_float_literal(&lit.raw).is_err() {
+                ctx.sink.error(
+                    codes::E1401_FLOAT_RANGE,
+                    "float literal outside the finite binary64 range",
+                    pat.span,
+                    None,
+                );
+            }
+            let mut u = Unifier::new(ctx.store, ctx.sink);
+            u.unify(expected, &Type::Float, pat.span, None);
+        }
+        PatternKind::String(_) => {
+            let mut u = Unifier::new(ctx.store, ctx.sink);
+            u.unify(expected, &Type::String, pat.span, None);
         }
         PatternKind::Tuple(ps) => {
-            let z = ctx.store.zonk(ty);
-            if let Type::Tuple(ts) = z {
-                for (p, t) in ps.iter().zip(ts.iter()) {
-                    bind_pattern(ctx, p, t, expansive);
+            if ps.len() < 2 {
+                ctx.sink.error(
+                    codes::E1200_TYPE_ARITY,
+                    "tuples require at least 2 elements",
+                    pat.span,
+                    None,
+                );
+                return;
+            }
+            let fresh: Vec<Type> = (0..ps.len())
+                .map(|_| ctx.store.fresh_var(ctx.level))
+                .collect();
+            let tup = Type::tuple(fresh.clone());
+            {
+                let mut u = Unifier::new(ctx.store, ctx.sink);
+                u.unify(expected, &tup, pat.span, None);
+            }
+            for (p, t) in ps.iter().zip(fresh.iter()) {
+                infer_pattern(ctx, p, t, expansive);
+            }
+        }
+        PatternKind::List { items, spread } => {
+            let elem = ctx.store.fresh_var(ctx.level);
+            let list_ty = Type::list(elem.clone());
+            {
+                let mut u = Unifier::new(ctx.store, ctx.sink);
+                u.unify(expected, &list_ty, pat.span, None);
+            }
+            for p in items {
+                infer_pattern(ctx, p, &elem, expansive);
+            }
+            if let Some(s) = spread {
+                infer_pattern(ctx, s, &Type::list(elem), expansive);
+            }
+        }
+        PatternKind::Constructor { constructor, args } => {
+            infer_ctor_pattern(
+                ctx,
+                constructor,
+                args.as_deref(),
+                expected,
+                expansive,
+                pat.span,
+            );
+        }
+        PatternKind::StringPrefix { prefix: _, rest } => {
+            let mut u = Unifier::new(ctx.store, ctx.sink);
+            u.unify(expected, &Type::String, pat.span, None);
+            // Rest binds a String.
+            infer_pattern(ctx, rest, &Type::String, expansive);
+        }
+        PatternKind::BitArray(segs) => {
+            let mut u = Unifier::new(ctx.store, ctx.sink);
+            u.unify(expected, &Type::BitArray, pat.span, None);
+            check_bit_array_pattern(ctx, segs, expansive);
+        }
+    }
+}
+
+fn infer_ctor_pattern(
+    ctx: &mut InferCtx<'_>,
+    constructor: &ConstructorRef,
+    args: Option<&[PatternArg]>,
+    expected: &Type,
+    expansive: bool,
+    span: Span,
+) {
+    // Resolve constructor scheme (same path as expressions).
+    let ctor_name = &constructor.name.text;
+    let (scheme, labels, ctor_of) = if let Some(mod_name) = &constructor.module {
+        // Qualified: module.Ctor
+        let Some(path) = ctx.module_path_for_alias(&mod_name.text) else {
+            ctx.sink.error(
+                codes::E1002_UNKNOWN_MODULE,
+                format!("unknown module `{}`", mod_name.text),
+                mod_name.span,
+                None,
+            );
+            return;
+        };
+        let Some(iface) = ctx.deps.get(&path) else {
+            ctx.sink.error(
+                codes::E1002_UNKNOWN_MODULE,
+                format!("unknown module `{path}`"),
+                mod_name.span,
+                None,
+            );
+            return;
+        };
+        let Some(v) = iface.values.get(ctor_name).cloned() else {
+            // Opaque constructors are omitted from the interface value table —
+            // still diagnose E1207 when the name is a known opaque variant.
+            for t in iface.types.values() {
+                if let Some(info) = iface
+                    .type_defs
+                    .get(&t.def)
+                    .or_else(|| ctx.store.defs.get(&t.def))
+                {
+                    if info.kind == TypeDefKind::Opaque
+                        && info.variants.iter().any(|v| v.name == *ctor_name)
+                    {
+                        ctx.sink.error(
+                            codes::E1207_OPAQUE_USE,
+                            format!(
+                                "cannot pattern-match on opaque type `{}` outside its defining module",
+                                info.name
+                            ),
+                            span,
+                            Some(
+                                "opaque constructors are only available in the defining module"
+                                    .into(),
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
+            ctx.sink.error(
+                codes::E1000_UNKNOWN_NAME,
+                format!("unknown constructor `{ctor_name}`"),
+                constructor.name.span,
+                None,
+            );
+            return;
+        };
+        if let Some(def) = v.constructor_of {
+            if let Some(info) = ctx.store.defs.get(&def) {
+                if info.kind == TypeDefKind::Opaque && info.module != ctx.module_path {
+                    ctx.sink.error(
+                        codes::E1207_OPAQUE_USE,
+                        format!(
+                            "cannot pattern-match on opaque type `{}` outside its defining module",
+                            info.name
+                        ),
+                        span,
+                        Some(
+                            "opaque constructors are only available in the defining module".into(),
+                        ),
+                    );
+                    return;
                 }
             }
         }
-        PatternKind::Constructor {
-            constructor,
-            args: Some(args),
-        } => {
-            let z = ctx.store.zonk(ty);
-            if let Type::App { def, args: targs } = z {
-                if let Some(info) = ctx.store.defs.get(&def).cloned() {
-                    if let Some(v) = info
-                        .variants
-                        .iter()
-                        .find(|v| v.name == constructor.name.text)
-                    {
-                        for (i, a) in args.iter().enumerate() {
-                            if a.spread {
-                                continue;
+        (v.scheme.clone(), v.labels.clone(), v.constructor_of)
+    } else if let Some((s, labs, c)) = ctx.lookup_value(ctor_name) {
+        (s, labs, c)
+    } else {
+        // Nullary Bool/Nil sugar: `True` / `False` / `Nil` as patterns
+        match ctor_name.as_str() {
+            "True" | "False" => {
+                let mut u = Unifier::new(ctx.store, ctx.sink);
+                u.unify(expected, &Type::Bool, span, None);
+                if args.is_some_and(|a| !a.is_empty()) {
+                    ctx.sink.error(
+                        codes::E1220_PATTERN_ARITY,
+                        format!("constructor `{ctor_name}` takes 0 argument(s)"),
+                        span,
+                        None,
+                    );
+                }
+                return;
+            }
+            "Nil" => {
+                let mut u = Unifier::new(ctx.store, ctx.sink);
+                u.unify(expected, &Type::Nil, span, None);
+                if args.is_some_and(|a| !a.is_empty()) {
+                    ctx.sink.error(
+                        codes::E1220_PATTERN_ARITY,
+                        "constructor `Nil` takes 0 argument(s)",
+                        span,
+                        None,
+                    );
+                }
+                return;
+            }
+            _ => {
+                ctx.sink.error(
+                    codes::E1000_UNKNOWN_NAME,
+                    format!("unknown constructor `{ctor_name}`"),
+                    constructor.name.span,
+                    crate::resolve::did_you_mean(
+                        ctor_name,
+                        ctx.resolved.values.keys().map(|s| s.as_str()),
+                    ),
+                );
+                return;
+            }
+        }
+    };
+
+    // Opaque check for unqualified constructors from another module.
+    if let Some(def) = ctor_of {
+        if let Some(info) = ctx.store.defs.get(&def) {
+            if info.kind == TypeDefKind::Opaque
+                && info.module != ctx.module_path
+                && !ctx.defining_opaques.contains(&def)
+            {
+                ctx.sink.error(
+                    codes::E1207_OPAQUE_USE,
+                    format!(
+                        "cannot pattern-match on opaque type `{}` outside its defining module",
+                        info.name
+                    ),
+                    span,
+                    Some("opaque constructors are only available in the defining module".into()),
+                );
+                return;
+            }
+        }
+    }
+
+    let inst = unify::instantiate(ctx.store, &scheme, ctx.level);
+    let (field_tys, ret_ty) = match ctx.store.zonk(&inst) {
+        Type::Fun { params, ret } => (
+            params.iter().map(|p| (**p).clone()).collect::<Vec<_>>(),
+            (*ret).clone(),
+        ),
+        other => (vec![], other),
+    };
+    {
+        let mut u = Unifier::new(ctx.store, ctx.sink);
+        u.unify(expected, &ret_ty, span, None);
+    }
+
+    let arg_list = args.unwrap_or(&[]);
+    let n_payload = arg_list.iter().filter(|a| !a.spread).count();
+    if n_payload != field_tys.len() && !arg_list.iter().any(|a| a.spread) {
+        ctx.sink.error(
+            codes::E1220_PATTERN_ARITY,
+            format!(
+                "constructor `{ctor_name}` takes {} argument(s), found {n_payload}",
+                field_tys.len()
+            ),
+            span,
+            None,
+        );
+    }
+    let _ = labels;
+    let mut fi = 0usize;
+    for a in arg_list {
+        if a.spread {
+            continue;
+        }
+        if let Some(p) = &a.pattern {
+            let ft = field_tys.get(fi).cloned().unwrap_or(Type::Error);
+            infer_pattern(ctx, p, &ft, expansive);
+        }
+        fi += 1;
+    }
+}
+
+fn check_bit_array_pattern(ctx: &mut InferCtx<'_>, segs: &[BitSegmentPat], expansive: bool) {
+    for (i, seg) in segs.iter().enumerate() {
+        let mut is_utf8 = false;
+        let mut is_bytes = false;
+        let mut is_bits = false;
+        let mut sized = false;
+        for opt in &seg.options {
+            match opt {
+                BitOption::Named(n) => match n.as_str() {
+                    "utf8" => is_utf8 = true,
+                    "bytes" => is_bytes = true,
+                    "bits" => is_bits = true,
+                    "little" | "big" | "signed" | "unsigned" => {}
+                    other => {
+                        ctx.sink.error(
+                            codes::E1217_BIT_SPEC,
+                            format!("unknown bit-array option `{other}`"),
+                            seg.span,
+                            None,
+                        );
+                    }
+                },
+                BitOption::Size(e) => {
+                    sized = true;
+                    match &e.kind {
+                        ExprKind::Int(_) => {}
+                        ExprKind::Var(n) => {
+                            // Must be previously bound.
+                            if ctx.lookup_value(&n.text).is_none() {
+                                ctx.sink.error(
+                                    codes::E1217_BIT_SPEC,
+                                    format!(
+                                        "bit-array size `{0}` must be a literal or previously bound variable",
+                                        n.text
+                                    ),
+                                    e.span,
+                                    None,
+                                );
                             }
-                            if let Some(p) = &a.pattern {
-                                let ft = v
-                                    .fields
-                                    .get(i)
-                                    .map(|f| subst_params(&f.ty, &info.params, &targs))
-                                    .unwrap_or(Type::Error);
-                                bind_pattern(ctx, p, &ft, expansive);
-                            }
+                        }
+                        _ => {
+                            ctx.sink.error(
+                                codes::E1217_BIT_SPEC,
+                                "bit-array size must be a literal or previously bound variable",
+                                e.span,
+                                None,
+                            );
                         }
                     }
                 }
             }
         }
-        PatternKind::List { items, spread } => {
-            let z = ctx.store.zonk(ty);
-            let elem = match z {
-                Type::List(t) => *t,
-                _ => Type::Error,
-            };
-            for p in items {
-                bind_pattern(ctx, p, &elem, expansive);
-            }
-            if let Some(s) = spread {
-                bind_pattern(ctx, s, &Type::List(Box::new(elem)), expansive);
-            }
+        if (is_bytes || is_bits) && !sized && i + 1 != segs.len() {
+            ctx.sink.error(
+                codes::E1217_BIT_SPEC,
+                "unsized `bytes`/`bits` segments must be the final segment in a pattern",
+                seg.span,
+                None,
+            );
         }
-        _ => {}
+        if is_utf8 {
+            // utf8 only with a literal string pattern
+            if !matches!(seg.pattern.kind, PatternKind::String(_)) {
+                ctx.sink.error(
+                    codes::E1217_BIT_SPEC,
+                    "`utf8` in a bit-array pattern requires a literal string",
+                    seg.span,
+                    None,
+                );
+            }
+            infer_pattern(ctx, &seg.pattern, &Type::String, expansive);
+        } else if is_bytes || is_bits {
+            infer_pattern(ctx, &seg.pattern, &Type::BitArray, expansive);
+        } else {
+            // Default: Int segment (or bind variable as Int)
+            infer_pattern(ctx, &seg.pattern, &Type::Int, expansive);
+        }
     }
 }
 
-#[allow(clippy::only_used_in_recursion)]
-fn subst_params(ty: &Type, params: &[String], args: &[Type]) -> Type {
+fn subst_params_store(store: &TypeStore, ty: &Type, params: &[String], args: &[Type]) -> Type {
     match ty {
         Type::Rigid(id) => {
-            // Can't look up name without store — return as-is; approximate by index if Error
-            let _ = id;
-            Type::Error
+            if let Some(info) = store.rigids.get(id) {
+                if let Some(idx) = params.iter().position(|p| *p == info.name) {
+                    return args.get(idx).cloned().unwrap_or(Type::Error);
+                }
+            }
+            Type::Rigid(*id)
         }
-        Type::List(t) => Type::List(Box::new(subst_params(t, params, args))),
-        Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| subst_params(t, params, args)).collect()),
-        Type::Fun { params: ps, ret } => Type::Fun {
-            params: ps.iter().map(|t| subst_params(t, params, args)).collect(),
-            ret: Box::new(subst_params(ret, params, args)),
-        },
-        Type::App { def, args: as_ } => Type::App {
-            def: *def,
-            args: as_.iter().map(|t| subst_params(t, params, args)).collect(),
-        },
+        Type::List(t) => Type::list(subst_params_store(store, t, params, args)),
+        Type::Tuple(ts) => Type::tuple(
+            ts.iter()
+                .map(|t| subst_params_store(store, t, params, args))
+                .collect(),
+        ),
+        Type::Fun { params: ps, ret } => Type::fun(
+            ps.iter()
+                .map(|t| subst_params_store(store, t, params, args))
+                .collect(),
+            subst_params_store(store, ret, params, args),
+        ),
+        Type::App { def, args: as_ } => Type::app(
+            *def,
+            as_.iter()
+                .map(|t| subst_params_store(store, t, params, args))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
 
 pub fn infer_expr(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
+    (*infer_expr_shared(ctx, expr)).clone()
+}
+
+/// Infer an expression, returning a shared type node when the expression is a
+/// monomorphic local variable (enables DAG sharing for `#(x, x)`).
+fn infer_expr_shared(ctx: &mut InferCtx<'_>, expr: &Expr) -> Rc<Type> {
+    match &expr.kind {
+        ExprKind::Var(n) => {
+            // Mark used / emit errors via the normal path, but reuse the shared node
+            // for monomorphic locals so `#(x, x)` is a true DAG.
+            if let Some(shared) = ctx.lookup_shared(&n.text) {
+                if let Some((scheme, _, _)) = ctx.lookup_value(&n.text) {
+                    if scheme.vars.is_empty() && !ctx.scc.contains(&n.text) {
+                        return shared;
+                    }
+                    return Rc::new(unify::instantiate(ctx.store, &scheme, ctx.level));
+                }
+            }
+            Rc::new(infer_expr_inner(ctx, expr))
+        }
+        ExprKind::Paren(inner) => infer_expr_shared(ctx, inner),
+        _ => Rc::new(infer_expr_inner(ctx, expr)),
+    }
+}
+
+fn infer_expr_inner(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
     match &expr.kind {
         ExprKind::Int(lit) => {
             let base = match lit.base {
@@ -1208,6 +1792,17 @@ pub fn infer_expr(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
                     return scheme.body;
                 }
                 unify::instantiate(ctx.store, &scheme, ctx.level)
+            } else if ctx.binding_names.contains(&n.text) {
+                ctx.sink.error(
+                    codes::E1012_SELF_REF_ANON,
+                    format!(
+                        "anonymous function cannot refer to `{}` being defined",
+                        n.text
+                    ),
+                    n.span,
+                    Some("use a named `fn name(...) {{ ... }}` for recursion".into()),
+                );
+                Type::Error
             } else {
                 ctx.sink.error(
                     codes::E1000_UNKNOWN_NAME,
@@ -1232,7 +1827,9 @@ pub fn infer_expr(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
                 );
                 return Type::Error;
             }
-            Type::Tuple(items.iter().map(|e| infer_expr(ctx, e)).collect())
+            // Share Rc nodes for repeated variable references (let-doubling DAG).
+            let parts: Vec<Rc<Type>> = items.iter().map(|e| infer_expr_shared(ctx, e)).collect();
+            Type::tuple_shared(parts)
         }
         ExprKind::List { items, spread } => {
             let elem = ctx.store.fresh_var(ctx.level);
@@ -1244,9 +1841,9 @@ pub fn infer_expr(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
             if let Some(s) = spread {
                 let st = infer_expr(ctx, s);
                 let mut u = Unifier::new(ctx.store, ctx.sink);
-                u.unify(&st, &Type::List(Box::new(elem.clone())), s.span, None);
+                u.unify(&st, &Type::list(elem.clone()), s.span, None);
             }
-            Type::List(Box::new(elem))
+            Type::list(elem)
         }
         ExprKind::Unary { op, expr: inner } => {
             // Direct neg of int lit
@@ -1340,10 +1937,7 @@ pub fn infer_expr(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
             };
             ctx.pop_scope();
             ctx.level -= 1;
-            Type::Fun {
-                params: pts,
-                ret: Box::new(ret),
-            }
+            Type::fun(pts, ret)
         }
         ExprKind::Block(b) => infer_block(ctx, b, false),
         ExprKind::Paren(e) => infer_expr(ctx, e),
@@ -1387,7 +1981,10 @@ fn infer_constructor(ctx: &mut InferCtx<'_>, c: &ConstructorRef, span: Span) -> 
         ctx.resolved
             .imports_used
             .insert(format!("mod:{}", module.text));
-        // Look up in deps through resolved — values from that module
+        // Prefer the dependency interface so qualified ctors resolve without selective import.
+        if let Some(v) = ctx.deps.get(&path).and_then(|iface| iface.values.get(name)) {
+            return unify::instantiate(ctx.store, &v.scheme, ctx.level);
+        }
         if let Some((_, v)) = ctx
             .resolved
             .values
@@ -1396,7 +1993,6 @@ fn infer_constructor(ctx: &mut InferCtx<'_>, c: &ConstructorRef, span: Span) -> 
         {
             return unify::instantiate(ctx.store, &v.scheme, ctx.level);
         }
-        // Try name directly if selectively imported
         if let Some((scheme, _, _)) = ctx.lookup_value(name) {
             return unify::instantiate(ctx.store, &scheme, ctx.level);
         }
@@ -1622,8 +2218,11 @@ fn check_call_labels_only(
     let mut seen_labels = HashSet::new();
     let mut filled = vec![false; labels.len()];
     let mut positional_idx = 0usize;
+    let mut seen_labelled = false;
+    let mut label_order_error = false;
     for arg in args {
         if let Some(lab) = &arg.label {
+            seen_labelled = true;
             if !seen_labels.insert(lab.text.clone()) {
                 ctx.sink.error(
                     codes::E1212_LABEL_DUP,
@@ -1649,6 +2248,16 @@ fn check_call_labels_only(
                 filled[idx] = true;
             }
         } else if !labels.is_empty() {
+            if seen_labelled {
+                ctx.sink.error(
+                    codes::E1213_LABEL_ON_VALUE,
+                    "positional argument after a labelled argument",
+                    arg.span,
+                    Some("put positional arguments before labelled ones".into()),
+                );
+                label_order_error = true;
+                continue;
+            }
             while positional_idx < filled.len() && filled[positional_idx] {
                 positional_idx += 1;
             }
@@ -1664,6 +2273,9 @@ fn check_call_labels_only(
                 positional_idx += 1;
             }
         }
+    }
+    if label_order_error {
+        return;
     }
     if !labels.is_empty() && filled.iter().any(|f| !f) {
         ctx.sink.error(
@@ -1752,16 +2364,16 @@ fn finish_call_ex(
 ) -> Type {
     let fty = ctx.store.zonk(&fty);
     let (params, ret) = match fty {
-        Type::Fun { params, ret } => (params, *ret),
+        Type::Fun { params, ret } => (
+            params.iter().map(|p| (**p).clone()).collect(),
+            (*ret).clone(),
+        ),
         Type::Var(_) | Type::Rigid(_) => {
             let param_tys: Vec<Type> = (0..args.len())
                 .map(|_| ctx.store.fresh_var(ctx.level))
                 .collect();
             let ret = ctx.store.fresh_var(ctx.level);
-            let expected = Type::Fun {
-                params: param_tys.clone(),
-                ret: Box::new(ret.clone()),
-            };
+            let expected = Type::fun(param_tys.clone(), ret.clone());
             {
                 let mut u = Unifier::new(ctx.store, ctx.sink);
                 u.unify(&fty, &expected, span, None);
@@ -1792,8 +2404,11 @@ fn finish_call_ex(
     let mut arg_tys = vec![None; params.len()];
     let mut positional_idx = 0usize;
     let mut seen_labels = HashSet::new();
+    let mut seen_labelled = false;
+    let mut label_order_error = false;
     for arg in args {
         if let Some(lab) = &arg.label {
+            seen_labelled = true;
             if !seen_labels.insert(lab.text.clone()) {
                 ctx.sink.error(
                     codes::E1212_LABEL_DUP,
@@ -1831,6 +2446,16 @@ fn finish_call_ex(
             };
             arg_tys[idx] = Some(ty);
         } else {
+            if seen_labelled {
+                ctx.sink.error(
+                    codes::E1213_LABEL_ON_VALUE,
+                    "positional argument after a labelled argument",
+                    arg.span,
+                    Some("put positional arguments before labelled ones".into()),
+                );
+                label_order_error = true;
+                continue;
+            }
             while positional_idx < filled.len() && filled[positional_idx] {
                 positional_idx += 1;
             }
@@ -1855,6 +2480,9 @@ fn finish_call_ex(
             arg_tys[positional_idx] = Some(ty);
             positional_idx += 1;
         }
+    }
+    if label_order_error {
+        return Type::Error;
     }
     if filled.iter().any(|f| !f) {
         ctx.sink.error(
@@ -2035,7 +2663,8 @@ fn infer_field(ctx: &mut InferCtx<'_>, base: &Expr, field: &FieldName, span: Spa
                     }
                     Some(f) => {
                         // subst params
-                        let concrete = apply_tdef_args(ctx.store, &f.ty, &info, &args);
+                        let owned: Vec<Type> = args.iter().map(|t| (**t).clone()).collect();
+                        let concrete = apply_tdef_args(ctx.store, &f.ty, &info, &owned);
                         if let Some(prev) = &field_ty {
                             // Must be same — structural compare via unify
                             let mut u = Unifier::new(ctx.store, ctx.sink);
@@ -2075,26 +2704,25 @@ fn apply_tdef_args(store: &mut TypeStore, ty: &Type, info: &TypeDefInfo, args: &
             }
             Type::Rigid(*id)
         }
-        Type::List(t) => Type::List(Box::new(apply_tdef_args(store, t, info, args))),
-        Type::Tuple(ts) => Type::Tuple(
+        Type::List(t) => Type::list(apply_tdef_args(store, t, info, args)),
+        Type::Tuple(ts) => Type::tuple(
             ts.iter()
                 .map(|t| apply_tdef_args(store, t, info, args))
                 .collect(),
         ),
-        Type::Fun { params, ret } => Type::Fun {
-            params: params
+        Type::Fun { params, ret } => Type::fun(
+            params
                 .iter()
                 .map(|t| apply_tdef_args(store, t, info, args))
                 .collect(),
-            ret: Box::new(apply_tdef_args(store, ret, info, args)),
-        },
-        Type::App { def, args: as_ } => Type::App {
-            def: *def,
-            args: as_
-                .iter()
+            apply_tdef_args(store, ret, info, args),
+        ),
+        Type::App { def, args: as_ } => Type::app(
+            *def,
+            as_.iter()
                 .map(|t| apply_tdef_args(store, t, info, args))
                 .collect(),
-        },
+        ),
         other => other.clone(),
     }
 }
@@ -2148,7 +2776,7 @@ fn infer_record_update(
         return Type::Error;
     }
     let ret = match ctx.store.zonk(&ctor_ty) {
-        Type::Fun { ret, .. } => *ret,
+        Type::Fun { ret, .. } => (*ret).clone(),
         other => other,
     };
     {
@@ -2197,7 +2825,7 @@ fn infer_case(ctx: &mut InferCtx<'_>, subjects: &[Expr], clauses: &[Clause], spa
                 );
             }
             for (p, t) in row.patterns.iter().zip(sub_tys.iter()) {
-                bind_pattern(ctx, p, t, true);
+                infer_pattern(ctx, p, t, true);
                 let _ = row_i;
             }
         }
@@ -2295,6 +2923,51 @@ fn check_bit_array(ctx: &mut InferCtx<'_>, segs: &[BitSegment]) {
     }
 }
 
+fn mark_const_refs_used(ctx: &mut InferCtx<'_>, e: &Expr) {
+    match &e.kind {
+        ExprKind::Var(n) => {
+            if ctx.const_env.values.contains_key(&n.text)
+                || ctx.const_env.types.contains_key(&n.text)
+            {
+                ctx.used_values.insert(n.text.clone());
+            }
+        }
+        ExprKind::Tuple(xs) | ExprKind::List { items: xs, .. } => {
+            for x in xs {
+                mark_const_refs_used(ctx, x);
+            }
+            if let ExprKind::List {
+                spread: Some(s), ..
+            } = &e.kind
+            {
+                mark_const_refs_used(ctx, s);
+            }
+        }
+        ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
+            mark_const_refs_used(ctx, left);
+            mark_const_refs_used(ctx, right);
+        }
+        ExprKind::Unary { expr, .. }
+        | ExprKind::Paren(expr)
+        | ExprKind::Echo(expr)
+        | ExprKind::Field { base: expr, .. } => mark_const_refs_used(ctx, expr),
+        ExprKind::Call { callee, args } => {
+            mark_const_refs_used(ctx, callee);
+            for a in args {
+                if let ArgValue::Expr(e) = &a.value {
+                    mark_const_refs_used(ctx, e);
+                }
+            }
+        }
+        ExprKind::BitArray(segs) => {
+            for s in segs {
+                mark_const_refs_used(ctx, &s.value);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn warn_unused(ctx: &mut InferCtx<'_>, module: &Module) {
     for (name, span, suppressed) in ctx.local_bindings.clone() {
         if suppressed || name.starts_with('_') {
@@ -2312,29 +2985,38 @@ fn warn_unused(ctx: &mut InferCtx<'_>, module: &Module) {
     for (key, span) in ctx.resolved.import_keys.clone() {
         let used = if let Some(name) = key.strip_prefix("mod:") {
             ctx.resolved.imports_used.contains(&format!("mod:{name}"))
+                || ctx.used_types.iter().any(|t| {
+                    ctx.resolved
+                        .types
+                        .get(t)
+                        .is_some_and(|ti| ti.from_module.ends_with(name) || ti.from_module == *name)
+                })
                 || ctx.used_values.iter().any(|u| u.starts_with(name))
         } else if let Some(name) = key.strip_prefix("type:") {
             ctx.used_types.contains(name) || ctx.resolved.imports_used.contains(name)
         } else {
-            ctx.used_values.contains(&key) || ctx.resolved.imports_used.contains(&key)
+            ctx.used_values.contains(&key)
+                || ctx.used_types.contains(&key)
+                || ctx.resolved.imports_used.contains(&key)
         };
         if !used {
+            let display = key
+                .strip_prefix("mod:")
+                .or_else(|| key.strip_prefix("type:"))
+                .unwrap_or(key.as_str());
             ctx.sink.warning(
                 codes::W1001_UNUSED_IMPORT,
-                format!("unused import `{key}`"),
+                format!("unused import `{display}`"),
                 span,
                 None,
             );
         }
     }
-    // Unused private fn/const
+    // Unused private fn/const — const-to-const refs count via used_values
     for item in &module.items {
         match item {
             ModuleItem::Fn(f) if !f.public => {
                 if !ctx.used_values.contains(&f.name.text) && f.name.text != "main" {
-                    // Self-reference counts — used_values may include self from body
-                    // Conservative: if never looked up from outside body... we mark during infer
-                    // Skip if referenced in SCC deps
                     ctx.sink.warning(
                         codes::W1003_UNUSED_PRIVATE,
                         format!("unused private function `{}`", f.name.text),
@@ -2356,7 +3038,33 @@ fn warn_unused(ctx: &mut InferCtx<'_>, module: &Module) {
     }
 }
 
-fn build_interface(path: &str, ctx: &InferCtx<'_>) -> ModuleInterface {
+fn collect_free_vars_imm(ty: &Type, out: &mut std::collections::BTreeSet<crate::ty::TvId>) {
+    match ty {
+        Type::Var(id) => {
+            out.insert(*id);
+        }
+        Type::List(t) => collect_free_vars_imm(t, out),
+        Type::Tuple(ts) => {
+            for t in ts {
+                collect_free_vars_imm(t, out);
+            }
+        }
+        Type::Fun { params, ret } => {
+            for p in params {
+                collect_free_vars_imm(p, out);
+            }
+            collect_free_vars_imm(ret, out);
+        }
+        Type::App { args, .. } => {
+            for a in args {
+                collect_free_vars_imm(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn build_interface(path: &str, ctx: &mut InferCtx<'_>) -> ModuleInterface {
     let mut iface = ModuleInterface::empty(path);
     for (name, v) in &ctx.resolved.values {
         if v.from_module != path {
@@ -2367,6 +3075,22 @@ fn build_interface(path: &str, ctx: &InferCtx<'_>) -> ModuleInterface {
         }
         // Ensure no unresolved non-generalised vars escape
         let body = v.scheme.body.clone();
+        let mut free = std::collections::BTreeSet::new();
+        // free_vars needs &mut store — use a local walk
+        collect_free_vars_imm(&body, &mut free);
+        let quantified: std::collections::HashSet<_> = v.scheme.vars.iter().copied().collect();
+        for id in &free {
+            if !quantified.contains(id) {
+                // Check if linked to concrete — skip if we can't tell without store
+                ctx.sink.error(
+                    codes::E1304_ESCAPE,
+                    format!("ungeneralised type variable escapes in public value `{name}`"),
+                    Span::default(),
+                    Some("add a type annotation or avoid expansive bindings in the export".into()),
+                );
+                break;
+            }
+        }
         iface.values.insert(
             name.clone(),
             ExportedValue {
