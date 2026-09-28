@@ -323,10 +323,12 @@ fn mixed_comparison_equality_rejected() {
     let src = "pub fn bad(a, b, c) -> Bool { a < b == c; }\n";
     let outcome = parse_module(src);
     assert!(!outcome.ok());
-    assert!(outcome
+    let e0110 = outcome
         .diagnostics
         .iter()
-        .any(|d| d.code == lush_syntax::codes::E0110_CHAINED_CMP));
+        .filter(|d| d.code == lush_syntax::codes::E0110_CHAINED_CMP)
+        .count();
+    assert_eq!(e0110, 1, "expected exactly one E0110, got {e0110}");
 }
 
 /// How a ` ```lush ` fence from `spec.md` is exercised by the syntax crate.
@@ -334,8 +336,8 @@ fn mixed_comparison_equality_rejected() {
 enum SpecFenceKind {
     /// Complete module; parse unchanged.
     Module,
-    /// Statement/expression fragment; wrap in a function body.
-    WrapFn,
+    /// Mixed module items + statements: relocate module-level lines above a wrapper fn.
+    WrapMixed,
     /// Expression fragment; wrap as a single expression statement.
     WrapExpr,
     /// API pseudocode / signature-only illustrations (§11.4).
@@ -348,19 +350,19 @@ fn spec_fence_inventory() -> &'static [SpecFenceKind] {
     use SpecFenceKind::*;
     &[
         Module,      // 0 types
-        WrapFn,      // 1 bindings (const stays invalid inside fn — see note below)
+        WrapMixed,   // 1 bindings (`const` + `let`s)
         Placeholder, // 2 functions (`...;`)
         WrapExpr,    // 3 pipes
         WrapExpr,    // 4 case
-        WrapFn,      // 5 use
-        Module,      // 6 imports (+ trailing call — not a module item)
+        WrapMixed,   // 5 use
+        WrapMixed,   // 6 imports + trailing call
         Module,      // 7 Msg type
-        WrapFn,      // 8 selector
+        WrapMixed,   // 8 selector
         Pseudocode,  // 9 process API
         Pseudocode,  // 10 actor API
         Module,      // 11 actor example
         Pseudocode,  // 12 supervisor API
-        WrapFn,      // 13 task await
+        WrapMixed,   // 13 task await
         Pseudocode,  // 14 task API
         Module,      // 15 fib
         Module,      // 16 million processes
@@ -382,19 +384,52 @@ fn extract_lush_fences(spec: &str) -> Vec<String> {
     fences
 }
 
-fn wrap_as_fn(body: &str) -> String {
-    // Drop module-level `const` lines when wrapping §5.1; they are covered by example fixtures.
-    let body: String = body
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("const "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("pub fn __spec_snippet() {{\n{body}\n}}\n")
+/// Relocate single-line module items above a wrapper function; keep the rest inside.
+/// Does not drop or rewrite fence tokens (§11.4).
+fn wrap_mixed(body: &str) -> String {
+    let (module, stmts): (Vec<_>, Vec<_>) = body.lines().partition(|l| {
+        let t = l.trim_start();
+        [
+            "import ",
+            "const ",
+            "pub const ",
+            "type ",
+            "pub type ",
+            "pub opaque type ",
+            "opaque type ",
+        ]
+        .iter()
+        .any(|p| t.starts_with(p))
+    });
+    format!(
+        "{}\npub fn __spec_snippet() {{\n{}\n}}\n",
+        module.join("\n"),
+        stmts.join("\n")
+    )
 }
 
 fn wrap_as_expr(expr: &str) -> String {
-    let expr = expr.trim().trim_end_matches(';');
-    format!("pub fn __spec_snippet() {{\n  {expr};\n}}\n")
+    // Preserve fence lines verbatim; only ensure the expression statement ends in `;`.
+    let body = expr.trim_end();
+    let body = if body.ends_with(';') {
+        body.to_string()
+    } else {
+        format!("{body};")
+    };
+    format!("pub fn __spec_snippet() {{\n{body}\n}}\n")
+}
+
+fn assert_fence_lines_preserved(fence: &str, src: &str, fence_index: usize) {
+    for (line_no, line) in fence.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        assert!(
+            src.contains(line),
+            "spec.md lush fence #{fence_index} line {} was dropped by the wrapper:\n  {line:?}\n--- source ---\n{src}",
+            line_no + 1
+        );
+    }
 }
 
 #[test]
@@ -411,23 +446,12 @@ fn spec_md_lush_fences_parse() {
 
     for (i, (fence, kind)) in fences.iter().zip(inventory.iter()).enumerate() {
         let src = match kind {
-            SpecFenceKind::Module => {
-                // Fence 6 appends a call after imports; keep only import lines for module parse.
-                if i == 6 {
-                    fence
-                        .lines()
-                        .filter(|l| l.trim_start().starts_with("import "))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                        + "\n"
-                } else {
-                    fence.clone()
-                }
-            }
-            SpecFenceKind::WrapFn => wrap_as_fn(fence),
+            SpecFenceKind::Module => fence.clone(),
+            SpecFenceKind::WrapMixed => wrap_mixed(fence),
             SpecFenceKind::WrapExpr => wrap_as_expr(fence),
             SpecFenceKind::Pseudocode | SpecFenceKind::Placeholder => continue,
         };
+        assert_fence_lines_preserved(fence, &src, i);
         let outcome = parse_module(&src);
         let errors: Vec<_> = outcome
             .diagnostics

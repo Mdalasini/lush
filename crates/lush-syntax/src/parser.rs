@@ -790,25 +790,18 @@ impl<'a> Parser<'a> {
             let op_span = self.span();
             self.bump();
             let right = self.parse_expression(next_min);
-            if op.is_comparison_or_eq() {
-                if expr_is_bare_comparison_or_eq(&left) || expr_is_bare_comparison_or_eq(&right) {
-                    self.error(
-                        op_span,
-                        codes::E0110_CHAINED_CMP,
-                        "chained comparisons or equality are not allowed",
-                        Some("add parentheses, for example `(a < b) == True`".into()),
-                    );
-                }
-                if let Some((next_op, _, _)) = binop_info(self.kind()) {
-                    if next_op.is_comparison_or_eq() {
-                        self.error(
-                            self.span(),
-                            codes::E0110_CHAINED_CMP,
-                            "chained comparisons or equality are not allowed",
-                            Some("add parentheses, for example `(a < b) == True`".into()),
-                        );
-                    }
-                }
+            // One diagnostic per chaining site: a bare comparison/equality on
+            // either side covers both same-prec (`a < b < c`) and mixed-prec
+            // (`a < b == c`) chains without a second lookahead report.
+            if op.is_comparison_or_eq()
+                && (expr_is_bare_comparison_or_eq(&left) || expr_is_bare_comparison_or_eq(&right))
+            {
+                self.error(
+                    op_span,
+                    codes::E0110_CHAINED_CMP,
+                    "chained comparisons or equality are not allowed",
+                    Some("add parentheses, for example `(a < b) == True`".into()),
+                );
             }
             left = Expr {
                 span: left.span.merge(right.span),
