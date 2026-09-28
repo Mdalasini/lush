@@ -647,17 +647,16 @@ impl Checker {
     }
 
     /// Known imported-module member stubs used by §4.3 / §15.4 regressions.
-    fn module_member_stub(&mut self, field: &str) -> Type {
-        match field {
-            "new_subject" => {
-                let msg = self.fresh();
-                Type::Fn {
-                    params: vec![],
-                    ret: Box::new(Type::subject(msg)),
-                }
-            }
-            _ => self.fresh(),
+    fn module_member_stub(&mut self, module_ty_name: &str, field: &str) -> Type {
+        // Only `lush/process` provides `new_subject`; other modules stay unconstrained.
+        if field == "new_subject" && module_ty_name == "Module_process" {
+            let msg = self.fresh();
+            return Type::Fn {
+                params: vec![],
+                ret: Box::new(Type::subject(msg)),
+            };
         }
+        self.fresh()
     }
 
     fn infer_expr(&mut self, expr: &Expr) -> Type {
@@ -682,7 +681,7 @@ impl Checker {
                 let base_ty = apply(&self.subst, &inferred);
                 if let Type::Named { name, .. } = &base_ty {
                     if name.starts_with("Module_") {
-                        return self.module_member_stub(field);
+                        return self.module_member_stub(name, field);
                     }
                 }
                 let _ = field;
@@ -1339,7 +1338,7 @@ fn is_non_expansive(expr: &Expr, ctors: &HashMap<String, Scheme>, env: &Env) -> 
     }
 }
 
-fn is_constructor_callee(expr: &Expr, ctors: &HashMap<String, Scheme>, env: &Env) -> bool {
+fn is_constructor_callee(expr: &Expr, ctors: &HashMap<String, Scheme>, _env: &Env) -> bool {
     match &expr.kind {
         ExprKind::Constructor(name) => {
             ctors.contains_key(name)
@@ -1347,13 +1346,14 @@ fn is_constructor_callee(expr: &Expr, ctors: &HashMap<String, Scheme>, env: &Env
                     name.as_str(),
                     "Ok" | "Error" | "Some" | "None" | "True" | "False" | "Nil"
                 )
-                || env.get(name).is_some_and(|_| {
-                    // Prelude / local constructors live in the value env.
-                    name.chars().next().is_some_and(|c| c.is_uppercase())
-                })
         }
         ExprKind::Ident(name) => ctors.contains_key(name),
-        ExprKind::Group(inner) => is_constructor_callee(inner, ctors, env),
+        // Qualified ADT construction (`module.Ctor(...)`) is non-expansive.
+        ExprKind::Field {
+            is_constructor: true,
+            ..
+        } => true,
+        ExprKind::Group(inner) => is_constructor_callee(inner, ctors, _env),
         _ => false,
     }
 }
