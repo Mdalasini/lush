@@ -3,7 +3,9 @@
 use lush_syntax::ast::*;
 use lush_syntax::doc::{extract_fences, spec_inventory, FenceClass};
 use lush_syntax::Span;
-use lush_types::{typecheck_module, typecheck_source, TypeError};
+use lush_types::{
+    typecheck_module, typecheck_source, typecheck_source_with_warnings, TypeError, TypeWarning,
+};
 use std::path::PathBuf;
 
 fn spec_path() -> PathBuf {
@@ -487,4 +489,134 @@ pub fn main() {
         )),
         "expected Int range error, got {err:?}"
     );
+}
+
+#[test]
+fn rejects_non_exhaustive_option() {
+    let err = typecheck_source(
+        r#"
+pub fn main(x: Option(Int)) -> Int {
+  case x {
+    Some(n) -> n;
+  };
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("non-exhaustive")
+        )),
+        "expected non-exhaustive error, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_non_exhaustive_adt() {
+    let err = typecheck_source(
+        r#"
+pub type Shape {
+  Circle(Float)
+  Rectangle(Float, Float)
+  Point
+}
+pub fn main(s: Shape) -> Int {
+  case s {
+    Circle(_) -> 1;
+    Point -> 0;
+  };
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("Rectangle")
+        )),
+        "expected missing Rectangle, got {err:?}"
+    );
+}
+
+#[test]
+fn int_case_requires_wildcard() {
+    let err = typecheck_source(
+        r#"
+pub fn main(n: Int) -> Int {
+  case n {
+    0 -> 0;
+    1 -> 1;
+  };
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("non-exhaustive")
+        )),
+        "expected non-exhaustive Int case, got {err:?}"
+    );
+}
+
+#[test]
+fn guarded_arm_does_not_establish_exhaustiveness() {
+    let err = typecheck_source(
+        r#"
+pub fn main(x: Option(Int)) -> Int {
+  case x {
+    Some(n) if n > 0 -> n;
+    None -> 0;
+  };
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("non-exhaustive")
+        )),
+        "guarded Some must not count as covering, got {err:?}"
+    );
+}
+
+#[test]
+fn warns_on_redundant_pattern() {
+    let warns = typecheck_source_with_warnings(
+        r#"
+pub fn main(x: Option(Int)) -> Int {
+  case x {
+    Some(n) -> n;
+    None -> 0;
+    Some(_) -> 1;
+  };
+}
+"#,
+    )
+    .expect("exhaustive with redundant arm should type-check");
+    assert!(
+        warns.iter().any(|w| matches!(
+            w,
+            TypeWarning::RedundantPattern { message, .. } if message.contains("unreachable")
+        )),
+        "expected redundant pattern warning, got {warns:?}"
+    );
+}
+
+#[test]
+fn accepts_exhaustive_bool() {
+    typecheck_source(
+        r#"
+pub fn main(b: Bool) -> Int {
+  case b {
+    True -> 1;
+    False -> 0;
+  };
+}
+"#,
+    )
+    .expect("Bool True/False is exhaustive");
 }

@@ -1,9 +1,8 @@
-//! Early type-checker prototype for Lush (`spec.md` §15.3 step 2 start).
+//! Type checker for Lush (`spec.md` §15.3 step 2).
 //!
-//! Provides enough inference, prelude stubs, and `use` desugaring to type-check
-//! complete documentation modules from §11.4. This is not yet a full
-//! Hindley-Milner implementation of §4.3 (exhaustiveness, sealed `Eq`/`Neg`
-//! constraints, and complete generics remain future work).
+//! Includes case exhaustiveness and redundancy warnings (§5.4). Value
+//! restriction and sealed `Eq`/`Neg` constraints are separate follow-on work
+//! on this branch.
 
 #![deny(missing_docs)]
 
@@ -11,11 +10,12 @@ mod check;
 mod desugar;
 mod env;
 mod error;
+mod exhaust;
 mod ty;
 mod unify;
 
-pub use check::{typecheck_module, typecheck_source};
-pub use error::TypeError;
+pub use check::{typecheck_module, typecheck_source, typecheck_source_with_warnings};
+pub use error::{TypeError, TypeWarning};
 pub use ty::Type;
 
 /// Crate version.
