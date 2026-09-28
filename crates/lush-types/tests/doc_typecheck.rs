@@ -221,6 +221,21 @@ pub fn main() { Nil; }
 }
 
 #[test]
+fn case_pattern_shadows_outer_binding() {
+    typecheck_source(
+        r#"
+pub fn main(x: String) -> Int {
+  case Some(1) {
+    Some(x) -> x;
+    None -> 0;
+  };
+}
+"#,
+    )
+    .expect("pattern x should shadow parameter x");
+}
+
+#[test]
 fn rejects_unknown_constructor_label() {
     let err = typecheck_source(
         r#"

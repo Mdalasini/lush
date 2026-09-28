@@ -644,13 +644,15 @@ impl Checker {
                     let mut common: Option<HashMap<String, Type>> = None;
                     for row in &clause.patterns {
                         self.env = saved.clone();
+                        let mut introduced = Vec::new();
                         for (p, st) in row.patterns.iter().zip(subject_tys.iter()) {
+                            pattern_bound_names(p, &mut introduced);
                             self.bind_pattern(p, st);
                         }
                         let mut bound = HashMap::new();
-                        for (name, scheme) in &self.env.values {
-                            if !saved.values.contains_key(name) {
-                                bound.insert(name.clone(), apply(&self.subst, &scheme.body));
+                        for name in introduced {
+                            if let Some(scheme) = self.env.get(&name) {
+                                bound.insert(name, apply(&self.subst, &scheme.body));
                             }
                         }
                         match &mut common {
@@ -1056,6 +1058,47 @@ fn effective_param_label(p: &Param) -> Option<String> {
     p.label.clone().or_else(|| Some(p.name.clone()))
 }
 
+/// Names introduced by a pattern (including those that shadow outer bindings).
+fn pattern_bound_names(pattern: &Pattern, out: &mut Vec<String>) {
+    match &pattern.kind {
+        PatternKind::Var(name) => out.push(name.clone()),
+        PatternKind::As { pattern, name } => {
+            pattern_bound_names(pattern, out);
+            out.push(name.clone());
+        }
+        PatternKind::Constructor { fields, .. } => {
+            for f in fields {
+                pattern_bound_names(&f.pattern, out);
+            }
+        }
+        PatternKind::Tuple(elems) => {
+            for p in elems {
+                pattern_bound_names(p, out);
+            }
+        }
+        PatternKind::List { items, rest } => {
+            for p in items {
+                pattern_bound_names(p, out);
+            }
+            if let Some(r) = rest {
+                pattern_bound_names(r, out);
+            }
+        }
+        PatternKind::StringPrefix { rest, .. } => pattern_bound_names(rest, out),
+        PatternKind::BitArray(segs) => {
+            for seg in segs {
+                if let BitSegmentValue::Pattern(p) = &seg.value {
+                    pattern_bound_names(p, out);
+                }
+            }
+        }
+        PatternKind::Discard
+        | PatternKind::Int(_)
+        | PatternKind::Float(_)
+        | PatternKind::String(_) => {}
+    }
+}
+
 fn is_irrefutable(pattern: &Pattern) -> bool {
     match &pattern.kind {
         PatternKind::Var(_) | PatternKind::Discard => true,
@@ -1110,9 +1153,9 @@ fn check_const_expr(expr: &Expr) -> Result<(), TypeError> {
         | ExprKind::String(_)
         | ExprKind::Ident(_)
         | ExprKind::Constructor(_) => Ok(()),
-        ExprKind::Group(inner) | ExprKind::Unary { expr: inner, .. } | ExprKind::Echo { value: inner } => {
-            check_const_expr(inner)
-        }
+        ExprKind::Group(inner)
+        | ExprKind::Unary { expr: inner, .. }
+        | ExprKind::Echo { value: inner } => check_const_expr(inner),
         ExprKind::Binary { left, right, .. } => {
             check_const_expr(left)?;
             check_const_expr(right)
