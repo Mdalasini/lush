@@ -815,7 +815,7 @@ lush/
 `logos`, `ariadne`/`miette`, `crossbeam-deque`, `crossbeam-channel`, `parking_lot`, `mio`, `rustls`, `sha2`/`blake3`, `serde`/`toml`, `tower-lsp`, `clap`, `camino`, `gix`, `regex-automata`. Cranelift **[v2]**.
 
 ### 15.3 Build order (each step must have passing tests before the next)
-1. **Syntax:** lexer, parser, AST, pretty-printer/formatter for fns, let, case, ADTs, lists, tuples, pipes. Snapshot tests.
+1. **Syntax:** lexer, parser, AST, pretty-printer/formatter for the full §12 grammar and the lexical forms it references (§3), including every normative syntax example in §§3–5. Parser fixtures for every §12 conformance-table row (rows that need type information, such as opaque record updates, are completed in step 2). Snapshot tests and formatter round-trip tests.
 2. **Types:** HM inference, ADTs, generics, exhaustiveness. Golden error-message tests.
 3. **Compile + VM (single process):** Core IR, bytecode, interpreter, tail calls. Run `fib`, list ops, `case`.
 4. **Heap and GC:** per-process heap, Cheney copying, generational, stress test with tiny heap sizes to shake out GC bugs (`LUSH_GC_STRESS=1` collects on every allocation).
