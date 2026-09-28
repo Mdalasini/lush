@@ -13,14 +13,16 @@ Tag PRs that don't require a second look as `skip review` to stop the automatic 
 This repository is a Rust workspace. The first implemented crate is `lush-syntax` (lexer, parser, AST, formatter).
 
 ```bash
-cargo test
-cargo test -p lush-syntax
-cargo fmt --check
+cargo test --workspace --locked
+cargo test -p lush-syntax --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 Formatter snapshot updates (when intentionally changing output):
 
 ```bash
+cargo install cargo-insta
 cargo insta review
 # or: cargo insta accept
 ```
