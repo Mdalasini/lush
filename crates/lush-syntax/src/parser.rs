@@ -892,29 +892,18 @@ impl<'a> Parser<'a> {
                     }
                     break;
                 }
-                // labelled or positional
-                if self.at(Token::Ident) {
-                    let maybe = self.bump().unwrap();
-                    if self.at(Token::Colon) {
-                        self.bump();
-                        let pattern = self.parse_pattern()?;
-                        fields.push(PatternField {
-                            label: Some(self.text(maybe.span)),
-                            pattern: pattern.clone(),
-                            span: Span::new(maybe.span.start, pattern.span.end),
-                        });
-                    } else {
-                        // variable pattern — we already consumed Ident
-                        let pattern = Pattern {
-                            kind: PatternKind::Var(self.text(maybe.span)),
-                            span: maybe.span,
-                        };
-                        fields.push(PatternField {
-                            label: None,
-                            pattern,
-                            span: maybe.span,
-                        });
-                    }
+                // labelled `name: pattern` or positional pattern (including qualified ctors)
+                if self.at(Token::Ident)
+                    && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(Token::Colon)
+                {
+                    let label_tok = self.bump().unwrap();
+                    self.bump(); // colon
+                    let pattern = self.parse_pattern()?;
+                    fields.push(PatternField {
+                        label: Some(self.text(label_tok.span)),
+                        pattern: pattern.clone(),
+                        span: Span::new(label_tok.span.start, pattern.span.end),
+                    });
                 } else {
                     let pattern = self.parse_pattern()?;
                     fields.push(PatternField {

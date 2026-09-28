@@ -6,6 +6,7 @@
 #![deny(missing_docs)]
 
 pub mod ast;
+pub mod doc;
 pub mod error;
 pub mod formatter;
 pub mod lexer;
