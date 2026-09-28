@@ -793,3 +793,148 @@ pub fn main(u: User) -> Int {
         "different spread field values must both be useful, got {warns:?}"
     );
 }
+
+#[test]
+fn accepts_exhaustive_list_nil_cons() {
+    typecheck_source(
+        r#"
+pub fn main(xs: List(Int)) -> Int {
+  case xs {
+    [] -> 0;
+    [head, ..tail] -> head;
+  };
+}
+"#,
+    )
+    .expect("[] and [head, ..tail] cover every list");
+}
+
+#[test]
+fn accepts_exhaustive_tuple_bool_pairs() {
+    typecheck_source(
+        r#"
+pub fn main(p: #(Bool, Bool)) -> Int {
+  case p {
+    #(True, True) -> 1;
+    #(True, False) -> 2;
+    #(False, True) -> 3;
+    #(False, False) -> 4;
+  };
+}
+"#,
+    )
+    .expect("all Bool pair combinations are exhaustive");
+}
+
+#[test]
+fn accepts_exhaustive_multi_subject_bool() {
+    typecheck_source(
+        r#"
+pub fn main(a: Bool, b: Bool) -> Int {
+  case a, b {
+    True, True -> 1;
+    True, False -> 2;
+    False, True -> 3;
+    False, False -> 4;
+  };
+}
+"#,
+    )
+    .expect("multi-subject Bool matrix is exhaustive");
+}
+
+#[test]
+fn rejects_partial_nested_adt_fields() {
+    let err = typecheck_source(
+        r#"
+pub type Inner {
+  A
+  B
+}
+pub type Outer {
+  O(Inner)
+}
+pub fn main(o: Outer) -> Int {
+  case o {
+    O(A) -> 1;
+  };
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("non-exhaustive")
+        )),
+        "O(A) must not cover O(B), got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_wrong_tuple_arity_as_cover() {
+    let err = typecheck_source(
+        r#"
+pub fn main(p: #(Bool, Bool)) -> Int {
+  case p {
+    #(_, _, _) -> 0;
+  };
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("non-exhaustive")
+        )),
+        "#(_, _, _) must not cover #(Bool, Bool), got {err:?}"
+    );
+}
+
+#[test]
+fn warns_list_fixed_after_rest() {
+    let warns = typecheck_source_with_warnings(
+        r#"
+pub fn main(xs: List(Int)) -> Int {
+  case xs {
+    [head, ..tail] -> 1;
+    [x, y] -> 2;
+    _ -> 0;
+  };
+}
+"#,
+    )
+    .expect("list rest then fixed");
+    assert!(
+        warns
+            .iter()
+            .any(|w| matches!(w, TypeWarning::RedundantPattern { .. })),
+        "expected [x, y] unreachable after [head, ..tail], got {warns:?}"
+    );
+}
+
+#[test]
+fn warns_equivalent_labelled_reorder() {
+    let warns = typecheck_source_with_warnings(
+        r#"
+pub type User {
+  User(first: Bool, last: Bool)
+}
+pub fn main(u: User) -> Int {
+  case u {
+    User(first: True, last: _) -> 1;
+    User(last: _, first: True) -> 2;
+    _ -> 0;
+  };
+}
+"#,
+    )
+    .expect("equivalent labelled reorder");
+    assert!(
+        warns
+            .iter()
+            .any(|w| matches!(w, TypeWarning::RedundantPattern { .. })),
+        "expected equivalent labelled reorder unreachable, got {warns:?}"
+    );
+}

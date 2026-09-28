@@ -60,6 +60,10 @@ struct Checker {
     ctors: HashMap<String, Scheme>,
     /// ADT type name -> variant constructor names (declaration order).
     adt_variants: HashMap<String, Vec<String>>,
+    /// Constructor name -> field types (may reference ADT type parameters).
+    ctor_fields: HashMap<String, Vec<Type>>,
+    /// Type name -> ADT type-parameter variable ids (declaration order).
+    adt_param_vars: HashMap<String, Vec<u32>>,
     /// Type aliases: name -> (params, body).
     aliases: HashMap<String, (Vec<String>, TypeExpr)>,
     /// Scoped annotation type variables (`a`, `b`, …) → unification vars.
@@ -84,6 +88,8 @@ impl Checker {
             warnings: Vec::new(),
             ctors: HashMap::new(),
             adt_variants: HashMap::new(),
+            ctor_fields: HashMap::new(),
+            adt_param_vars: HashMap::new(),
             aliases: HashMap::new(),
             type_vars: HashMap::new(),
             fn_labels: HashMap::new(),
@@ -320,6 +326,16 @@ impl Checker {
             name: t.name.clone(),
             args: param_vars,
         };
+        let param_ids: Vec<u32> = match &ret {
+            Type::Named { args, .. } => args
+                .iter()
+                .filter_map(|a| match a {
+                    Type::Var(v) => Some(*v),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         let mut variant_names = Vec::new();
         for v in variants {
             if self.ctors.contains_key(&v.name) || self.env.get(&v.name).is_some() {
@@ -335,6 +351,7 @@ impl Checker {
                 v.fields.iter().map(|f| f.label.clone()).collect(),
             );
             let param_tys: Vec<Type> = v.fields.iter().map(|f| self.ast_type(&f.ty)).collect();
+            self.ctor_fields.insert(v.name.clone(), param_tys.clone());
             if param_tys.is_empty() {
                 let scheme = Scheme {
                     vars: free_vars(&ret),
@@ -355,6 +372,7 @@ impl Checker {
                 self.env.insert_scheme(v.name.clone(), scheme);
             }
         }
+        self.adt_param_vars.insert(t.name.clone(), param_ids);
         self.adt_variants.insert(t.name.clone(), variant_names);
         self.type_vars = saved_tvars;
     }
@@ -883,8 +901,14 @@ impl Checker {
                 }
                 let applied: Vec<Type> =
                     subject_tys.iter().map(|t| apply(&self.subst, t)).collect();
+                let exhaust_env = exhaust::ExhaustEnv {
+                    adt_variants: self.adt_variants.clone(),
+                    ctor_fields: self.ctor_fields.clone(),
+                    ctor_labels: self.fn_labels.clone(),
+                    adt_param_vars: self.adt_param_vars.clone(),
+                };
                 let (ex_errs, ex_warns) =
-                    exhaust::check_case(&applied, clauses, &self.adt_variants, expr.span);
+                    exhaust::check_case(&applied, clauses, &exhaust_env, expr.span);
                 self.errors.extend(ex_errs);
                 self.warnings.extend(ex_warns);
                 result
@@ -1298,6 +1322,10 @@ fn is_irrefutable(pattern: &Pattern) -> bool {
         PatternKind::Var(_) | PatternKind::Discard => true,
         PatternKind::As { pattern, .. } => is_irrefutable(pattern),
         PatternKind::Tuple(elems) => elems.iter().all(is_irrefutable),
+        // `[..rest]` binds the whole list and is irrefutable.
+        PatternKind::List { items, rest } if items.is_empty() => {
+            rest.as_ref().is_some_and(|r| is_irrefutable(r))
+        }
         _ => false,
     }
 }
