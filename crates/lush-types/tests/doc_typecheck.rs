@@ -604,3 +604,69 @@ pub fn main() {
         "expected Neg failure for String, got {err:?}"
     );
 }
+
+#[test]
+fn rejects_adt_with_function_field_equality() {
+    let err = typecheck_source(
+        r#"
+pub type Bad {
+  Bad(fn(Int) -> Int)
+}
+pub fn main(a: Bad, b: Bad) -> Bool {
+  a == b;
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("Eq constraint")
+        )),
+        "expected Eq failure for ADT storing a function, got {err:?}"
+    );
+}
+
+#[test]
+fn phantom_param_adt_can_be_eq() {
+    typecheck_source(
+        r#"
+pub type Holder(a) {
+  Holder
+}
+pub fn main(a: Holder(fn(Int) -> Int), b: Holder(fn(Int) -> Int)) -> Bool {
+  a == b;
+}
+"#,
+    )
+    .expect("phantom type parameter must not require Eq");
+}
+
+#[test]
+fn eq_error_span_points_at_use_site() {
+    let err = typecheck_source(
+        r#"
+pub fn same(a, b) {
+  a == b;
+}
+pub fn main() {
+  let f = fn(x) { x; };
+  same(f, f);
+}
+"#,
+    )
+    .unwrap_err();
+    let eq_err = err.iter().find(|e| {
+        matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("Eq constraint")
+        )
+    });
+    assert!(eq_err.is_some(), "expected Eq failure, got {err:?}");
+    if let Some(TypeError::Other { span, .. }) = eq_err {
+        assert!(
+            span.start > 0 || span.end > 0,
+            "Eq error span must not be the module start, got {span:?}"
+        );
+    }
+}
