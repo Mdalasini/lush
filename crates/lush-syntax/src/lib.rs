@@ -83,7 +83,7 @@ pub fn format_round_trip(source: &str) -> Result<String, String> {
     let b = parse_module(&formatted);
     let ma = a.module.as_ref().ok_or("original failed to parse")?;
     let mb = b.module.as_ref().ok_or("formatted failed to parse")?;
-    if !ast::ignore_spans::modules_eq(ma, mb) {
+    if !ast::equiv::modules_eq(ma, mb) {
         return Err("formatted output does not reparse to an equivalent AST".into());
     }
     Ok(formatted)

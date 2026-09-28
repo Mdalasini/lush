@@ -431,483 +431,415 @@ impl BinOp {
     }
 }
 
-/// Structural equality ignoring spans (for formatter round-trips).
-pub mod ignore_spans {
+/// Structural equality ignoring spans and parentheses, for formatter round-trips.
+pub mod equiv {
     use super::*;
 
+    /// Structural equality ignoring spans and parentheses, for formatter round-trips.
     pub fn modules_eq(a: &Module, b: &Module) -> bool {
-        a.items.len() == b.items.len() && a.items.iter().zip(&b.items).all(|(x, y)| items_eq(x, y))
+        strip_module(a) == strip_module(b)
     }
 
-    fn items_eq(a: &ModuleItem, b: &ModuleItem) -> bool {
-        match (a, b) {
-            (ModuleItem::Import(a), ModuleItem::Import(b)) => {
-                a.path.segments == b.path.segments
-                    && a.alias.as_ref().map(|n| &n.text) == b.alias.as_ref().map(|n| &n.text)
-                    && match (&a.items, &b.items) {
-                        (None, None) => true,
-                        (Some(x), Some(y)) => {
-                            x.len() == y.len()
-                                && x.iter().zip(y).all(|(i, j)| {
-                                    i.is_type == j.is_type
-                                        && name_or_uname_eq(&i.name, &j.name)
-                                        && match (&i.alias, &j.alias) {
-                                            (None, None) => true,
-                                            (Some(a), Some(b)) => name_or_uname_eq(a, b),
-                                            _ => false,
-                                        }
-                                })
-                        }
-                        _ => false,
-                    }
-            }
-            (ModuleItem::Const(a), ModuleItem::Const(b)) => {
-                a.public == b.public
-                    && a.name.text == b.name.text
-                    && type_opt_eq(&a.ty, &b.ty)
-                    && expr_eq(&a.value, &b.value)
-            }
-            (ModuleItem::Fn(a), ModuleItem::Fn(b)) => fn_eq(a, b),
-            (ModuleItem::Type(a), ModuleItem::Type(b)) => {
-                a.public == b.public
-                    && a.opaque == b.opaque
-                    && a.name.text == b.name.text
-                    && a.tvars
-                        .iter()
-                        .map(|t| &t.text)
-                        .eq(b.tvars.iter().map(|t| &t.text))
-                    && type_body_eq(&a.body, &b.body)
-            }
-            _ => false,
+    fn strip_module(m: &Module) -> Module {
+        Module {
+            items: m.items.iter().map(strip_module_item).collect(),
+            span: Span::default(),
         }
     }
 
-    fn fn_eq(a: &FnDef, b: &FnDef) -> bool {
-        a.public == b.public
-            && a.name.text == b.name.text
-            && params_eq(&a.params, &b.params)
-            && type_opt_eq(&a.return_type, &b.return_type)
-            && block_eq(&a.body, &b.body)
-    }
-
-    fn params_eq(a: &[Param], b: &[Param]) -> bool {
-        a.len() == b.len()
-            && a.iter().zip(b).all(|(x, y)| {
-                x.label.as_ref().map(|n| &n.text) == y.label.as_ref().map(|n| &n.text)
-                    && x.name.text == y.name.text
-                    && type_opt_eq(&x.ty, &y.ty)
-            })
-    }
-
-    fn type_body_eq(a: &TypeDefBody, b: &TypeDefBody) -> bool {
-        match (a, b) {
-            (TypeDefBody::Alias(a), TypeDefBody::Alias(b)) => type_eq(a, b),
-            (TypeDefBody::Adt(a), TypeDefBody::Adt(b)) => {
-                a.len() == b.len()
-                    && a.iter().zip(b).all(|(x, y)| {
-                        x.name.text == y.name.text
-                            && match (&x.fields, &y.fields) {
-                                (None, None) => true,
-                                (Some(xf), Some(yf)) => {
-                                    xf.len() == yf.len()
-                                        && xf.iter().zip(yf).all(|(f1, f2)| {
-                                            f1.label.as_ref().map(|n| &n.text)
-                                                == f2.label.as_ref().map(|n| &n.text)
-                                                && type_eq(&f1.ty, &f2.ty)
-                                        })
-                                }
-                                _ => false,
-                            }
-                    })
-            }
-            _ => false,
+    fn strip_module_item(item: &ModuleItem) -> ModuleItem {
+        match item {
+            ModuleItem::Import(i) => ModuleItem::Import(strip_import(i)),
+            ModuleItem::Const(c) => ModuleItem::Const(strip_const(c)),
+            ModuleItem::Fn(f) => ModuleItem::Fn(strip_fn(f)),
+            ModuleItem::Type(t) => ModuleItem::Type(strip_type_def(t)),
         }
     }
 
-    fn block_eq(a: &Block, b: &Block) -> bool {
-        a.statements.len() == b.statements.len()
-            && a.statements
-                .iter()
-                .zip(&b.statements)
-                .all(|(x, y)| stmt_eq(x, y))
-    }
-
-    fn stmt_eq(a: &Statement, b: &Statement) -> bool {
-        match (a, b) {
-            (Statement::Fn(a), Statement::Fn(b)) => fn_eq(a, b),
-            (Statement::Let(a), Statement::Let(b)) => {
-                a.assert == b.assert
-                    && pattern_eq(&a.pattern, &b.pattern)
-                    && type_opt_eq(&a.ty, &b.ty)
-                    && expr_eq(&a.value, &b.value)
-                    && a.message.as_ref().map(|s| &s.value) == b.message.as_ref().map(|s| &s.value)
-            }
-            (Statement::Use(a), Statement::Use(b)) => {
-                a.patterns.len() == b.patterns.len()
-                    && a.patterns
-                        .iter()
-                        .zip(&b.patterns)
-                        .all(|(x, y)| pattern_eq(x, y))
-                    && expr_eq(&a.value, &b.value)
-            }
-            (Statement::Expr(a), Statement::Expr(b)) => expr_eq(a, b),
-            _ => false,
+    fn strip_import(i: &Import) -> Import {
+        Import {
+            path: ImportPath {
+                segments: i.path.segments.clone(),
+                span: Span::default(),
+            },
+            items: i
+                .items
+                .as_ref()
+                .map(|items| items.iter().map(strip_import_item).collect()),
+            alias: i.alias.as_ref().map(strip_name),
+            span: Span::default(),
         }
     }
 
-    pub fn expr_eq(a: &Expr, b: &Expr) -> bool {
-        // Strip paren wrappers for equivalence.
-        let a = strip_paren(a);
-        let b = strip_paren(b);
-        match (&a.kind, &b.kind) {
-            (ExprKind::Int(x), ExprKind::Int(y)) => x.digits == y.digits && x.base == y.base,
-            (ExprKind::Float(x), ExprKind::Float(y)) => x.raw == y.raw,
-            (ExprKind::String(x), ExprKind::String(y)) => x.value == y.value,
-            (ExprKind::Var(x), ExprKind::Var(y)) => x.text == y.text,
-            (ExprKind::Discard, ExprKind::Discard) => true,
-            (ExprKind::Constructor(x), ExprKind::Constructor(y)) => ctor_eq(x, y),
-            (ExprKind::Tuple(x), ExprKind::Tuple(y)) => {
-                x.len() == y.len() && x.iter().zip(y).all(|(a, b)| expr_eq(a, b))
-            }
-            (
-                ExprKind::List {
-                    items: ai,
-                    spread: as_,
-                },
-                ExprKind::List {
-                    items: bi,
-                    spread: bs,
-                },
-            ) => {
-                ai.len() == bi.len()
-                    && ai.iter().zip(bi).all(|(a, b)| expr_eq(a, b))
-                    && match (as_, bs) {
-                        (None, None) => true,
-                        (Some(a), Some(b)) => expr_eq(a, b),
-                        _ => false,
-                    }
-            }
-            (ExprKind::BitArray(a), ExprKind::BitArray(b)) => {
-                a.len() == b.len()
-                    && a.iter().zip(b).all(|(x, y)| {
-                        expr_eq(&x.value, &y.value) && bit_opts_eq(&x.options, &y.options)
-                    })
-            }
-            (
-                ExprKind::RecordUpdate {
-                    constructor: ac,
-                    base: ab,
-                    fields: af,
-                },
-                ExprKind::RecordUpdate {
-                    constructor: bc,
-                    base: bb,
-                    fields: bf,
-                },
-            ) => {
-                ctor_eq(ac, bc)
-                    && expr_eq(ab, bb)
-                    && af.len() == bf.len()
-                    && af
-                        .iter()
-                        .zip(bf)
-                        .all(|((n1, e1), (n2, e2))| n1.text == n2.text && expr_eq(e1, e2))
-            }
-            (
-                ExprKind::Call {
-                    callee: ac,
-                    args: aa,
-                },
-                ExprKind::Call {
-                    callee: bc,
-                    args: ba,
-                },
-            ) => {
-                expr_eq(ac, bc)
-                    && aa.len() == ba.len()
-                    && aa.iter().zip(ba).all(|(x, y)| {
-                        x.label.as_ref().map(|n| &n.text) == y.label.as_ref().map(|n| &n.text)
-                            && match (&x.value, &y.value) {
-                                (ArgValue::Hole, ArgValue::Hole) => true,
-                                (ArgValue::Expr(a), ArgValue::Expr(b)) => expr_eq(a, b),
-                                _ => false,
-                            }
-                    })
-            }
-            (
-                ExprKind::Field {
-                    base: ab,
-                    field: af,
-                },
-                ExprKind::Field {
-                    base: bb,
-                    field: bf,
-                },
-            ) => expr_eq(ab, bb) && field_name_eq(af, bf),
-            (
-                ExprKind::Binary {
-                    left: al,
-                    op: ao,
-                    right: ar,
-                },
-                ExprKind::Binary {
-                    left: bl,
-                    op: bo,
-                    right: br,
-                },
-            ) => ao == bo && expr_eq(al, bl) && expr_eq(ar, br),
-            (ExprKind::Unary { op: ao, expr: ae }, ExprKind::Unary { op: bo, expr: be }) => {
-                ao == bo && expr_eq(ae, be)
-            }
-            (
-                ExprKind::Pipe {
-                    left: al,
-                    right: ar,
-                },
-                ExprKind::Pipe {
-                    left: bl,
-                    right: br,
-                },
-            ) => expr_eq(al, bl) && expr_eq(ar, br),
-            (
-                ExprKind::Fn {
-                    params: ap,
-                    return_type: ar,
-                    body: ab,
-                },
-                ExprKind::Fn {
-                    params: bp,
-                    return_type: br,
-                    body: bb,
-                },
-            ) => params_eq(ap, bp) && type_opt_eq(ar, br) && block_eq(ab, bb),
-            (
-                ExprKind::Case {
-                    subjects: asub,
-                    clauses: ac,
-                },
-                ExprKind::Case {
-                    subjects: bsub,
-                    clauses: bc,
-                },
-            ) => {
-                asub.len() == bsub.len()
-                    && asub.iter().zip(bsub).all(|(a, b)| expr_eq(a, b))
-                    && ac.len() == bc.len()
-                    && ac.iter().zip(bc).all(|(a, b)| {
-                        a.patterns.len() == b.patterns.len()
-                            && a.patterns.iter().zip(&b.patterns).all(|(r1, r2)| {
-                                r1.patterns.len() == r2.patterns.len()
-                                    && r1
-                                        .patterns
-                                        .iter()
-                                        .zip(&r2.patterns)
-                                        .all(|(p1, p2)| pattern_eq(p1, p2))
-                            })
-                            && match (&a.guard, &b.guard) {
-                                (None, None) => true,
-                                (Some(g1), Some(g2)) => expr_eq(g1, g2),
-                                _ => false,
-                            }
-                            && expr_eq(&a.body, &b.body)
-                    })
-            }
-            (ExprKind::Todo { message: a }, ExprKind::Todo { message: b })
-            | (ExprKind::Panic { message: a }, ExprKind::Panic { message: b }) => {
-                a.as_ref().map(|s| &s.value) == b.as_ref().map(|s| &s.value)
-            }
-            (
-                ExprKind::Assert {
-                    expr: ae,
-                    message: am,
-                },
-                ExprKind::Assert {
-                    expr: be,
-                    message: bm,
-                },
-            ) => expr_eq(ae, be) && am.as_ref().map(|s| &s.value) == bm.as_ref().map(|s| &s.value),
-            (ExprKind::Echo(a), ExprKind::Echo(b)) => expr_eq(a, b),
-            (ExprKind::Block(a), ExprKind::Block(b)) => block_eq(a, b),
-            _ => false,
+    fn strip_import_item(item: &ImportItem) -> ImportItem {
+        ImportItem {
+            is_type: item.is_type,
+            name: strip_name_or_uname(&item.name),
+            alias: item.alias.as_ref().map(strip_name_or_uname),
+            span: Span::default(),
         }
     }
 
-    fn strip_paren(e: &Expr) -> &Expr {
-        match &e.kind {
-            ExprKind::Paren(inner) => strip_paren(inner),
-            _ => e,
+    fn strip_name_or_uname(n: &NameOrUName) -> NameOrUName {
+        match n {
+            NameOrUName::Name(n) => NameOrUName::Name(strip_name(n)),
+            NameOrUName::UName(n) => NameOrUName::UName(strip_uname(n)),
         }
     }
 
-    fn ctor_eq(a: &ConstructorRef, b: &ConstructorRef) -> bool {
-        a.module.as_ref().map(|n| &n.text) == b.module.as_ref().map(|n| &n.text)
-            && a.name.text == b.name.text
-    }
-
-    fn field_name_eq(a: &FieldName, b: &FieldName) -> bool {
-        match (a, b) {
-            (FieldName::Name(a), FieldName::Name(b)) => a.text == b.text,
-            (FieldName::UName(a), FieldName::UName(b)) => a.text == b.text,
-            _ => false,
+    fn strip_name(n: &Name) -> Name {
+        Name {
+            text: n.text.clone(),
+            span: Span::default(),
         }
     }
 
-    fn bit_opts_eq(a: &[BitOption], b: &[BitOption]) -> bool {
-        a.len() == b.len()
-            && a.iter().zip(b).all(|(x, y)| match (x, y) {
-                (BitOption::Named(a), BitOption::Named(b)) => a == b,
-                (BitOption::Size(a), BitOption::Size(b)) => expr_eq(a, b),
-                _ => false,
-            })
-    }
-
-    fn pattern_eq(a: &Pattern, b: &Pattern) -> bool {
-        match (&a.kind, &b.kind) {
-            (PatternKind::Int(x), PatternKind::Int(y)) => x.digits == y.digits && x.base == y.base,
-            (PatternKind::Float(x), PatternKind::Float(y)) => x.raw == y.raw,
-            (PatternKind::String(x), PatternKind::String(y)) => x.value == y.value,
-            (PatternKind::Var(x), PatternKind::Var(y)) => x.text == y.text,
-            (PatternKind::Discard, PatternKind::Discard) => true,
-            (PatternKind::UnderscoreName(x), PatternKind::UnderscoreName(y)) => x.text == y.text,
-            (
-                PatternKind::Constructor {
-                    constructor: ac,
-                    args: aa,
-                },
-                PatternKind::Constructor {
-                    constructor: bc,
-                    args: ba,
-                },
-            ) => {
-                ctor_eq(ac, bc)
-                    && match (aa, ba) {
-                        (None, None) => true,
-                        (Some(a), Some(b)) => {
-                            a.len() == b.len()
-                                && a.iter().zip(b).all(|(x, y)| {
-                                    x.spread == y.spread
-                                        && x.label.as_ref().map(|n| &n.text)
-                                            == y.label.as_ref().map(|n| &n.text)
-                                        && match (&x.pattern, &y.pattern) {
-                                            (None, None) => true,
-                                            (Some(p1), Some(p2)) => pattern_eq(p1, p2),
-                                            _ => false,
-                                        }
-                                })
-                        }
-                        _ => false,
-                    }
-            }
-            (PatternKind::Tuple(a), PatternKind::Tuple(b)) => {
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| pattern_eq(x, y))
-            }
-            (
-                PatternKind::List {
-                    items: ai,
-                    spread: as_,
-                },
-                PatternKind::List {
-                    items: bi,
-                    spread: bs,
-                },
-            ) => {
-                ai.len() == bi.len()
-                    && ai.iter().zip(bi).all(|(x, y)| pattern_eq(x, y))
-                    && match (as_, bs) {
-                        (None, None) => true,
-                        (Some(a), Some(b)) => pattern_eq(a, b),
-                        _ => false,
-                    }
-            }
-            (PatternKind::BitArray(a), PatternKind::BitArray(b)) => {
-                a.len() == b.len()
-                    && a.iter().zip(b).all(|(x, y)| {
-                        pattern_eq(&x.pattern, &y.pattern) && bit_opts_eq(&x.options, &y.options)
-                    })
-            }
-            (
-                PatternKind::StringPrefix {
-                    prefix: ap,
-                    rest: ar,
-                },
-                PatternKind::StringPrefix {
-                    prefix: bp,
-                    rest: br,
-                },
-            ) => ap.value == bp.value && pattern_eq(ar, br),
-            (
-                PatternKind::Alias {
-                    pattern: ap,
-                    name: an,
-                },
-                PatternKind::Alias {
-                    pattern: bp,
-                    name: bn,
-                },
-            ) => pattern_eq(ap, bp) && an.text == bn.text,
-            _ => false,
+    fn strip_uname(n: &UName) -> UName {
+        UName {
+            text: n.text.clone(),
+            span: Span::default(),
         }
     }
 
-    fn type_opt_eq(a: &Option<TypeExpr>, b: &Option<TypeExpr>) -> bool {
-        match (a, b) {
-            (None, None) => true,
-            (Some(a), Some(b)) => type_eq(a, b),
-            _ => false,
+    fn strip_const(c: &ConstDef) -> ConstDef {
+        ConstDef {
+            public: c.public,
+            name: strip_name(&c.name),
+            ty: c.ty.as_ref().map(strip_type),
+            value: strip_expr(&c.value),
+            span: Span::default(),
         }
     }
 
-    fn type_eq(a: &TypeExpr, b: &TypeExpr) -> bool {
-        match (&a.kind, &b.kind) {
-            (TypeKind::Named { name: an, args: aa }, TypeKind::Named { name: bn, args: ba }) => {
-                type_name_eq(an, bn)
-                    && aa.len() == ba.len()
-                    && aa.iter().zip(ba).all(|(x, y)| type_eq(x, y))
-            }
-            (TypeKind::Var(a), TypeKind::Var(b)) => a.text == b.text,
-            (
-                TypeKind::Fn {
-                    params: ap,
-                    ret: ar,
-                },
-                TypeKind::Fn {
-                    params: bp,
-                    ret: br,
-                },
-            ) => {
-                ap.len() == bp.len()
-                    && ap.iter().zip(bp).all(|(x, y)| type_eq(x, y))
-                    && type_eq(ar, br)
-            }
-            (TypeKind::Tuple(a), TypeKind::Tuple(b)) => {
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| type_eq(x, y))
-            }
-            _ => false,
+    fn strip_fn(f: &FnDef) -> FnDef {
+        FnDef {
+            public: f.public,
+            name: strip_name(&f.name),
+            params: f.params.iter().map(strip_param).collect(),
+            return_type: f.return_type.as_ref().map(strip_type),
+            body: strip_block(&f.body),
+            span: Span::default(),
         }
     }
 
-    fn type_name_eq(a: &TypeName, b: &TypeName) -> bool {
-        match (a, b) {
-            (TypeName::Unqualified(a), TypeName::Unqualified(b)) => a.text == b.text,
-            (
-                TypeName::Qualified {
-                    module: am,
-                    name: an,
-                },
-                TypeName::Qualified {
-                    module: bm,
-                    name: bn,
-                },
-            ) => am.text == bm.text && an.text == bn.text,
-            _ => false,
+    fn strip_param(p: &Param) -> Param {
+        Param {
+            label: p.label.as_ref().map(strip_name),
+            name: strip_name(&p.name),
+            ty: p.ty.as_ref().map(strip_type),
+            span: Span::default(),
         }
     }
 
-    fn name_or_uname_eq(a: &NameOrUName, b: &NameOrUName) -> bool {
-        match (a, b) {
-            (NameOrUName::Name(a), NameOrUName::Name(b)) => a.text == b.text,
-            (NameOrUName::UName(a), NameOrUName::UName(b)) => a.text == b.text,
-            _ => false,
+    fn strip_type_def(t: &TypeDef) -> TypeDef {
+        TypeDef {
+            public: t.public,
+            opaque: t.opaque,
+            name: strip_uname(&t.name),
+            tvars: t.tvars.iter().map(strip_name).collect(),
+            body: strip_type_def_body(&t.body),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_type_def_body(body: &TypeDefBody) -> TypeDefBody {
+        match body {
+            TypeDefBody::Adt(variants) => {
+                TypeDefBody::Adt(variants.iter().map(strip_variant).collect())
+            }
+            TypeDefBody::Alias(ty) => TypeDefBody::Alias(strip_type(ty)),
+        }
+    }
+
+    fn strip_variant(v: &Variant) -> Variant {
+        Variant {
+            name: strip_uname(&v.name),
+            fields: v
+                .fields
+                .as_ref()
+                .map(|fields| fields.iter().map(strip_field).collect()),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_field(f: &Field) -> Field {
+        Field {
+            label: f.label.as_ref().map(strip_name),
+            ty: strip_type(&f.ty),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_block(b: &Block) -> Block {
+        Block {
+            statements: b.statements.iter().map(strip_statement).collect(),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_statement(s: &Statement) -> Statement {
+        match s {
+            Statement::Fn(f) => Statement::Fn(strip_fn(f)),
+            Statement::Let(l) => Statement::Let(strip_let(l)),
+            Statement::Use(u) => Statement::Use(strip_use(u)),
+            Statement::Expr(e) => Statement::Expr(strip_expr(e)),
+        }
+    }
+
+    fn strip_let(l: &LetStmt) -> LetStmt {
+        LetStmt {
+            assert: l.assert,
+            pattern: strip_pattern(&l.pattern),
+            ty: l.ty.as_ref().map(strip_type),
+            value: strip_expr(&l.value),
+            message: l.message.clone(),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_use(u: &UseStmt) -> UseStmt {
+        UseStmt {
+            patterns: u.patterns.iter().map(strip_pattern).collect(),
+            value: strip_expr(&u.value),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_expr(e: &Expr) -> Expr {
+        // Unwrap parentheses so they do not affect equivalence.
+        if let ExprKind::Paren(inner) = &e.kind {
+            return strip_expr(inner);
+        }
+        Expr {
+            kind: strip_expr_kind(&e.kind),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_expr_kind(kind: &ExprKind) -> ExprKind {
+        match kind {
+            ExprKind::Int(i) => ExprKind::Int(i.clone()),
+            ExprKind::Float(f) => ExprKind::Float(f.clone()),
+            ExprKind::String(s) => ExprKind::String(s.clone()),
+            ExprKind::Var(n) => ExprKind::Var(strip_name(n)),
+            ExprKind::Constructor(c) => ExprKind::Constructor(strip_ctor(c)),
+            ExprKind::Discard => ExprKind::Discard,
+            ExprKind::Tuple(items) => ExprKind::Tuple(items.iter().map(strip_expr).collect()),
+            ExprKind::List { items, spread } => ExprKind::List {
+                items: items.iter().map(strip_expr).collect(),
+                spread: spread.as_ref().map(|e| Box::new(strip_expr(e))),
+            },
+            ExprKind::BitArray(segs) => {
+                ExprKind::BitArray(segs.iter().map(strip_bit_segment).collect())
+            }
+            ExprKind::RecordUpdate {
+                constructor,
+                base,
+                fields,
+            } => ExprKind::RecordUpdate {
+                constructor: strip_ctor(constructor),
+                base: Box::new(strip_expr(base)),
+                fields: fields
+                    .iter()
+                    .map(|(n, e)| (strip_name(n), strip_expr(e)))
+                    .collect(),
+            },
+            ExprKind::Call { callee, args } => ExprKind::Call {
+                callee: Box::new(strip_expr(callee)),
+                args: args.iter().map(strip_arg).collect(),
+            },
+            ExprKind::Field { base, field } => ExprKind::Field {
+                base: Box::new(strip_expr(base)),
+                field: strip_field_name(field),
+            },
+            ExprKind::Binary { left, op, right } => ExprKind::Binary {
+                left: Box::new(strip_expr(left)),
+                op: *op,
+                right: Box::new(strip_expr(right)),
+            },
+            ExprKind::Unary { op, expr } => ExprKind::Unary {
+                op: *op,
+                expr: Box::new(strip_expr(expr)),
+            },
+            ExprKind::Pipe { left, right } => ExprKind::Pipe {
+                left: Box::new(strip_expr(left)),
+                right: Box::new(strip_expr(right)),
+            },
+            ExprKind::Fn {
+                params,
+                return_type,
+                body,
+            } => ExprKind::Fn {
+                params: params.iter().map(strip_param).collect(),
+                return_type: return_type.as_ref().map(strip_type),
+                body: strip_block(body),
+            },
+            ExprKind::Case { subjects, clauses } => ExprKind::Case {
+                subjects: subjects.iter().map(strip_expr).collect(),
+                clauses: clauses.iter().map(strip_clause).collect(),
+            },
+            ExprKind::Todo { message } => ExprKind::Todo {
+                message: message.clone(),
+            },
+            ExprKind::Panic { message } => ExprKind::Panic {
+                message: message.clone(),
+            },
+            ExprKind::Assert { expr, message } => ExprKind::Assert {
+                expr: Box::new(strip_expr(expr)),
+                message: message.clone(),
+            },
+            ExprKind::Echo(e) => ExprKind::Echo(Box::new(strip_expr(e))),
+            ExprKind::Block(b) => ExprKind::Block(strip_block(b)),
+            // Handled by strip_expr before this match.
+            ExprKind::Paren(inner) => strip_expr(inner).kind,
+        }
+    }
+
+    fn strip_ctor(c: &ConstructorRef) -> ConstructorRef {
+        ConstructorRef {
+            module: c.module.as_ref().map(strip_name),
+            name: strip_uname(&c.name),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_field_name(f: &FieldName) -> FieldName {
+        match f {
+            FieldName::Name(n) => FieldName::Name(strip_name(n)),
+            FieldName::UName(n) => FieldName::UName(strip_uname(n)),
+        }
+    }
+
+    fn strip_arg(a: &Arg) -> Arg {
+        Arg {
+            label: a.label.as_ref().map(strip_name),
+            value: match &a.value {
+                ArgValue::Expr(e) => ArgValue::Expr(strip_expr(e)),
+                ArgValue::Hole => ArgValue::Hole,
+            },
+            span: Span::default(),
+        }
+    }
+
+    fn strip_clause(c: &Clause) -> Clause {
+        Clause {
+            patterns: c.patterns.iter().map(strip_pattern_row).collect(),
+            guard: c.guard.as_ref().map(strip_expr),
+            body: strip_expr(&c.body),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_pattern_row(r: &PatternRow) -> PatternRow {
+        PatternRow {
+            patterns: r.patterns.iter().map(strip_pattern).collect(),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_pattern(p: &Pattern) -> Pattern {
+        Pattern {
+            kind: strip_pattern_kind(&p.kind),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_pattern_kind(kind: &PatternKind) -> PatternKind {
+        match kind {
+            PatternKind::Int(i) => PatternKind::Int(i.clone()),
+            PatternKind::Float(f) => PatternKind::Float(f.clone()),
+            PatternKind::String(s) => PatternKind::String(s.clone()),
+            PatternKind::Var(n) => PatternKind::Var(strip_name(n)),
+            PatternKind::Discard => PatternKind::Discard,
+            PatternKind::UnderscoreName(n) => PatternKind::UnderscoreName(strip_name(n)),
+            PatternKind::Constructor { constructor, args } => PatternKind::Constructor {
+                constructor: strip_ctor(constructor),
+                args: args
+                    .as_ref()
+                    .map(|args| args.iter().map(strip_pattern_arg).collect()),
+            },
+            PatternKind::Tuple(items) => {
+                PatternKind::Tuple(items.iter().map(strip_pattern).collect())
+            }
+            PatternKind::List { items, spread } => PatternKind::List {
+                items: items.iter().map(strip_pattern).collect(),
+                spread: spread.as_ref().map(|p| Box::new(strip_pattern(p))),
+            },
+            PatternKind::BitArray(segs) => {
+                PatternKind::BitArray(segs.iter().map(strip_bit_segment_pat).collect())
+            }
+            PatternKind::StringPrefix { prefix, rest } => PatternKind::StringPrefix {
+                prefix: prefix.clone(),
+                rest: Box::new(strip_pattern(rest)),
+            },
+            PatternKind::Alias { pattern, name } => PatternKind::Alias {
+                pattern: Box::new(strip_pattern(pattern)),
+                name: strip_name(name),
+            },
+        }
+    }
+
+    fn strip_pattern_arg(a: &PatternArg) -> PatternArg {
+        PatternArg {
+            label: a.label.as_ref().map(strip_name),
+            pattern: a.pattern.as_ref().map(strip_pattern),
+            spread: a.spread,
+            span: Span::default(),
+        }
+    }
+
+    fn strip_bit_segment(s: &BitSegment) -> BitSegment {
+        BitSegment {
+            value: strip_expr(&s.value),
+            options: s.options.iter().map(strip_bit_option).collect(),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_bit_segment_pat(s: &BitSegmentPat) -> BitSegmentPat {
+        BitSegmentPat {
+            pattern: strip_pattern(&s.pattern),
+            options: s.options.iter().map(strip_bit_option).collect(),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_bit_option(o: &BitOption) -> BitOption {
+        match o {
+            BitOption::Size(e) => BitOption::Size(strip_expr(e)),
+            BitOption::Named(n) => BitOption::Named(n.clone()),
+        }
+    }
+
+    fn strip_type(t: &TypeExpr) -> TypeExpr {
+        TypeExpr {
+            kind: strip_type_kind(&t.kind),
+            span: Span::default(),
+        }
+    }
+
+    fn strip_type_kind(kind: &TypeKind) -> TypeKind {
+        match kind {
+            TypeKind::Named { name, args } => TypeKind::Named {
+                name: strip_type_name(name),
+                args: args.iter().map(strip_type).collect(),
+            },
+            TypeKind::Var(n) => TypeKind::Var(strip_name(n)),
+            TypeKind::Fn { params, ret } => TypeKind::Fn {
+                params: params.iter().map(strip_type).collect(),
+                ret: Box::new(strip_type(ret)),
+            },
+            TypeKind::Tuple(items) => TypeKind::Tuple(items.iter().map(strip_type).collect()),
+        }
+    }
+
+    fn strip_type_name(n: &TypeName) -> TypeName {
+        match n {
+            TypeName::Unqualified(u) => TypeName::Unqualified(strip_uname(u)),
+            TypeName::Qualified { module, name } => TypeName::Qualified {
+                module: strip_name(module),
+                name: strip_uname(name),
+            },
         }
     }
 }

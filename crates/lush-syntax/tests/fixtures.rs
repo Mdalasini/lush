@@ -1,6 +1,6 @@
 //! Fixture-driven parser, formatter, and diagnostic tests for build step 1.
 
-use lush_syntax::ast::ignore_spans;
+use lush_syntax::ast::equiv;
 use lush_syntax::{format_round_trip, format_source, parse_module};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -204,5 +204,5 @@ fn round_trip_equivalence_helper() {
     let a = parse_module(src).module.unwrap();
     let formatted = format_source(src).unwrap();
     let b = parse_module(&formatted).module.unwrap();
-    assert!(ignore_spans::modules_eq(&a, &b));
+    assert!(equiv::modules_eq(&a, &b));
 }
