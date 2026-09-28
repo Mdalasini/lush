@@ -1,0 +1,8 @@
+---
+source: crates/lush-syntax/tests/fixtures.rs
+expression: rendered
+---
+E0100:44..45: expected `{`, found `;`
+E0120:44..45: expected an expression, found `;`
+E0100:48..49: expected `;`, found integer `1`
+E0100:53..53: expected `}`, found end of file

@@ -2,4 +2,4 @@
 source: crates/lush-syntax/tests/fixtures.rs
 expression: rendered
 ---
-E0132:24..27: tuples need at least two elements
+E0132:41..44: tuples need at least two elements

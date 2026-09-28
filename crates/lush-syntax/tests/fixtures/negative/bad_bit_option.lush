@@ -1,1 +1,2 @@
+// expect: E0134
 pub fn f() { <<x:bogus>>; }

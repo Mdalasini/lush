@@ -3,13 +3,19 @@
 use std::fmt;
 use std::ops::Range;
 
+/// Maximum accepted source size for `u32` byte offsets (just under 4 GiB).
+pub const MAX_SOURCE_LEN: usize = u32::MAX as usize;
+
 /// Byte offset into a UTF-8 source string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct BytePos(pub u32);
 
 impl BytePos {
     pub fn new(offset: usize) -> Self {
-        Self(offset as u32)
+        Self(
+            u32::try_from(offset)
+                .expect("source offset exceeds u32::MAX; reject oversized input in lex()"),
+        )
     }
 
     pub fn as_usize(self) -> usize {

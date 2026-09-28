@@ -1,0 +1,4 @@
+// expect: E0100
+pub fn bad(x: actor/Next(Int)) -> Int {
+  1;
+}

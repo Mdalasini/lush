@@ -2,12 +2,13 @@
 
 use crate::ast::*;
 use crate::codes;
-use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
+use crate::diagnostic::{Diagnostic, DiagnosticKind, DiagnosticSink, Severity};
 use crate::span::Span;
 use crate::token::{SpannedToken, StringLit, TokenKind};
 
-const MAX_ERRORS: usize = 100;
 const MAX_DEPTH: u32 = 256;
+/// Maximum postfix/binary chain length within one expression (protects later recursive walks).
+const MAX_CHAIN: u32 = 4096;
 
 pub struct ParseResult {
     pub module: Option<Module>,
@@ -19,44 +20,25 @@ pub fn parse(tokens: &[SpannedToken]) -> ParseResult {
     let module = parser.parse_module();
     ParseResult {
         module: Some(module),
-        diagnostics: parser.diagnostics,
-    }
-}
-
-/// Parse a single expression (for focused tests).
-pub fn parse_expr(tokens: &[SpannedToken]) -> ParseResult {
-    let mut parser = Parser::new(tokens);
-    let expr = parser.parse_expression(0);
-    let module = Module {
-        items: vec![],
-        span: expr.span,
-    };
-    // Stash the expression by wrapping — callers wanting just expr use parse_expression_only.
-    let _ = module;
-    ParseResult {
-        module: None,
-        diagnostics: parser.diagnostics,
+        diagnostics: parser.diagnostics.into_diagnostics(),
     }
 }
 
 pub fn parse_expression_only(tokens: &[SpannedToken]) -> (Option<Expr>, Vec<Diagnostic>) {
     let mut parser = Parser::new(tokens);
     let expr = parser.parse_expression(0);
-    if parser
-        .diagnostics
-        .iter()
-        .any(|d| d.severity == Severity::Error)
-    {
-        (None, parser.diagnostics)
+    let diagnostics = parser.diagnostics.into_diagnostics();
+    if diagnostics.iter().any(|d| d.severity == Severity::Error) {
+        (None, diagnostics)
     } else {
-        (Some(expr), parser.diagnostics)
+        (Some(expr), diagnostics)
     }
 }
 
 struct Parser<'a> {
     tokens: &'a [SpannedToken],
     pos: usize,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: DiagnosticSink,
     depth: u32,
     stopped: bool,
 }
@@ -66,7 +48,7 @@ impl<'a> Parser<'a> {
         Self {
             tokens,
             pos: 0,
-            diagnostics: Vec::new(),
+            diagnostics: DiagnosticSink::new(),
             depth: 0,
             stopped: false,
         }
@@ -113,37 +95,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn error_count(&self) -> usize {
-        self.diagnostics
-            .iter()
-            .filter(|d| d.severity == Severity::Error)
-            .count()
-    }
-
     fn error(&mut self, span: Span, code: &str, message: impl Into<String>, hint: Option<String>) {
         if self.stopped {
             return;
         }
-        if self.error_count() >= MAX_ERRORS {
-            self.diagnostics.push(Diagnostic {
-                code: codes::E0191_TOO_MANY_ERRORS.into(),
-                message: "too many errors; parsing stopped".into(),
-                span,
-                severity: Severity::Error,
-                hint: None,
-                kind: DiagnosticKind::Parser,
-            });
+        let before_capped = self.diagnostics.is_capped();
+        self.diagnostics
+            .error(code, message, span, hint, DiagnosticKind::Parser);
+        if self.diagnostics.is_capped() && !before_capped {
             self.stopped = true;
-            return;
         }
-        self.diagnostics.push(Diagnostic {
-            code: code.into(),
-            message: message.into(),
-            span,
-            severity: Severity::Error,
-            hint,
-            kind: DiagnosticKind::Parser,
-        });
     }
 
     fn enter_depth(&mut self) -> bool {
@@ -349,13 +310,7 @@ impl<'a> Parser<'a> {
     fn parse_import_path(&mut self) -> ImportPath {
         let start = self.span();
         let mut segments = Vec::new();
-        // First segment may be a domain like `github.com` — lexed as Ident `.` Ident?
-        // Actually `github.com/user/repo` is: Ident Dot Ident Slash?
-        // Per spec: slash-separated. So `github.com` is one segment containing a dot?
-        // "A path is slash-separated module components; dependency imports may begin with a repository domain such as `github.com`"
-        // So segments are slash-separated: `github.com`, `user`, `repo`.
-        // The lexer gives Ident Dot Ident for github.com — we need to join with dots until slash.
-        // But `/` is TokenKind::Slash!
+        // Slash-separated path; a segment may itself contain dots (e.g. `github.com`).
         segments.push(self.parse_path_segment());
         while matches!(self.kind(), TokenKind::Slash) {
             self.bump();
@@ -779,16 +734,23 @@ impl<'a> Parser<'a> {
             return self.dummy_expr();
         }
         let mut left = self.parse_prefix();
+        let mut chain_len = 0u32;
         loop {
             if self.stopped {
                 break;
             }
             // Postfix: call and field access (prec 11/12), left-to-right chain.
             if matches!(self.kind(), TokenKind::LParen) && min_prec <= 11 {
+                if !self.bump_chain(&mut chain_len) {
+                    break;
+                }
                 left = self.parse_call(left);
                 continue;
             }
             if matches!(self.kind(), TokenKind::Dot) && min_prec <= 12 {
+                if !self.bump_chain(&mut chain_len) {
+                    break;
+                }
                 left = self.parse_field_access(left);
                 continue;
             }
@@ -796,6 +758,9 @@ impl<'a> Parser<'a> {
             // Pipe `|>` — precedence 1, left-associative (§5.7).
             if matches!(self.kind(), TokenKind::PipeArrow) {
                 if 1 < min_prec {
+                    break;
+                }
+                if !self.bump_chain(&mut chain_len) {
                     break;
                 }
                 self.bump();
@@ -816,14 +781,26 @@ impl<'a> Parser<'a> {
             if prec < min_prec {
                 break;
             }
+            if !self.bump_chain(&mut chain_len) {
+                break;
+            }
             let next_min = match assoc {
                 Assoc::Left | Assoc::None => prec + 1,
             };
+            let op_span = self.span();
             self.bump();
             let right = self.parse_expression(next_min);
-            if assoc == Assoc::None {
-                if let Some((next_op, next_prec, _)) = binop_info(self.kind()) {
-                    if next_prec == prec && next_op.is_comparison_or_eq() {
+            if op.is_comparison_or_eq() {
+                if expr_is_bare_comparison_or_eq(&left) || expr_is_bare_comparison_or_eq(&right) {
+                    self.error(
+                        op_span,
+                        codes::E0110_CHAINED_CMP,
+                        "chained comparisons or equality are not allowed",
+                        Some("add parentheses, for example `(a < b) == True`".into()),
+                    );
+                }
+                if let Some((next_op, _, _)) = binop_info(self.kind()) {
+                    if next_op.is_comparison_or_eq() {
                         self.error(
                             self.span(),
                             codes::E0110_CHAINED_CMP,
@@ -844,6 +821,20 @@ impl<'a> Parser<'a> {
         }
         self.exit_depth();
         left
+    }
+
+    fn bump_chain(&mut self, chain_len: &mut u32) -> bool {
+        *chain_len += 1;
+        if *chain_len > MAX_CHAIN {
+            self.error(
+                self.span(),
+                codes::E0190_TOO_DEEP,
+                "expression chain is too long",
+                Some(format!("maximum chain length is {MAX_CHAIN}")),
+            );
+            return false;
+        }
+        true
     }
 
     fn parse_prefix(&mut self) -> Expr {
@@ -1181,12 +1172,7 @@ impl<'a> Parser<'a> {
             FieldName::Name(n) => n.span,
             FieldName::UName(n) => n.span,
         };
-        // Rewrite `module.Constructor` when base is a bare Var and field is UName
-        // into a ConstructorRef — but only when not followed by record-update DotDot
-        // immediately... Actually `actor.Next` is a constructor ref; `user.name` is field.
-        // We keep Field form; constructor qualification is: Var + UName field.
-        // For type positions we parse separately. For expressions, Constructor(module, name)
-        // when the field is UName and base is Var — coalesce for cleaner AST.
+        // `module.Constructor` → ConstructorRef; `value.field` stays Field.
         if let (ExprKind::Var(module), FieldName::UName(name)) = (&base.kind, &field) {
             let ctor = ConstructorRef {
                 module: Some(module.clone()),
@@ -1734,10 +1720,6 @@ impl<'a> Parser<'a> {
             TokenKind::LBracket => self.parse_list_pattern(),
             TokenKind::LShift => self.parse_bit_array_pattern(),
             _ => {
-                // Qualified constructor starting with module name:
-                // We need ident . UIdent — handle when Ident followed by Dot UIdent.
-                // Actually the Ident branch already consumed. Let's handle here with recovery,
-                // and fix Ident branch for qualification.
                 let span = self.span();
                 self.error(
                     span,
@@ -2250,4 +2232,13 @@ fn binop_info(kind: &TokenKind) -> Option<(BinOp, u8, Assoc)> {
         TokenKind::PipePipe => (BinOp::Or, 4, Assoc::Left),
         _ => return None,
     })
+}
+
+/// True when `expr` is an unparenthesised comparison or equality (§5.7).
+fn expr_is_bare_comparison_or_eq(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Paren(_) => false,
+        ExprKind::Binary { op, .. } => op.is_comparison_or_eq(),
+        _ => false,
+    }
 }

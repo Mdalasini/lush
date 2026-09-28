@@ -29,6 +29,20 @@ fn read_lush_files(dir: &Path) -> Vec<(String, String)> {
     files
 }
 
+/// Leading `// expect: E0xxx` lines list required diagnostic codes.
+fn expected_codes(src: &str) -> Vec<String> {
+    src.lines()
+        .take_while(|line| line.trim_start().starts_with("//"))
+        .filter_map(|line| {
+            let trimmed = line.trim_start().trim_start_matches("//").trim();
+            trimmed
+                .strip_prefix("expect:")
+                .map(|rest| rest.trim().to_string())
+        })
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
 #[test]
 fn positive_fixtures_parse() {
     let root = fixture_root().join("positive");
@@ -71,11 +85,28 @@ fn example_fixtures_parse() {
 fn negative_fixtures_reject() {
     let root = fixture_root().join("negative");
     for (name, src) in read_lush_files(&root) {
+        let expected = expected_codes(&src);
+        assert!(
+            !expected.is_empty(),
+            "negative fixture `{name}` needs at least one `// expect: CODE` line"
+        );
         let outcome = parse_module(&src);
         assert!(
             !outcome.ok(),
             "negative fixture `{name}` unexpectedly parsed successfully"
         );
+        let codes: Vec<_> = outcome
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == lush_syntax::diagnostic::Severity::Error)
+            .map(|d| d.code.as_str())
+            .collect();
+        for code in &expected {
+            assert!(
+                codes.iter().any(|c| c == code),
+                "negative fixture `{name}` expected error `{code}`, got {codes:?}"
+            );
+        }
     }
 }
 
@@ -237,4 +268,177 @@ fn deep_nesting_does_not_abort() {
         })
         .expect("spawn deep-nesting thread");
     handle.join().expect("deep-nesting thread panicked");
+}
+
+#[test]
+fn junk_input_caps_diagnostics() {
+    // 4 MB of `$` used to emit millions of diagnostics; the shared sink caps at 101.
+    let junk = "$ ".repeat(2_000_000);
+    let outcome = parse_module(&junk);
+    let errors = outcome
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == lush_syntax::diagnostic::Severity::Error)
+        .count();
+    assert!(
+        errors <= lush_syntax::diagnostic::MAX_ERRORS + 1,
+        "expected capped errors, got {errors}"
+    );
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|d| d.code == lush_syntax::codes::E0191_TOO_MANY_ERRORS));
+}
+
+#[test]
+fn long_binary_chain_is_bounded() {
+    let handle = std::thread::Builder::new()
+        .name("long-chain".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let terms = "a + ".repeat(8_000);
+            let src = format!("pub fn f(a) {{ {terms}a; }}\n");
+            let outcome = parse_module(&src);
+            assert!(
+                outcome
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == lush_syntax::codes::E0190_TOO_DEEP),
+                "expected E0190 for long chain, got: {:?}",
+                outcome
+                    .diagnostics
+                    .iter()
+                    .map(|d| &d.code)
+                    .collect::<Vec<_>>()
+            );
+            // Formatting must not stack-overflow either: parse fails first.
+            assert!(format_source(&src).is_err());
+        })
+        .expect("spawn long-chain thread");
+    handle.join().expect("long-chain thread panicked");
+}
+
+#[test]
+fn mixed_comparison_equality_rejected() {
+    let src = "pub fn bad(a, b, c) -> Bool { a < b == c; }\n";
+    let outcome = parse_module(src);
+    assert!(!outcome.ok());
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|d| d.code == lush_syntax::codes::E0110_CHAINED_CMP));
+}
+
+/// How a ` ```lush ` fence from `spec.md` is exercised by the syntax crate.
+#[derive(Clone, Copy)]
+enum SpecFenceKind {
+    /// Complete module; parse unchanged.
+    Module,
+    /// Statement/expression fragment; wrap in a function body.
+    WrapFn,
+    /// Expression fragment; wrap as a single expression statement.
+    WrapExpr,
+    /// API pseudocode / signature-only illustrations (§11.4).
+    Pseudocode,
+    /// Contains illustrative placeholders (`...`) that are not source tokens.
+    Placeholder,
+}
+
+fn spec_fence_inventory() -> &'static [SpecFenceKind] {
+    use SpecFenceKind::*;
+    &[
+        Module,      // 0 types
+        WrapFn,      // 1 bindings (const stays invalid inside fn — see note below)
+        Placeholder, // 2 functions (`...;`)
+        WrapExpr,    // 3 pipes
+        WrapExpr,    // 4 case
+        WrapFn,      // 5 use
+        Module,      // 6 imports (+ trailing call — not a module item)
+        Module,      // 7 Msg type
+        WrapFn,      // 8 selector
+        Pseudocode,  // 9 process API
+        Pseudocode,  // 10 actor API
+        Module,      // 11 actor example
+        Pseudocode,  // 12 supervisor API
+        WrapFn,      // 13 task await
+        Pseudocode,  // 14 task API
+        Module,      // 15 fib
+        Module,      // 16 million processes
+        Module,      // 17 supervised worker
+    ]
+}
+
+fn extract_lush_fences(spec: &str) -> Vec<String> {
+    let mut fences = Vec::new();
+    let mut rest = spec;
+    while let Some(start) = rest.find("```lush\n") {
+        rest = &rest[start + "```lush\n".len()..];
+        let Some(end) = rest.find("```") else {
+            break;
+        };
+        fences.push(rest[..end].to_string());
+        rest = &rest[end + 3..];
+    }
+    fences
+}
+
+fn wrap_as_fn(body: &str) -> String {
+    // Drop module-level `const` lines when wrapping §5.1; they are covered by example fixtures.
+    let body: String = body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("const "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("pub fn __spec_snippet() {{\n{body}\n}}\n")
+}
+
+fn wrap_as_expr(expr: &str) -> String {
+    let expr = expr.trim().trim_end_matches(';');
+    format!("pub fn __spec_snippet() {{\n  {expr};\n}}\n")
+}
+
+#[test]
+fn spec_md_lush_fences_parse() {
+    let spec_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec.md");
+    let spec = fs::read_to_string(&spec_path).expect("read spec.md");
+    let fences = extract_lush_fences(&spec);
+    let inventory = spec_fence_inventory();
+    assert_eq!(
+        fences.len(),
+        inventory.len(),
+        "update spec_fence_inventory when adding ```lush fences to spec.md"
+    );
+
+    for (i, (fence, kind)) in fences.iter().zip(inventory.iter()).enumerate() {
+        let src = match kind {
+            SpecFenceKind::Module => {
+                // Fence 6 appends a call after imports; keep only import lines for module parse.
+                if i == 6 {
+                    fence
+                        .lines()
+                        .filter(|l| l.trim_start().starts_with("import "))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        + "\n"
+                } else {
+                    fence.clone()
+                }
+            }
+            SpecFenceKind::WrapFn => wrap_as_fn(fence),
+            SpecFenceKind::WrapExpr => wrap_as_expr(fence),
+            SpecFenceKind::Pseudocode | SpecFenceKind::Placeholder => continue,
+        };
+        let outcome = parse_module(&src);
+        let errors: Vec<_> = outcome
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == lush_syntax::diagnostic::Severity::Error)
+            .map(|d| d.to_string())
+            .collect();
+        assert!(
+            outcome.ok(),
+            "spec.md lush fence #{i} failed to parse:\n{}\n--- source ---\n{src}",
+            errors.join("\n")
+        );
+    }
 }

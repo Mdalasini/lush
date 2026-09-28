@@ -2,4 +2,4 @@
 source: crates/lush-syntax/tests/fixtures.rs
 expression: rendered
 ---
-E0100:36..37: expected `;`, found identifier `x`
+E0100:53..54: expected `;`, found identifier `x`

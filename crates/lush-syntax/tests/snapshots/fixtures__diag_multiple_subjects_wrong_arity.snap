@@ -2,4 +2,4 @@
 source: crates/lush-syntax/tests/fixtures.rs
 expression: rendered
 ---
-E0140:45..46: case arm has 1 pattern(s) but there are 2 subject(s)
+E0140:62..63: case arm has 1 pattern(s) but there are 2 subject(s)

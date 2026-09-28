@@ -1,1 +1,2 @@
+// expect: E0180
 pub fn f() { let x = _; }

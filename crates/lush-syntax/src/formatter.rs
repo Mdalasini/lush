@@ -636,48 +636,14 @@ impl<'a> Formatter<'a> {
                     FieldName::UName(n) => self.push(&n.text),
                 }
             }
-            ExprKind::Binary { left, op, right } => {
-                let p = prec;
-                let right_prec = if op.is_comparison_or_eq() { p } else { p + 1 };
-                self.fmt_expr(left, p);
-                let op_str = op.as_str();
-                let right_w = approx_expr_width(right);
-                let needed = 1 + op_str.len() + 1 + right_w;
-                if self.col + needed > SOFT_LIMIT && !self.at_line_start {
-                    self.newline();
-                    self.indent += 1;
-                    self.push(op_str);
-                    self.push(" ");
-                    self.fmt_expr(right, right_prec);
-                    self.indent -= 1;
-                } else {
-                    self.push(" ");
-                    self.push(op_str);
-                    self.push(" ");
-                    self.fmt_expr(right, right_prec);
-                }
-            }
+            ExprKind::Binary { .. } => self.fmt_binary_chain(expr, prec),
+            ExprKind::Pipe { .. } => self.fmt_pipe_chain(expr),
             ExprKind::Unary { op, expr } => {
                 match op {
                     UnaryOp::Neg => self.push("-"),
                     UnaryOp::Not => self.push("!"),
                 }
                 self.fmt_expr(expr, 10);
-            }
-            ExprKind::Pipe { left, right } => {
-                self.fmt_expr(left, 1);
-                let right_w = approx_expr_width(right);
-                let needed = 4 + right_w;
-                if self.col + needed > SOFT_LIMIT && !self.at_line_start {
-                    self.newline();
-                    self.indent += 1;
-                    self.push("|> ");
-                    self.fmt_expr(right, 2);
-                    self.indent -= 1;
-                } else {
-                    self.push(" |> ");
-                    self.fmt_expr(right, 2);
-                }
             }
             ExprKind::Fn {
                 params,
@@ -924,6 +890,97 @@ impl<'a> Formatter<'a> {
             }
         }
     }
+
+    /// Format a left-associative binary chain without recursing down the left spine.
+    fn fmt_binary_chain(&mut self, expr: &Expr, prec: u8) {
+        // Collect (op, right) pairs from the left spine while ops share `prec`.
+        // Comparisons/equalities are non-associative and never flatten.
+        let mut parts: Vec<(BinOp, &Expr)> = Vec::new();
+        let mut cur = expr;
+        loop {
+            match &cur.kind {
+                ExprKind::Binary { left, op, right }
+                    if binop_prec(*op) == prec && !op.is_comparison_or_eq() =>
+                {
+                    parts.push((*op, right));
+                    cur = left;
+                }
+                ExprKind::Binary { left, op, right } => {
+                    parts.push((*op, right));
+                    cur = left;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        self.fmt_expr(cur, prec);
+        for (op, right) in parts.into_iter().rev() {
+            let op_str = op.as_str();
+            let right_prec = if op.is_comparison_or_eq() {
+                prec
+            } else {
+                prec + 1
+            };
+            let right_w = approx_expr_width(right);
+            let needed = 1 + op_str.len() + 1 + right_w;
+            if self.col + needed > SOFT_LIMIT && !self.at_line_start {
+                self.newline();
+                self.indent += 1;
+                self.push(op_str);
+                self.push(" ");
+                self.fmt_expr(right, right_prec);
+                self.indent -= 1;
+            } else {
+                self.push(" ");
+                self.push(op_str);
+                self.push(" ");
+                self.fmt_expr(right, right_prec);
+            }
+        }
+    }
+
+    /// Format a pipe chain without recursing down the left spine.
+    fn fmt_pipe_chain(&mut self, expr: &Expr) {
+        let mut rights: Vec<&Expr> = Vec::new();
+        let mut cur = expr;
+        while let ExprKind::Pipe { left, right } = &cur.kind {
+            rights.push(right);
+            cur = left;
+        }
+        self.fmt_expr(cur, 1);
+        for right in rights.into_iter().rev() {
+            let right_w = approx_expr_width(right);
+            let needed = 4 + right_w;
+            if self.col + needed > SOFT_LIMIT && !self.at_line_start {
+                self.newline();
+                self.indent += 1;
+                self.push("|> ");
+                self.fmt_expr(right, 2);
+                self.indent -= 1;
+            } else {
+                self.push(" |> ");
+                self.fmt_expr(right, 2);
+            }
+        }
+    }
+}
+
+fn binop_prec(op: BinOp) -> u8 {
+    match op {
+        BinOp::Or => 4,
+        BinOp::And => 5,
+        BinOp::Eq | BinOp::NotEq => 6,
+        BinOp::Lt
+        | BinOp::LtEq
+        | BinOp::Gt
+        | BinOp::GtEq
+        | BinOp::LtFloat
+        | BinOp::LtEqFloat
+        | BinOp::GtFloat
+        | BinOp::GtEqFloat => 7,
+        BinOp::Add | BinOp::Sub | BinOp::AddFloat | BinOp::SubFloat | BinOp::Concat => 8,
+        BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::MulFloat | BinOp::DivFloat => 9,
+    }
 }
 
 fn expr_prec(expr: &Expr) -> u8 {
@@ -979,10 +1036,32 @@ fn approx_expr_width(expr: &Expr) -> usize {
             }
             w
         }
-        ExprKind::Binary { left, op, right } => {
-            approx_expr_width(left) + 1 + op.as_str().len() + 1 + approx_expr_width(right)
+        ExprKind::Binary { .. } => {
+            let mut w = 0usize;
+            let mut cur = expr;
+            loop {
+                match &cur.kind {
+                    ExprKind::Binary { left, op, right } => {
+                        w += 1 + op.as_str().len() + 1 + approx_expr_width(right);
+                        cur = left;
+                    }
+                    _ => {
+                        w += approx_expr_width(cur);
+                        break;
+                    }
+                }
+            }
+            w
         }
-        ExprKind::Pipe { left, right } => approx_expr_width(left) + 4 + approx_expr_width(right),
+        ExprKind::Pipe { .. } => {
+            let mut w = 0usize;
+            let mut cur = expr;
+            while let ExprKind::Pipe { left, right } = &cur.kind {
+                w += 4 + approx_expr_width(right);
+                cur = left;
+            }
+            w + approx_expr_width(cur)
+        }
         ExprKind::Unary { expr, .. } => 1 + approx_expr_width(expr),
         ExprKind::Field { base, field } => {
             let flen = match field {

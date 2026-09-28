@@ -2,4 +2,4 @@
 source: crates/lush-syntax/tests/fixtures.rs
 expression: rendered
 ---
-E0180:21..22: `_` cannot be used as an expression
+E0180:38..39: `_` cannot be used as an expression

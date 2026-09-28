@@ -1,3 +1,4 @@
+// expect: E0132
 pub fn bad() -> Nil {
   #();
 }

@@ -39,12 +39,22 @@ pub fn parse_module(source: &str) -> ParseOutcome {
     let lexed = lexer::lex(source);
     let mut diagnostics = lexed.diagnostics;
     diagnostics.extend(lexed.casing_warnings);
-    let parsed = parser::parse(&lexed.tokens);
-    diagnostics.extend(parsed.diagnostics);
+    // When the lexer already hit the shared error cap, skip parsing — further
+    // module-level recovery would only add noise on a truncated token stream.
+    let lexer_capped = diagnostics
+        .iter()
+        .any(|d| d.code == codes::E0191_TOO_MANY_ERRORS);
+    let (module, parse_diags) = if lexer_capped {
+        (None, Vec::new())
+    } else {
+        let parsed = parser::parse(&lexed.tokens);
+        (parsed.module, parsed.diagnostics)
+    };
+    diagnostics.extend(parse_diags);
     ParseOutcome {
         source: lexed.source,
         tokens: lexed.tokens,
-        module: parsed.module,
+        module,
         diagnostics,
     }
 }

@@ -1,3 +1,4 @@
+// expect: E0100
 pub fn bad() -> Int {
   let x = 1
   x;

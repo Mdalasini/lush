@@ -2,4 +2,4 @@
 source: crates/lush-syntax/tests/fixtures.rs
 expression: rendered
 ---
-E0130:42..43: list spread must be the final element
+E0130:59..60: list spread must be the final element

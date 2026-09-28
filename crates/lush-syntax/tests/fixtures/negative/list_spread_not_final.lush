@@ -1,3 +1,4 @@
+// expect: E0130
 pub fn bad(xs, x) -> List(Int) {
   [..xs, x];
 }

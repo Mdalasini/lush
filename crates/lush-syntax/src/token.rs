@@ -105,7 +105,6 @@ pub enum TokenKind {
     AmpAmp,   // &&
     PipePipe, // ||
     LtGt,     // <>
-    At,       // unused but reserved for future; not in grammar
     Eof,
 }
 
@@ -223,7 +222,6 @@ impl TokenKind {
             TokenKind::AmpAmp => "&&",
             TokenKind::PipePipe => "||",
             TokenKind::LtGt => "<>",
-            TokenKind::At => "@",
             TokenKind::Eof => "<eof>",
             TokenKind::Ident(_)
             | TokenKind::UIdent(_)
@@ -240,7 +238,7 @@ impl TokenKind {
             TokenKind::UIdent(s) => format!("type name `{s}`"),
             TokenKind::Int(i) => format!("integer `{}`", i.raw),
             TokenKind::Float(f) => format!("float `{}`", f.raw),
-            TokenKind::String(s) => format!("string `{}`", s.raw.escape_default()),
+            TokenKind::String(s) => format!("string `{}`", s.raw.escape_debug()),
             TokenKind::Eof => "end of file".into(),
             other => format!("`{}`", other.as_str()),
         }

@@ -6,19 +6,46 @@
 use std::borrow::Cow;
 
 use crate::codes;
-use crate::diagnostic::{escape_for_message, Diagnostic, DiagnosticKind, Severity};
-use crate::span::Span;
+use crate::diagnostic::{escape_for_message, Diagnostic, DiagnosticKind, DiagnosticSink, Severity};
+use crate::span::{Span, MAX_SOURCE_LEN};
 use crate::token::{
     FloatLit, IntBase, IntLit, SpannedToken, StringLit, TokenKind, Trivia, TriviaKind,
 };
 
 /// Lex `source` into a token stream with trailing EOF.
 pub fn lex(source: &str) -> LexResult {
+    if source.len() > MAX_SOURCE_LEN {
+        let mut sink = DiagnosticSink::new();
+        sink.error(
+            codes::E0001_UNEXPECTED_CHAR,
+            format!(
+                "source file is too large ({} bytes; maximum is {MAX_SOURCE_LEN})",
+                source.len()
+            ),
+            Span::empty(0),
+            Some("split the file or raise the implementation limit".into()),
+            DiagnosticKind::Lexer,
+        );
+        return LexResult {
+            source: String::new(),
+            tokens: vec![SpannedToken {
+                kind: TokenKind::Eof,
+                span: Span::empty(0),
+                leading: vec![],
+            }],
+            diagnostics: sink.into_diagnostics(),
+            casing_warnings: vec![],
+        };
+    }
     let normalised = normalise_newlines(source);
     let (tokens, diagnostics, casing_warnings) = {
         let mut lexer = Lexer::new(&normalised);
         let tokens = lexer.lex_all();
-        (tokens, lexer.diagnostics, lexer.casing_warnings)
+        (
+            tokens,
+            lexer.diagnostics.into_diagnostics(),
+            lexer.casing_warnings,
+        )
     };
     LexResult {
         source: normalised.into_owned(),
@@ -66,7 +93,7 @@ struct Lexer<'a> {
     src: &'a str,
     bytes: &'a [u8],
     pos: usize,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: DiagnosticSink,
     casing_warnings: Vec<Diagnostic>,
 }
 
@@ -76,7 +103,7 @@ impl<'a> Lexer<'a> {
             src,
             bytes: src.as_bytes(),
             pos: 0,
-            diagnostics: Vec::new(),
+            diagnostics: DiagnosticSink::new(),
             casing_warnings: Vec::new(),
         }
     }
@@ -84,6 +111,14 @@ impl<'a> Lexer<'a> {
     fn lex_all(&mut self) -> Vec<SpannedToken> {
         let mut tokens = Vec::new();
         loop {
+            if self.diagnostics.is_capped() {
+                tokens.push(SpannedToken {
+                    kind: TokenKind::Eof,
+                    span: Span::empty(self.pos),
+                    leading: vec![],
+                });
+                break;
+            }
             let leading = self.consume_trivia();
             if self.pos >= self.bytes.len() {
                 tokens.push(SpannedToken {
@@ -674,14 +709,13 @@ impl<'a> Lexer<'a> {
         message: impl Into<String>,
         hint: Option<&str>,
     ) {
-        self.diagnostics.push(Diagnostic {
-            code: code.into(),
-            message: message.into(),
+        self.diagnostics.error(
+            code,
+            message,
             span,
-            severity: Severity::Error,
-            hint: hint.map(str::to_string),
-            kind: DiagnosticKind::Lexer,
-        });
+            hint.map(str::to_string),
+            DiagnosticKind::Lexer,
+        );
     }
 
     fn warn_casing_lower(&mut self, text: &str, start: usize) {

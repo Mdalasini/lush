@@ -2,4 +2,5 @@
 source: crates/lush-syntax/tests/fixtures.rs
 expression: rendered
 ---
-E0110:38..39: chained comparisons or equality are not allowed
+E0110:55..56: chained comparisons or equality are not allowed
+E0110:55..56: chained comparisons or equality are not allowed

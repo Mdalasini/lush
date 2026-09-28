@@ -2,4 +2,4 @@
 source: crates/lush-syntax/tests/fixtures.rs
 expression: rendered
 ---
-E0181:13..20: a call may contain at most one capture hole `_`
+E0181:30..37: a call may contain at most one capture hole `_`

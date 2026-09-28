@@ -1,3 +1,4 @@
+// expect: E0140
 pub fn bad(a, b) -> Bool {
   case a, b {
     1 -> True;

@@ -2,10 +2,10 @@
 source: crates/lush-syntax/tests/fixtures.rs
 expression: rendered
 ---
-E0100:49..50: expected `;`, found `,`
-E0150:49..50: expected a pattern, found `,`
-E0100:55..56: expected `->`, found `_`
-E0180:55..56: `_` cannot be used as an expression
-E0100:57..59: expected `;`, found `->`
-E0150:57..59: expected a pattern, found `->`
-E0100:60..61: expected `->`, found integer `1`
+E0100:66..67: expected `;`, found `,`
+E0150:66..67: expected a pattern, found `,`
+E0100:72..73: expected `->`, found `_`
+E0180:72..73: `_` cannot be used as an expression
+E0100:74..76: expected `;`, found `->`
+E0150:74..76: expected a pattern, found `->`
+E0100:77..78: expected `->`, found integer `1`

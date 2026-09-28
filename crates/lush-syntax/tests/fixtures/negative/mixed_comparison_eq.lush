@@ -1,4 +1,4 @@
 // expect: E0110
 pub fn bad(a, b, c) -> Bool {
-  a < b < c;
+  a < b == c;
 }
