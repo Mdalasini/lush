@@ -409,6 +409,25 @@ pub fn main() { Nil; }
 }
 
 #[test]
+fn rejects_const_division_by_zero_constant() {
+    let err = typecheck_source(
+        r#"
+const zero = 0;
+const bad = 1 / zero;
+pub fn main() { Nil; }
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|e| matches!(
+            e,
+            TypeError::Other { message, .. } if message.contains("division")
+        )),
+        "expected cross-constant division error, got {err:?}"
+    );
+}
+
+#[test]
 fn rejects_cyclic_constants() {
     let err = typecheck_source(
         r#"

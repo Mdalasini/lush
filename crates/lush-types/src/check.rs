@@ -56,6 +56,8 @@ struct Checker {
     alias_stack: Vec<String>,
     /// Names of module-level constants (for constant-expression validation).
     const_names: HashSet<String>,
+    /// Folded values of module-level constants (dependency order).
+    const_vals: HashMap<String, ConstVal>,
 }
 
 impl Checker {
@@ -71,6 +73,7 @@ impl Checker {
             fn_labels: HashMap::new(),
             alias_stack: Vec::new(),
             const_names: HashSet::new(),
+            const_vals: HashMap::new(),
         }
     }
 
@@ -149,7 +152,7 @@ impl Checker {
             }
         }
 
-        self.check_const_cycles(module);
+        self.check_const_cycles_and_fold(module);
 
         // Check each function against the shared placeholders (mutual recursion),
         // then generalize it before later definitions see it. Remaining unchecked
@@ -167,40 +170,89 @@ impl Checker {
         let _ = fn_names;
     }
 
-    /// Reject constant-reference cycles (`spec.md` §5.7).
-    fn check_const_cycles(&mut self, module: &Module) {
-        let mut const_names = HashSet::new();
-        let mut defs: Vec<(&str, Span, &Expr)> = Vec::new();
+    /// Reject constant-reference cycles and fold constants in dependency order (§5.7).
+    fn check_const_cycles_and_fold(&mut self, module: &Module) {
+        let mut defs: Vec<(String, Span, &Expr)> = Vec::new();
         for def in &module.definitions {
             if let Definition::Const(c) = def {
-                const_names.insert(c.name.clone());
-                defs.push((c.name.as_str(), c.span, &c.value));
+                defs.push((c.name.clone(), c.span, &c.value));
             }
         }
-        if const_names.is_empty() {
+        if defs.is_empty() {
             return;
         }
         let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
         for (name, _, value) in &defs {
             let mut refs = HashSet::new();
-            collect_const_refs(value, &const_names, &mut refs);
-            deps.insert((*name).to_string(), refs);
+            collect_const_refs(value, &self.const_names, &mut refs);
+            deps.insert(name.clone(), refs);
         }
         // 0 = unvisited, 1 = visiting, 2 = done
         let mut state: HashMap<String, u8> = HashMap::new();
         let mut stack = Vec::new();
         let mut cyclic = HashSet::new();
         for (name, _, _) in &defs {
-            if state.get(*name).copied().unwrap_or(0) == 0 {
+            if state.get(name).copied().unwrap_or(0) == 0 {
                 self.dfs_const_cycle(name, &deps, &mut state, &mut stack, &mut cyclic);
             }
         }
-        for (name, span, _) in defs {
+        for (name, span, _) in &defs {
             if cyclic.contains(name) {
                 self.errors.push(TypeError::Other {
-                    span,
+                    span: *span,
                     message: format!("constant `{name}` participates in a reference cycle"),
                 });
+            }
+        }
+
+        // Topological fold of non-cyclic constants so cross-constant arithmetic
+        // (e.g. `1 / zero`) reports evaluation failures.
+        let mut indegree: HashMap<String, usize> = HashMap::new();
+        let mut rev: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, _, _) in &defs {
+            if cyclic.contains(name) {
+                continue;
+            }
+            let deg = deps
+                .get(name)
+                .map(|refs| refs.iter().filter(|r| !cyclic.contains(*r)).count())
+                .unwrap_or(0);
+            indegree.insert(name.clone(), deg);
+            if let Some(refs) = deps.get(name) {
+                for r in refs {
+                    if !cyclic.contains(r) {
+                        rev.entry(r.clone()).or_default().push(name.clone());
+                    }
+                }
+            }
+        }
+        let mut queue: Vec<String> = indegree
+            .iter()
+            .filter(|(_, d)| **d == 0)
+            .map(|(n, _)| n.clone())
+            .collect();
+        let values: HashMap<String, &Expr> = defs
+            .iter()
+            .map(|(n, _, v)| (n.clone(), *v))
+            .collect();
+        while let Some(name) = queue.pop() {
+            if let Some(value) = values.get(&name) {
+                match eval_const_expr(value, &self.const_names, &self.const_vals) {
+                    Ok(v) => {
+                        self.const_vals.insert(name.clone(), v);
+                    }
+                    Err(e) => self.errors.push(e),
+                }
+            }
+            if let Some(dependents) = rev.get(&name) {
+                for dep in dependents {
+                    if let Some(d) = indegree.get_mut(dep) {
+                        *d = d.saturating_sub(1);
+                        if *d == 0 {
+                            queue.push(dep.clone());
+                        }
+                    }
+                }
             }
         }
     }
@@ -305,8 +357,13 @@ impl Checker {
     }
 
     fn check_const(&mut self, c: &ConstDef) {
-        if let Err(e) = check_const_expr(&c.value, &self.const_names) {
-            self.errors.push(e);
+        // Shape/evaluation already handled in `check_const_cycles_and_fold` for
+        // dependency-ordered folding; re-check here so consts skipped by the
+        // topo pass (e.g. after a dependency failure) still report errors.
+        if !self.const_vals.contains_key(&c.name) {
+            if let Err(e) = check_const_expr(&c.value, &self.const_names, &self.const_vals) {
+                self.errors.push(e);
+            }
         }
         let inferred = self.infer_expr(&c.value);
         let expected = self
@@ -1311,11 +1368,19 @@ enum ConstVal {
 /// Constant-expression check (`spec.md` §5.7 / constants).
 /// Validates shape and evaluates foldable arithmetic so division-by-zero and
 /// overflow are compile errors.
-fn check_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<(), TypeError> {
-    eval_const_expr(expr, const_names).map(|_| ())
+fn check_const_expr(
+    expr: &Expr,
+    const_names: &HashSet<String>,
+    const_env: &HashMap<String, ConstVal>,
+) -> Result<(), TypeError> {
+    eval_const_expr(expr, const_names, const_env).map(|_| ())
 }
 
-fn eval_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<ConstVal, TypeError> {
+fn eval_const_expr(
+    expr: &Expr,
+    const_names: &HashSet<String>,
+    const_env: &HashMap<String, ConstVal>,
+) -> Result<ConstVal, TypeError> {
     match &expr.kind {
         ExprKind::Int(lit) => {
             validate_int_literal(lit, expr.span)?;
@@ -1330,7 +1395,9 @@ fn eval_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<ConstVa
         }
         ExprKind::String(s) => Ok(ConstVal::String(s.clone())),
         ExprKind::Ident(name) => {
-            if const_names.contains(name) {
+            if let Some(v) = const_env.get(name) {
+                Ok(v.clone())
+            } else if const_names.contains(name) {
                 Ok(ConstVal::Opaque)
             } else {
                 Err(TypeError::Other {
@@ -1340,7 +1407,7 @@ fn eval_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<ConstVa
             }
         }
         ExprKind::Constructor(_) => Ok(ConstVal::Opaque),
-        ExprKind::Group(inner) => eval_const_expr(inner, const_names),
+        ExprKind::Group(inner) => eval_const_expr(inner, const_names, const_env),
         ExprKind::Echo { .. } => Err(TypeError::Other {
             span: expr.span,
             message: "echo is not allowed in a constant".into(),
@@ -1355,7 +1422,7 @@ fn eval_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<ConstVa
                         return Ok(ConstVal::Int(i64::MIN));
                     }
                 }
-                match eval_const_expr(inner, const_names)? {
+                match eval_const_expr(inner, const_names, const_env)? {
                     ConstVal::Int(i) => i.checked_neg().map(ConstVal::Int).ok_or_else(|| {
                         TypeError::Other {
                             span: expr.span,
@@ -1380,7 +1447,7 @@ fn eval_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<ConstVa
                     }),
                 }
             }
-            UnaryOp::Not => match eval_const_expr(inner, const_names)? {
+            UnaryOp::Not => match eval_const_expr(inner, const_names, const_env)? {
                 ConstVal::Bool(b) => Ok(ConstVal::Bool(!b)),
                 ConstVal::Opaque => Ok(ConstVal::Opaque),
                 _ => Err(TypeError::Other {
@@ -1390,22 +1457,22 @@ fn eval_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<ConstVa
             },
         },
         ExprKind::Binary { left, op, right } => {
-            let l = eval_const_expr(left, const_names)?;
-            let r = eval_const_expr(right, const_names)?;
+            let l = eval_const_expr(left, const_names, const_env)?;
+            let r = eval_const_expr(right, const_names, const_env)?;
             eval_const_binop(*op, l, r, expr.span)
         }
         ExprKind::Tuple(elems) => {
             for e in elems {
-                eval_const_expr(e, const_names)?;
+                eval_const_expr(e, const_names, const_env)?;
             }
             Ok(ConstVal::Opaque)
         }
         ExprKind::List { items, spread } => {
             for e in items {
-                eval_const_expr(e, const_names)?;
+                eval_const_expr(e, const_names, const_env)?;
             }
             if let Some(s) = spread {
-                eval_const_expr(s, const_names)?;
+                eval_const_expr(s, const_names, const_env)?;
             }
             Ok(ConstVal::Opaque)
         }
@@ -1419,7 +1486,7 @@ fn eval_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<ConstVa
             }
             for a in args {
                 if let ArgValue::Expr(e) = &a.value {
-                    eval_const_expr(e, const_names)?;
+                    eval_const_expr(e, const_names, const_env)?;
                 }
             }
             Ok(ConstVal::Opaque)
