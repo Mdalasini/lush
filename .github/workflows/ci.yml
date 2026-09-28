@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   tests:
-    name: tests
+    name: CI / tests
     runs-on: ubuntu-latest
     steps:
       - name: Explain placeholder status
