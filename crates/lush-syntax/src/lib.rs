@@ -5,6 +5,14 @@
 
 #![deny(missing_docs)]
 
+pub mod error;
+pub mod lexer;
+pub mod span;
+
+pub use error::SyntaxError;
+pub use lexer::{lex, lex_normalized, lex_significant, Token, TokenSpan};
+pub use span::Span;
+
 /// Crate version used by tooling and diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
