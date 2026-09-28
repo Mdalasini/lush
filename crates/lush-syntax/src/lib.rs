@@ -7,11 +7,13 @@
 
 pub mod ast;
 pub mod error;
+pub mod formatter;
 pub mod lexer;
 pub mod parser;
 pub mod span;
 
 pub use error::SyntaxError;
+pub use formatter::format_source;
 pub use lexer::{lex, lex_normalized, lex_significant, Token, TokenSpan};
 pub use parser::parse_module;
 pub use span::Span;

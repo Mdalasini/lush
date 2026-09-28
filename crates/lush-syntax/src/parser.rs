@@ -800,12 +800,12 @@ impl<'a> Parser<'a> {
                 if !self.at(Token::RBracket) {
                     if self.at(Token::DotDot) {
                         self.bump();
-                        rest = Some(Box::new(self.parse_pattern()?));
+                        rest = Some(Box::new(self.parse_optional_rest_pattern()?));
                     } else {
                         loop {
                             if self.at(Token::DotDot) {
                                 self.bump();
-                                rest = Some(Box::new(self.parse_pattern()?));
+                                rest = Some(Box::new(self.parse_optional_rest_pattern()?));
                                 if self.at(Token::Comma) {
                                     self.bump();
                                 }
@@ -842,6 +842,21 @@ impl<'a> Parser<'a> {
                 Err(())
             }
         }
+    }
+
+    /// Rest after `..` in a list pattern; bare `..` means discard.
+    fn parse_optional_rest_pattern(&mut self) -> Result<Pattern, ()> {
+        if self.at(Token::RBracket) || self.at(Token::Comma) {
+            let span = self
+                .peek()
+                .map(|t| Span::point(t.span.start))
+                .unwrap_or(Span::point(self.source.len()));
+            return Ok(Pattern {
+                kind: PatternKind::Discard,
+                span,
+            });
+        }
+        self.parse_pattern()
     }
 
     fn parse_constructor_pattern(&mut self, module: Option<String>) -> Result<Pattern, ()> {
