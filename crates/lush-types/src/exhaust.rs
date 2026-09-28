@@ -198,13 +198,17 @@ impl<'a> ExhaustChecker<'a> {
                 self.useful(&m, &row[1..].to_vec(), &tys[1..])
             }
             Head::Wildcard => {
-                // A top-level wildcard in the matrix already covers every constructor
-                // of this column (including recursive List tails). Specialising would
-                // re-introduce wildcards on the same type and loop forever.
-                let matrix_has_wild = matrix
+                // Only when *every* matrix row is a wildcard in this column can we
+                // skip constructor specialisation. A single `_` among constructors
+                // (e.g. `_, False` next to `True, True`) does *not* cover the other
+                // constructors — short-circuiting there made multi-subject matches
+                // look non-exhaustive. When the whole column is wildcards, though,
+                // specialising a recursive `List` would re-introduce the same
+                // column forever, so fall through to the default matrix.
+                let all_wild = matrix
                     .iter()
-                    .any(|r| !r.is_empty() && matches!(r[0].head, Head::Wildcard));
-                if matrix_has_wild {
+                    .all(|r| r.is_empty() || matches!(r[0].head, Head::Wildcard));
+                if all_wild {
                     let m = default_matrix(matrix);
                     return self.useful(&m, &row[1..].to_vec(), &tys[1..]);
                 }

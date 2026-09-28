@@ -1,0 +1,7 @@
+pub fn f(a: Bool, b: Bool) -> Int {
+  case a, b {
+    True, True -> 1;
+    False, _ -> 2;
+    _, False -> 3;
+  };
+}
