@@ -144,14 +144,16 @@ fn fresh_capture_name(
     used: &mut std::collections::HashSet<String>,
     out: &mut Vec<String>,
 ) -> String {
-    let mut i = 0u32;
+    // Start at `out.len()` so the n-th gensym is O(1), not O(n) probes from 0
+    // (which made long pipe chains O(n²) in desugar alone).
+    let mut i = out.len() as u32;
     loop {
         let name = format!("__lush_cap_{i}");
         if used.insert(name.clone()) {
             out.push(name.clone());
             return name;
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 }
 
@@ -342,11 +344,14 @@ fn desugar_expr(
     gensyms: &mut Vec<String>,
 ) {
     match &mut expr.kind {
-        ExprKind::Pipe { left, right } => {
-            desugar_expr(left, sink, used, gensyms);
-            desugar_expr(right, sink, used, gensyms);
-            let left = std::mem::replace(
-                left.as_mut(),
+        ExprKind::Pipe { .. } => {
+            // Flatten a left-associative pipe chain into one block of lets so
+            // inference sees a single scope (nested pipe blocks were O(n²) in
+            // environment depth). `((a |> f) |> g) |> h` →
+            // `{ let c0 = a; let c1 = f(c0); let c2 = g(c1); h(c2); }`.
+            let mut stages: Vec<Expr> = Vec::new();
+            let mut cur = std::mem::replace(
+                expr,
                 Expr {
                     kind: ExprKind::Var(Name {
                         text: "_".into(),
@@ -355,17 +360,20 @@ fn desugar_expr(
                     span: Span::default(),
                 },
             );
-            let right = std::mem::replace(
-                right.as_mut(),
-                Expr {
-                    kind: ExprKind::Var(Name {
-                        text: "_".into(),
-                        span: Span::default(),
-                    }),
-                    span: Span::default(),
-                },
-            );
-            *expr = desugar_pipe(left, right, sink, used, gensyms);
+            while let ExprKind::Pipe { left, right } = cur.kind {
+                stages.push(*right);
+                cur = *left;
+            }
+            stages.reverse();
+            desugar_expr(&mut cur, sink, used, gensyms);
+            for stage in &mut stages {
+                desugar_expr(stage, sink, used, gensyms);
+            }
+            if !chain_length_ok(stages.len(), sink, cur.span) {
+                *expr = cur;
+                return;
+            }
+            *expr = desugar_pipe_chain(cur, stages, sink, used, gensyms);
         }
         ExprKind::Call { callee, args } => {
             desugar_expr(callee, sink, used, gensyms);
@@ -567,24 +575,10 @@ fn contains_hole(e: &Expr) -> bool {
     }
 }
 
-fn desugar_pipe(
-    left: Expr,
-    right: Expr,
-    sink: &mut TypeSink,
-    used: &mut std::collections::HashSet<String>,
-    gensyms: &mut Vec<String>,
-) -> Expr {
-    let span = Span::new(left.span.start.as_usize(), right.span.end.as_usize());
-    // Bind left once when callee could observe order: always bind for safety when right is call
-    let bind_name = fresh_capture_name(used, gensyms);
-    let left_var = Expr {
-        kind: ExprKind::Var(Name {
-            text: bind_name.clone(),
-            span: left.span,
-        }),
-        span: left.span,
-    };
-    let call = match right.kind {
+fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
+    let value_span = value.span;
+    let span = Span::new(value_span.start.as_usize(), right.span.end.as_usize());
+    match right.kind {
         ExprKind::Call { callee, mut args } => {
             let hole_idx: Vec<usize> = args
                 .iter()
@@ -602,15 +596,14 @@ fn desugar_pipe(
             }
             if hole_idx.len() == 1 {
                 let i = hole_idx[0];
-                args[i].value = ArgValue::Expr(left_var);
+                args[i].value = ArgValue::Expr(value);
             } else {
-                // Insert left as first positional arg
                 args.insert(
                     0,
                     Arg {
                         label: None,
-                        value: ArgValue::Expr(left_var),
-                        span: left.span,
+                        value: ArgValue::Expr(value),
+                        span: value_span,
                     },
                 );
             }
@@ -627,8 +620,8 @@ fn desugar_pipe(
                 callee: Box::new(right),
                 args: vec![Arg {
                     label: None,
-                    value: ArgValue::Expr(left_var),
-                    span: left.span,
+                    value: ArgValue::Expr(value),
+                    span: value_span,
                 }],
             },
             span,
@@ -645,36 +638,61 @@ fn desugar_pipe(
                     callee: Box::new(right),
                     args: vec![Arg {
                         label: None,
-                        value: ArgValue::Expr(left_var),
-                        span: left.span,
+                        value: ArgValue::Expr(value),
+                        span: value_span,
                     }],
                 },
                 span,
             }
         }
-    };
-    // let __lush_cap = left; call
+    }
+}
+
+fn desugar_pipe_chain(
+    init: Expr,
+    stages: Vec<Expr>,
+    sink: &mut TypeSink,
+    used: &mut std::collections::HashSet<String>,
+    gensyms: &mut Vec<String>,
+) -> Expr {
+    let span = Span::new(
+        init.span.start.as_usize(),
+        stages
+            .last()
+            .map(|s| s.span.end.as_usize())
+            .unwrap_or(init.span.end.as_usize()),
+    );
+    let mut statements = Vec::with_capacity(stages.len() + 1);
+    let mut current = init;
+    for stage in stages {
+        let bind_name = fresh_capture_name(used, gensyms);
+        let current_span = current.span;
+        let value_var = Expr {
+            kind: ExprKind::Var(Name {
+                text: bind_name.clone(),
+                span: current_span,
+            }),
+            span: current_span,
+        };
+        statements.push(Statement::Let(Box::new(LetStmt {
+            assert: false,
+            pattern: Pattern {
+                kind: PatternKind::Var(Name {
+                    text: bind_name,
+                    span: current_span,
+                }),
+                span: current_span,
+            },
+            ty: None,
+            value: current,
+            message: None,
+            span: current_span,
+        })));
+        current = pipe_apply(value_var, stage, sink);
+    }
+    statements.push(Statement::Expr(current));
     Expr {
-        kind: ExprKind::Block(Block {
-            statements: vec![
-                Statement::Let(Box::new(LetStmt {
-                    assert: false,
-                    pattern: Pattern {
-                        kind: PatternKind::Var(Name {
-                            text: bind_name,
-                            span: left.span,
-                        }),
-                        span: left.span,
-                    },
-                    ty: None,
-                    value: left,
-                    message: None,
-                    span,
-                })),
-                Statement::Expr(call),
-            ],
-            span,
-        }),
+        kind: ExprKind::Block(Block { statements, span }),
         span,
     }
 }
