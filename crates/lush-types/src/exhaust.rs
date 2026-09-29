@@ -19,7 +19,7 @@ enum Head {
     Infinite,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum LitKind {
     Int(String),
     Float(String),
@@ -58,14 +58,26 @@ impl<'a> ExhaustChecker<'a> {
             }
         }
 
+        // Fast path: single subject over an infinite literal domain (Int/Float/
+        // String/BitArray). Hash literals so n arms are O(n), not O(n²).
+        if subjects.len() == 1
+            && is_infinite_lit_domain(self.store, &subjects[0])
+            && self.check_lit_column(clauses, span)
+        {
+            return;
+        }
+
         let mut matrix: Vec<Row> = Vec::new();
         for clause in clauses {
             let rows = expand_clause(clause, subjects.len());
             if clause.guard.is_some() {
                 continue; // guarded arms don't establish coverage
             }
-            for row in &rows {
-                match self.useful(&matrix, row, subjects) {
+            // Check each alternative against the matrix *including* earlier
+            // alternatives of the same clause, so `1 | 1` and `True | True`
+            // report redundant alternatives.
+            for row in rows {
+                match self.useful(&matrix, &row, subjects) {
                     Ok(false) => {
                         self.sink.warning(
                             codes::W1004_REDUNDANT_PATTERN,
@@ -73,16 +85,16 @@ impl<'a> ExhaustChecker<'a> {
                             clause.span,
                             None,
                         );
-                        break;
                     }
-                    Ok(true) => {}
+                    Ok(true) => {
+                        matrix.push(row);
+                    }
                     Err(Budget::Exhausted) => {
                         self.emit_budget(span);
                         return;
                     }
                 }
             }
-            matrix.extend(rows);
         }
 
         let wild: Row = (0..subjects.len())
@@ -104,6 +116,56 @@ impl<'a> ExhaustChecker<'a> {
             Ok(false) => {}
             Err(Budget::Exhausted) => self.emit_budget(span),
         }
+    }
+
+    /// Returns true when the fast path fully handled the match.
+    fn check_lit_column(&mut self, clauses: &[Clause], span: Span) -> bool {
+        use std::collections::HashSet;
+        let mut seen: HashSet<LitKind> = HashSet::new();
+        let mut has_wild = false;
+        for clause in clauses {
+            if clause.guard.is_some() {
+                continue;
+            }
+            let rows = expand_clause(clause, 1);
+            for row in rows {
+                self.tick().ok();
+                match &row[0].head {
+                    Head::Lit(lit) => {
+                        if !seen.insert(lit.clone()) {
+                            self.sink.warning(
+                                codes::W1004_REDUNDANT_PATTERN,
+                                "redundant pattern: unreachable arm",
+                                clause.span,
+                                None,
+                            );
+                        }
+                    }
+                    Head::Wildcard => {
+                        if has_wild {
+                            self.sink.warning(
+                                codes::W1004_REDUNDANT_PATTERN,
+                                "redundant pattern: unreachable arm",
+                                clause.span,
+                                None,
+                            );
+                        }
+                        has_wild = true;
+                    }
+                    // Mixed constructors / nested patterns — fall back.
+                    _ => return false,
+                }
+            }
+        }
+        if !has_wild {
+            self.sink.error(
+                codes::E1450_NON_EXHAUSTIVE,
+                "non-exhaustive patterns: `_` not covered",
+                span,
+                Some("add a case for the missing pattern or a catch-all `_`".into()),
+            );
+        }
+        true
     }
 
     fn emit_budget(&mut self, span: Span) {
@@ -286,6 +348,13 @@ impl<'a> ExhaustChecker<'a> {
             );
         }
     }
+}
+
+fn is_infinite_lit_domain(store: &TypeStore, ty: &Type) -> bool {
+    matches!(
+        follow(store, ty),
+        Type::Int | Type::Float | Type::String | Type::BitArray
+    )
 }
 
 fn follow(store: &TypeStore, ty: &Type) -> Type {
@@ -890,4 +959,31 @@ pub fn brute_force_confirm_bool(clauses: &[Clause]) -> bool {
                 })
         })
     })
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::diag::TypeSink;
+    use crate::ty::TypeStore;
+
+    #[test]
+    fn usefulness_respects_budget() {
+        let mut store = TypeStore::new();
+        let mut sink = TypeSink::new(0);
+        let mut ex = ExhaustChecker {
+            store: &mut store,
+            sink: &mut sink,
+            work: MAX_EXHAUST_WORK, // already at the limit
+        };
+        let matrix: Vec<Row> = vec![];
+        let row = vec![Pat {
+            head: Head::Wildcard,
+        }];
+        let tys = vec![Type::Bool];
+        assert!(matches!(
+            ex.useful(&matrix, &row, &tys),
+            Err(Budget::Exhausted)
+        ));
+    }
 }
