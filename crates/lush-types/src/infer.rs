@@ -2064,7 +2064,7 @@ fn infer_expr_inner(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
                 infer_binop(ctx, left, *op, right, expr.span)
             }
         }
-        ExprKind::Call { callee, args } => infer_call(ctx, callee, args, expr.span),
+        ExprKind::Call { callee, args } => infer_call(ctx, expr.id, callee, args, expr.span),
         ExprKind::Field { base, field } => infer_field(ctx, base, field, expr.span),
         ExprKind::RecordUpdate {
             constructor,
@@ -2334,7 +2334,13 @@ fn record_callee_ty(ctx: &mut InferCtx<'_>, callee: &Expr, ty: &Type) {
     }
 }
 
-fn infer_call(ctx: &mut InferCtx<'_>, callee: &Expr, args: &[Arg], span: Span) -> Type {
+fn infer_call(
+    ctx: &mut InferCtx<'_>,
+    call_id: NodeId,
+    callee: &Expr,
+    args: &[Arg],
+    span: Span,
+) -> Type {
     // Resolve labelled calls only for named functions/ctors
     let (fty, labels) = match &callee.kind {
         ExprKind::Var(n) => {
@@ -2342,14 +2348,14 @@ fn infer_call(ctx: &mut InferCtx<'_>, callee: &Expr, args: &[Arg], span: Span) -
                 if ctor_of.is_some() {
                     let inst = unify::instantiate(ctx.store, &scheme, ctx.level);
                     record_callee_ty(ctx, callee, &inst);
-                    return finish_call_ctor(ctx, inst, &labels, args, span);
+                    return finish_call_ctor(ctx, call_id, inst, &labels, args, span);
                 }
                 if ctx.scc.contains(&n.text) {
                     // Monomorphic recursive reference — do not instantiate.
                     let inst = ctx.store.zonk(&scheme.body);
                     record_callee_ty(ctx, callee, &inst);
                     ctx.scc_rec_call = true;
-                    let ret = finish_call(ctx, inst, &labels, args, span);
+                    let ret = finish_call(ctx, call_id, inst, &labels, args, span);
                     ctx.scc_rec_call = false;
                     return ret;
                 }
@@ -2371,7 +2377,7 @@ fn infer_call(ctx: &mut InferCtx<'_>, callee: &Expr, args: &[Arg], span: Span) -
             } else {
                 vec![]
             };
-            return finish_call_ctor(ctx, t, &labels, args, span);
+            return finish_call_ctor(ctx, call_id, t, &labels, args, span);
         }
         ExprKind::Field { base, field } => {
             // module.func
@@ -2390,7 +2396,7 @@ fn infer_call(ctx: &mut InferCtx<'_>, callee: &Expr, args: &[Arg], span: Span) -
                         .cloned()
                     {
                         let inst = unify::instantiate(ctx.store, &v.scheme, ctx.level);
-                        return finish_call(ctx, inst, &v.labels, args, span);
+                        return finish_call(ctx, call_id, inst, &v.labels, args, span);
                     }
                     if let Some(v) = ctx
                         .resolved
@@ -2400,7 +2406,7 @@ fn infer_call(ctx: &mut InferCtx<'_>, callee: &Expr, args: &[Arg], span: Span) -
                         .cloned()
                     {
                         let inst = unify::instantiate(ctx.store, &v.scheme, ctx.level);
-                        return finish_call(ctx, inst, &v.labels, args, span);
+                        return finish_call(ctx, call_id, inst, &v.labels, args, span);
                     }
                     ctx.sink.error(
                         codes::E1000_UNKNOWN_NAME,
@@ -2426,7 +2432,7 @@ fn infer_call(ctx: &mut InferCtx<'_>, callee: &Expr, args: &[Arg], span: Span) -
             None,
         );
     }
-    finish_call(ctx, fty, &labels, args, span)
+    finish_call(ctx, call_id, fty, &labels, args, span)
 }
 
 fn check_call_labels_only(
@@ -2566,26 +2572,29 @@ fn concrete_conflict(store: &mut TypeStore, a: &Type, b: &Type) -> bool {
 
 fn finish_call(
     ctx: &mut InferCtx<'_>,
+    call_id: NodeId,
     fty: Type,
     labels: &[Option<String>],
     args: &[Arg],
     span: Span,
 ) -> Type {
-    finish_call_ex(ctx, fty, labels, args, span, false)
+    finish_call_ex(ctx, call_id, fty, labels, args, span, false)
 }
 
 fn finish_call_ctor(
     ctx: &mut InferCtx<'_>,
+    call_id: NodeId,
     fty: Type,
     labels: &[Option<String>],
     args: &[Arg],
     span: Span,
 ) -> Type {
-    finish_call_ex(ctx, fty, labels, args, span, true)
+    finish_call_ex(ctx, call_id, fty, labels, args, span, true)
 }
 
 fn finish_call_ex(
     ctx: &mut InferCtx<'_>,
+    call_id: NodeId,
     fty: Type,
     labels: &[Option<String>],
     args: &[Arg],
@@ -2629,9 +2638,10 @@ fn finish_call_ex(
     } else {
         codes::E1214_CALL_ARITY
     };
-    // Assign args to params
+    // Assign args to params. `arg_to_param[source_i] = param_i` for lowering.
     let mut filled = vec![false; params.len()];
     let mut arg_tys = vec![None; params.len()];
+    let mut arg_to_param = Vec::with_capacity(args.len());
     let mut positional_idx = 0usize;
     let mut seen_labels = HashSet::new();
     let mut seen_labelled = false;
@@ -2670,6 +2680,7 @@ fn finish_call_ex(
                 continue;
             }
             filled[idx] = true;
+            arg_to_param.push(idx);
             let ty = match &arg.value {
                 ArgValue::Expr(e) => infer_expr(ctx, e),
                 ArgValue::Hole => Type::Error,
@@ -2703,6 +2714,7 @@ fn finish_call_ex(
                 continue;
             }
             filled[positional_idx] = true;
+            arg_to_param.push(positional_idx);
             let ty = match &arg.value {
                 ArgValue::Expr(e) => infer_expr(ctx, e),
                 ArgValue::Hole => Type::Error,
@@ -2710,6 +2722,17 @@ fn finish_call_ex(
             arg_tys[positional_idx] = Some(ty);
             positional_idx += 1;
         }
+    }
+    if !arg_to_param.is_empty() {
+        let tail = ctx.typed.in_tail();
+        ctx.typed.set_call(
+            call_id,
+            crate::typed::CallInfo {
+                arg_to_param,
+                use_callback: false,
+                tail,
+            },
+        );
     }
     if label_order_error {
         return Type::Error;

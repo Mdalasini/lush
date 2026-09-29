@@ -248,6 +248,11 @@ fn float_basic_e2e() {
 }
 
 #[test]
+fn labelled_args_e2e() {
+    common::assert_case("labelled_args");
+}
+
+#[test]
 fn numeric_imm_boundary_e2e() {
     common::assert_case("numeric_imm");
 }

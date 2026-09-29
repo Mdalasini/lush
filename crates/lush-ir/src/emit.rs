@@ -662,7 +662,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 };
                 self.emit_binary_op(*op, left, right, expr.span)
             }
-            ExprKind::Call { callee, args } => self.emit_call(callee, args, expr.span, tail),
+            ExprKind::Call { callee, args } => {
+                self.emit_call(expr.id, callee, args, expr.span, tail)
+            }
             ExprKind::Case { subjects, clauses } => {
                 self.emit_case(subjects, clauses, expr.span, tail)
             }
@@ -1000,18 +1002,27 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         Some(dst)
     }
 
-    fn emit_call(&mut self, callee: &Expr, args: &[Arg], span: Span, tail: bool) -> Option<Reg> {
-        // Resolve callee to a function or builtin.
-        let mut arg_regs = Vec::new();
+    fn emit_call(
+        &mut self,
+        call_id: NodeId,
+        callee: &Expr,
+        args: &[Arg],
+        span: Span,
+        tail: bool,
+    ) -> Option<Reg> {
+        // Evaluate arguments in source order, then reorder into parameter order
+        // using CallInfo.arg_to_param from lush-types (§5.2 / #24 §2).
+        let mut src_regs = Vec::new();
         for a in args {
             match &a.value {
-                ArgValue::Expr(e) => arg_regs.push(self.emit_expr(e, false)?),
+                ArgValue::Expr(e) => src_regs.push(self.emit_expr(e, false)?),
                 ArgValue::Hole => {
                     self.error(codes::E2011_LOWER, "capture hole survived desugaring", span);
                     return None;
                 }
             }
         }
+        let arg_regs = self.reorder_args(call_id, src_regs, args.len());
 
         match &callee.kind {
             ExprKind::Var(n) => {
@@ -1081,6 +1092,34 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 self.emit_closure_call(clo, arg_regs, span, tail)
             }
         }
+    }
+
+    /// Reorder source-order argument registers into parameter order using
+    /// `CallInfo.arg_to_param` when present; otherwise leave them as-is.
+    fn reorder_args(&self, call_id: NodeId, src_regs: Vec<Reg>, n_args: usize) -> Vec<Reg> {
+        let Some(info) = self.m.typed.expr(call_id) else {
+            return src_regs;
+        };
+        let Some(call) = &info.call else {
+            return src_regs;
+        };
+        if call.arg_to_param.len() != n_args || call.arg_to_param.len() != src_regs.len() {
+            return src_regs;
+        }
+        let mut arity = 0usize;
+        for &p in &call.arg_to_param {
+            arity = arity.max(p + 1);
+        }
+        let mut ordered = vec![None; arity];
+        for (src_i, &param_i) in call.arg_to_param.iter().enumerate() {
+            if param_i < ordered.len() {
+                ordered[param_i] = Some(src_regs[src_i]);
+            }
+        }
+        if ordered.iter().any(|r| r.is_none()) {
+            return src_regs;
+        }
+        ordered.into_iter().map(|r| r.unwrap()).collect()
     }
 
     fn emit_closure_call(
@@ -1318,7 +1357,8 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
     fn fresh_synth_name(&mut self) -> String {
         let n = self.m.gensym;
         self.m.gensym += 1;
-        format!("$fn{n}")
+        // #24 §1: compiler-generated names must not look like user identifiers.
+        format!("<fn{n}>")
     }
 
     fn emit_closure_function(
