@@ -284,3 +284,50 @@ pub fn main() -> Nil {
         "debug info must not be stamped (1,1) for every op"
     );
 }
+
+/// Review round 7: emit_limits programs must compile cleanly at both O0 and O1.
+#[test]
+fn emit_limits_programs_compile_at_o0_and_o1() {
+    let sources = [
+        plus_chain(100),
+        plus_chain(1000),
+        r#"
+import lush/io;
+import lush/int;
+pub fn main() -> Nil {
+  let a = 4;
+  let x = a + 1;
+  io.println(int.to_string(x));
+  io.println(int.to_string(a));
+}
+"#
+        .to_string(),
+        r#"
+import lush/io;
+import lush/int;
+pub fn main() -> Nil {
+  let a = 6;
+  let b = 3;
+  io.println(int.to_string(a - b));
+  io.println(int.to_string(a * b));
+  io.println(int.to_string(a / b));
+}
+"#
+        .to_string(),
+    ];
+    for (i, src) in sources.iter().enumerate() {
+        let p0 = compile_sources_with_opt(&[("main".into(), src.clone())], "main", OptLevel::O0)
+            .unwrap_or_else(|d| panic!("case {i} O0: {d:?}"));
+        let p1 = compile_sources_with_opt(&[("main".into(), src.clone())], "main", OptLevel::O1)
+            .unwrap_or_else(|d| panic!("case {i} O1: {d:?}"));
+        assert_eq!(
+            p0.functions.len(),
+            p1.functions.len(),
+            "case {i} function count"
+        );
+        p0.verify()
+            .unwrap_or_else(|e| panic!("case {i} O0 verify: {e}"));
+        p1.verify()
+            .unwrap_or_else(|e| panic!("case {i} O1 verify: {e}"));
+    }
+}

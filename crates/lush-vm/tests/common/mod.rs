@@ -70,11 +70,27 @@ pub fn assert_differential(name: &str) {
     let a = run_source("main", &src, OptLevel::O0);
     let b = run_source("main", &src, OptLevel::O1);
     assert_eq!(a.status, b.status, "{name} status O0 vs O1");
-    assert_eq!(a.stdout, b.stdout, "{name} stdout O0 vs O1");
-    assert_eq!(a.stderr, b.stderr, "{name} stderr O0 vs O1");
-    assert_eq!(a.status, expect_status);
-    assert_eq!(String::from_utf8_lossy(&a.stdout), expect_out);
-    assert_eq!(String::from_utf8_lossy(&a.stderr), expect_err);
+    assert_eq!(
+        String::from_utf8_lossy(&a.stdout),
+        String::from_utf8_lossy(&b.stdout),
+        "{name} stdout O0 vs O1"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&a.stderr),
+        String::from_utf8_lossy(&b.stderr),
+        "{name} stderr O0 vs O1"
+    );
+    assert_eq!(a.status, expect_status, "{name} status vs golden");
+    assert_eq!(
+        String::from_utf8_lossy(&a.stdout),
+        expect_out,
+        "{name} stdout vs golden"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&a.stderr),
+        expect_err,
+        "{name} stderr vs golden"
+    );
 }
 
 pub fn assert_quantum_invariant(name: &str) {
@@ -104,8 +120,9 @@ pub fn assert_quantum_invariant(name: &str) {
     }
 }
 
-#[allow(dead_code)]
-pub fn list_flat_cases() -> Vec<String> {
+/// Flat e2e case names (stem of `tests/e2e/<name>.lush`), excluding known
+/// compile-error-only fixtures that have no runnable expectations.
+pub fn list_runnable_cases() -> Vec<String> {
     let root = e2e_root();
     let mut names = Vec::new();
     if let Ok(rd) = fs::read_dir(&root) {
@@ -113,6 +130,10 @@ pub fn list_flat_cases() -> Vec<String> {
             let p = ent.path();
             if p.extension().and_then(|s| s.to_str()) == Some("lush") {
                 if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    // `unavailable` is a negative compile fixture (E2000).
+                    if stem == "unavailable" {
+                        continue;
+                    }
                     names.push(stem.to_string());
                 }
             }
@@ -120,6 +141,11 @@ pub fn list_flat_cases() -> Vec<String> {
     }
     names.sort();
     names
+}
+
+#[allow(dead_code)]
+pub fn list_flat_cases() -> Vec<String> {
+    list_runnable_cases()
 }
 
 #[allow(dead_code)]

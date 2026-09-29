@@ -13,6 +13,20 @@ fn fib_differential_opt() {
     common::assert_differential("fib");
 }
 
+/// #24 §4 / spec §6: every runnable e2e program must agree at O0 and O1
+/// (stdout, stderr, status). Catches optimiser miscompiles that fib alone misses.
+#[test]
+fn all_e2e_differential_opt() {
+    let names = common::list_runnable_cases();
+    assert!(
+        names.len() >= 10,
+        "expected a non-trivial e2e suite, got {names:?}"
+    );
+    for name in &names {
+        common::assert_differential(name);
+    }
+}
+
 #[test]
 fn fib_quantum_invariance() {
     common::assert_quantum_invariant("fib");
@@ -187,6 +201,11 @@ fn user_adt_e2e() {
 #[test]
 fn numeric_div_mod_e2e() {
     common::assert_case("numeric_div_mod");
+}
+
+#[test]
+fn opt_live_local_e2e() {
+    common::assert_case("opt_live_local");
 }
 
 #[test]

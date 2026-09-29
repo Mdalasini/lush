@@ -1,0 +1,16 @@
+import lush/io;
+import lush/int;
+
+/// Const-fold must not erase a live local's LoadInt (#24 §4 / review round 7).
+pub fn main() -> Nil {
+  let a = 4;
+  let x = a + 1;
+  io.println(int.to_string(x));
+  io.println(int.to_string(a));
+  let y = a * 2;
+  io.println(int.to_string(y));
+  let b = 3;
+  io.println(int.to_string(a - b));
+  io.println(int.to_string(a * b));
+  io.println(int.to_string(a / b));
+}

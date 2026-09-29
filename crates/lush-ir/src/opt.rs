@@ -209,4 +209,31 @@ pub fn main() -> Nil {
             compile_source_with_opt("main", src, OptLevel::O1).unwrap_or_else(|d| panic!("{d:?}"));
         assert!(prog.verify().is_ok());
     }
+
+    #[test]
+    fn const_fold_keeps_live_local_load() {
+        // Review round 7: `let a = 4; let x = a + 1; …; use a` must keep
+        // the LoadInt that defines `a` at O1.
+        let src = r#"
+import lush/io;
+import lush/int;
+pub fn main() -> Nil {
+  let a = 4;
+  let x = a + 1;
+  io.println(int.to_string(x));
+  io.println(int.to_string(a));
+}
+"#;
+        let p0 = compile_source_with_opt("main", src, OptLevel::O0).unwrap();
+        let p1 = compile_source_with_opt("main", src, OptLevel::O1).unwrap();
+        let loads_four = |p: &Program| {
+            p.functions
+                .iter()
+                .flat_map(|f| f.code.iter())
+                .any(|op| matches!(op, Op::LoadInt { value: 4, .. }))
+        };
+        assert!(loads_four(&p0), "O0 should load 4");
+        assert!(loads_four(&p1), "O1 must keep LoadInt 4 for live local a");
+        assert!(folded_int(&p1, 5), "O1 should fold a+1 to 5");
+    }
 }
