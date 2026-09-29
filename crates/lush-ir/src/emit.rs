@@ -215,6 +215,14 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         }
     }
 
+    /// Recycle temporary argument registers after a call/builtin consumes them.
+    /// Locals are left alone (`recycle` is a no-op for non-temps).
+    fn recycle_regs(&mut self, regs: &[Reg]) {
+        for &r in regs {
+            self.recycle(r);
+        }
+    }
+
     /// Return a register to the free list (parameters are never freed).
     fn free_reg(&mut self, r: Reg) {
         if (r as usize) < self.arity as usize {
@@ -315,6 +323,31 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         }
     }
 
+    /// Free locals bound in this scope that are never read (`last_use` has no entry).
+    fn free_unread_locals(&mut self, last_use: &HashMap<String, usize>) {
+        let dead: Vec<(String, Reg)> = {
+            let Some(scope) = self.env.last() else {
+                return;
+            };
+            scope
+                .iter()
+                .filter_map(|(name, r)| {
+                    if !last_use.contains_key(name) {
+                        Some((name.clone(), *r))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for (name, r) in dead {
+            if let Some(scope) = self.env.last_mut() {
+                scope.remove(&name);
+            }
+            self.free_reg(r);
+        }
+    }
+
     fn intern_string(&mut self, s: String) -> ConstId {
         if let Some(i) = self
             .m
@@ -338,11 +371,19 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             let is_last = i + 1 == n;
             match stmt {
                 Statement::Expr(e) => {
-                    last = self.emit_expr(e, tail && is_last);
+                    let r = self.emit_expr(e, tail && is_last);
+                    if is_last {
+                        last = r;
+                    } else if let Some(r) = r {
+                        // Non-final expression statements are dead after the `;`.
+                        self.free_reg(r);
+                    }
                 }
                 Statement::Let(l) => {
                     let v = self.emit_expr(&l.value, false)?;
                     self.bind_pattern(&l.pattern, v)?;
+                    // Locals with no later use are dead on arrival.
+                    self.free_unread_locals(&last_use);
                     if is_last {
                         let r = self.fresh()?;
                         self.emit(Op::LoadNil { dst: r }, l.span);
@@ -659,11 +700,15 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 Some(dst)
             }
             other => {
-                self.error(
-                    codes::E2011_LOWER,
-                    format!("expression form `{other:?}` not lowered in this checkpoint"),
-                    expr.span,
-                );
+                let msg = match other {
+                    ExprKind::Fn { .. } => "closures are not yet lowered",
+                    ExprKind::Pipe { .. } => "pipe expressions should have been desugared",
+                    ExprKind::RecordUpdate { .. } => "record updates are not yet lowered",
+                    ExprKind::BitArray(_) => "bit arrays are not yet lowered",
+                    ExprKind::Float(_) => "Float values are not yet fully lowered",
+                    _ => "this expression form is not yet lowered",
+                };
+                self.error(codes::E2011_LOWER, msg, expr.span);
                 None
             }
         }
@@ -828,10 +873,11 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         dst,
                         type_tag: 0,
                         variant,
-                        fields: arg_regs,
+                        fields: arg_regs.clone(),
                     },
                     span,
                 );
+                self.recycle_regs(&arg_regs);
                 Some(dst)
             }
             _ => {
@@ -852,10 +898,12 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         Op::CallClosure {
                             dst,
                             clo,
-                            args: arg_regs,
+                            args: arg_regs.clone(),
                         },
                         span,
                     );
+                    self.recycle(clo);
+                    self.recycle_regs(&arg_regs);
                     Some(dst)
                 }
             }
@@ -920,10 +968,11 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 Op::Call {
                     dst,
                     func: fid,
-                    args,
+                    args: args.clone(),
                 },
                 span,
             );
+            self.recycle_regs(&args);
             Some(dst)
         }
     }
@@ -950,7 +999,15 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             }
         };
         let dst = self.fresh()?;
-        self.emit(Op::Builtin { dst, builtin, args }, span);
+        self.emit(
+            Op::Builtin {
+                dst,
+                builtin,
+                args: args.clone(),
+            },
+            span,
+        );
+        self.recycle_regs(&args);
         Some(dst)
     }
 

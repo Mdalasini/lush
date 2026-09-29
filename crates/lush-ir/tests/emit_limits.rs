@@ -139,6 +139,91 @@ pub fn main() -> Nil {{
 }
 
 #[test]
+fn many_println_statements_reuse_registers() {
+    let mut body = String::new();
+    for i in 0..300 {
+        body.push_str(&format!("  io.println(\"line {i}\");\n"));
+    }
+    let src = format!(
+        r#"
+import lush/io;
+
+pub fn main() -> Nil {{
+{body}}}
+"#
+    );
+    let program = compile_sources(&[("main".into(), src)], "main").expect("compile printlns");
+    let main = program
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main");
+    assert!(
+        (main.regs as usize) < 64,
+        "300 println statements should free dead results, regs={}",
+        main.regs
+    );
+}
+
+#[test]
+fn used_once_lets_with_println_reuse_registers() {
+    let mut body = String::new();
+    for i in 0..300 {
+        body.push_str(&format!(
+            "  let a{i} = {i};\n  io.println(int.to_string(a{i}));\n"
+        ));
+    }
+    let src = format!(
+        r#"
+import lush/io;
+import lush/int;
+
+pub fn main() -> Nil {{
+{body}}}
+"#
+    );
+    let program = compile_sources(&[("main".into(), src)], "main").expect("compile used-once lets");
+    let main = program
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main");
+    assert!(
+        (main.regs as usize) < 64,
+        "used-once lets should free after println, regs={}",
+        main.regs
+    );
+}
+
+#[test]
+fn unread_lets_freed_immediately() {
+    let mut body = String::new();
+    for i in 0..300 {
+        body.push_str(&format!("  let _u{i} = {i};\n"));
+    }
+    body.push_str("  io.println(\"done\");\n");
+    let src = format!(
+        r#"
+import lush/io;
+
+pub fn main() -> Nil {{
+{body}}}
+"#
+    );
+    let program = compile_sources(&[("main".into(), src)], "main").expect("compile unread lets");
+    let main = program
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main");
+    assert!(
+        (main.regs as usize) < 64,
+        "unread lets should be freed on arrival, regs={}",
+        main.regs
+    );
+}
+
+#[test]
 fn e2001_reported_once() {
     let mut elems = String::new();
     for i in 0..300 {
