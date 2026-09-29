@@ -1,0 +1,45 @@
+import lush/io;
+import lush/int;
+
+fn sum(xs: List(Int), acc: Int) -> Int {
+  case xs {
+    [x, ..rest] -> sum(rest, acc + x);
+    _ -> acc;
+  };
+}
+
+fn bump(n: Int, acc: Int) -> Int {
+  case n {
+    5 -> bump(n - 1, acc + 100);
+    _ -> acc;
+  };
+}
+
+fn guard_sum(n: Int, acc: Int) -> Int {
+  case n {
+    k if k > 3 -> guard_sum(k - 1, acc + k);
+    _ -> acc;
+  };
+}
+
+fn bit_sum(b: BitArray, acc: Int) -> Int {
+  case b {
+    <<x, rest:bytes>> -> bit_sum(rest, acc + x);
+    _ -> acc;
+  };
+}
+
+fn prefix_fallback(s: String, acc: Int) -> Int {
+  case s {
+    "ab" <> _rest -> acc + 1;
+    _ -> acc;
+  };
+}
+
+pub fn main() -> Nil {
+  io.println(int.to_string(sum([1, 2, 3], 0)));
+  io.println(int.to_string(bump(5, 0)));
+  io.println(int.to_string(guard_sum(6, 0)));
+  io.println(int.to_string(bit_sum(<<1, 2, 3>>, 0)));
+  io.println(int.to_string(prefix_fallback("xyz", 9)));
+}

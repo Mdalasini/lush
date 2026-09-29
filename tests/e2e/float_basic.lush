@@ -15,4 +15,25 @@ pub fn main() -> Nil {
     True -> 1;
     False -> 0;
   }));
+  // Ordering: <. <=. >. >=. including -0.0
+  io.println(int.to_string(case 1.0 <. 2.0 {
+    True -> 1;
+    False -> 0;
+  }));
+  io.println(int.to_string(case 2.0 <=. 2.0 {
+    True -> 1;
+    False -> 0;
+  }));
+  io.println(int.to_string(case 3.0 >. 2.0 {
+    True -> 1;
+    False -> 0;
+  }));
+  io.println(int.to_string(case 2.0 >=. 3.0 {
+    True -> 1;
+    False -> 0;
+  }));
+  io.println(int.to_string(case -0.0 <=. 0.0 {
+    True -> 1;
+    False -> 0;
+  }));
 }

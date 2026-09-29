@@ -1835,6 +1835,47 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     PatternKind::BitArray(segs) => {
                         self.emit_bit_array_pattern(pat, segs, *scrut, &mut fail_jumps)?;
                     }
+                    PatternKind::StringPrefix { prefix, rest } => {
+                        let expected = self.fresh()?;
+                        let idx = self.intern_string(prefix.value.clone());
+                        self.emit(Op::LoadConst { dst: expected, idx }, pat.span);
+                        let ok = self.fresh()?;
+                        let rest_r = self.fresh()?;
+                        self.emit(
+                            Op::StringTakePrefix {
+                                ok,
+                                rest: rest_r,
+                                src: *scrut,
+                                expected,
+                            },
+                            pat.span,
+                        );
+                        let jmp = self.code.len();
+                        self.emit(
+                            Op::JumpIfFalse {
+                                cond: ok,
+                                target: 0,
+                            },
+                            pat.span,
+                        );
+                        fail_jumps.push(jmp);
+                        self.recycle(expected);
+                        self.recycle(ok);
+                        match &rest.kind {
+                            PatternKind::Var(n) => self.define(n.text.clone(), rest_r),
+                            PatternKind::Discard | PatternKind::UnderscoreName(_) => {
+                                self.recycle(rest_r);
+                            }
+                            _ => {
+                                self.error(
+                                    codes::E2011_LOWER,
+                                    "nested string-prefix rest pattern not supported yet",
+                                    rest.span,
+                                );
+                                return None;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1850,11 +1891,18 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 );
                 fail_jumps.push(jmp);
             }
+            // Track whether *this* arm's body emitted a terminating op. Looking at
+            // `code.last()` alone is wrong when the body is a bare local (no new
+            // ops): we'd see the previous arm's TailCall and skip Move/Jump, so
+            // failure jumps land on the defensive "no arm matched" panic.
+            let body_start = self.code.len();
             let body = self.emit_expr(&clause.body, tail)?;
-            if !matches!(
-                self.code.last(),
-                Some(Op::TailCall { .. } | Op::TailCallClosure { .. } | Op::Panic { .. })
-            ) {
+            let body_terminated = self.code.len() > body_start
+                && matches!(
+                    self.code.last(),
+                    Some(Op::TailCall { .. } | Op::TailCallClosure { .. } | Op::Panic { .. })
+                );
+            if !body_terminated {
                 self.emit(Op::Move { dst, src: body }, clause.body.span);
                 let end_jmp = self.code.len();
                 self.emit(Op::Jump { target: 0 }, span);

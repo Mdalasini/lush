@@ -540,6 +540,18 @@ fn encode_op(w: &mut Writer, op: &Op) {
             w.u8(*dst);
             w.u8(*src);
         }
+        Op::StringTakePrefix {
+            ok,
+            rest,
+            src,
+            expected,
+        } => {
+            w.u16(65);
+            w.u8(*ok);
+            w.u8(*rest);
+            w.u8(*src);
+            w.u8(*expected);
+        }
     }
 }
 
@@ -818,6 +830,12 @@ fn decode_op(r: &mut Reader<'_>) -> Result<Op, String> {
         64 => Ok(Op::BitArrayIsEmpty {
             dst: r.u8()?,
             src: r.u8()?,
+        }),
+        65 => Ok(Op::StringTakePrefix {
+            ok: r.u8()?,
+            rest: r.u8()?,
+            src: r.u8()?,
+            expected: r.u8()?,
         }),
         t => Err(format!("unknown opcode {t}")),
     }

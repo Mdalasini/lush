@@ -258,6 +258,16 @@ fn multi_variant_field_e2e() {
 }
 
 #[test]
+fn case_tail_fallback_e2e() {
+    common::assert_case("case_tail_fallback");
+}
+
+#[test]
+fn bitarray_bytes_align_e2e() {
+    common::assert_case("bitarray_bytes_align");
+}
+
+#[test]
 fn numeric_imm_boundary_e2e() {
     common::assert_case("numeric_imm");
 }

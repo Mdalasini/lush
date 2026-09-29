@@ -138,6 +138,7 @@ fn use_regs(op: &Op) -> Vec<Reg> {
         } => fields.clone(),
         Op::GetField { base, .. } => vec![*base],
         Op::SwitchTag { scrutinee, .. } => vec![*scrutinee],
+        Op::StringTakePrefix { src, expected, .. } => vec![*src, *expected],
         _ => vec![],
     }
 }

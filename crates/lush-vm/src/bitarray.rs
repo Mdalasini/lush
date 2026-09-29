@@ -193,7 +193,8 @@ fn append_bits_value(
         return Err("bit array bytes/bits segment expects BitArray".into());
     }
     let src_len = heap.bit_array_len(p);
-    if require_aligned && !src_len.is_multiple_of(8) {
+    let src_off = heap.bit_array_off(p);
+    if require_aligned && (!src_off.is_multiple_of(8) || !src_len.is_multiple_of(8)) {
         return Err("bit array bytes segment source is not byte-aligned".into());
     }
     let take = match size_bits {
@@ -208,34 +209,61 @@ fn append_bits_value(
         }
         None => src_len,
     };
-    let src = BitBuf::from_parts(heap.bit_array_bits(p).to_vec(), take);
+    // Copy only the logical view (respecting bit_off), not the whole buffer.
+    let mut cur = BitCursor::new(heap.bit_array_bits(p), src_off, take);
+    let mut src = BitBuf::new();
+    let mut left = take;
+    while left > 0 {
+        let n = left.min(8) as u8;
+        let v = cur
+            .read_bits_pub(n)
+            .ok_or_else(|| "bit array segment truncated".to_string())?;
+        src.push_bits(v, n);
+        left -= n as u64;
+    }
     buf.append_buf(&src);
     Ok(())
 }
 
-/// View into a bit array at a bit offset (for matching).
+/// View into a bit array at an absolute bit offset (for matching).
 #[derive(Clone, Copy, Debug)]
 pub struct BitCursor<'a> {
     bytes: &'a [u8],
-    bit_len: u64,
+    /// Exclusive end bit position in `bytes`.
+    end: u64,
+    /// Current absolute bit position in `bytes`.
     offset: u64,
 }
 
 impl<'a> BitCursor<'a> {
-    pub fn new(bytes: &'a [u8], bit_len: u64) -> Self {
+    pub fn new(bytes: &'a [u8], bit_off: u64, bit_len: u64) -> Self {
         Self {
             bytes,
-            bit_len,
-            offset: 0,
+            end: bit_off.saturating_add(bit_len),
+            offset: bit_off,
         }
     }
 
     pub fn remaining(&self) -> u64 {
-        self.bit_len.saturating_sub(self.offset)
+        self.end.saturating_sub(self.offset)
     }
 
     pub fn is_empty(&self) -> bool {
         self.remaining() == 0
+    }
+
+    /// Absolute bit offset of the current read position (for alignment checks).
+    pub fn absolute_offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// `(bit_off, bit_len)` describing the unread suffix as a view.
+    pub fn rest_view(&self) -> (u64, u64) {
+        (self.offset, self.remaining())
+    }
+
+    pub fn read_bits_pub(&mut self, n: u8) -> Option<u64> {
+        self.read_bits(n)
     }
 
     fn read_bits(&mut self, n: u8) -> Option<u64> {
@@ -293,21 +321,9 @@ impl<'a> BitCursor<'a> {
         true
     }
 
-    pub fn take_rest(&self, require_byte_aligned: bool) -> Option<BitBuf> {
-        if require_byte_aligned && !self.offset.is_multiple_of(8) {
-            return None;
-        }
-        let rem = self.remaining();
-        let mut out = BitBuf::new();
-        let mut cur = *self;
-        let mut left = rem;
-        while left > 0 {
-            let take = left.min(8) as u8;
-            let v = cur.read_bits(take)?;
-            out.push_bits(v, take);
-            left -= take as u64;
-        }
-        Some(out)
+    /// Alignment check for `:bytes` remainder without copying.
+    pub fn rest_aligned(&self, require_byte_aligned: bool) -> bool {
+        !require_byte_aligned || self.offset.is_multiple_of(8)
     }
 }
 
@@ -318,46 +334,48 @@ pub fn cursor_from_value<'a>(heap: &'a Heap, v: Value) -> Option<BitCursor<'a>> 
     }
     Some(BitCursor::new(
         heap.bit_array_bits(p),
+        heap.bit_array_off(p),
         heap.bit_array_len(p),
     ))
 }
 
 pub fn eq_bit_arrays(heap: &Heap, a: Value, b: Value, charge: &mut u64) -> bool {
-    let (Some(pa), Some(pb)) = (a.as_ptr(), b.as_ptr()) else {
+    let (Some(mut ca), Some(mut cb)) = (cursor_from_value(heap, a), cursor_from_value(heap, b))
+    else {
         return false;
     };
-    if heap.kind(pa) != ObjectKind::BitArray || heap.kind(pb) != ObjectKind::BitArray {
-        return false;
-    }
-    let la = heap.bit_array_len(pa);
-    let lb = heap.bit_array_len(pb);
+    let la = ca.remaining();
+    let lb = cb.remaining();
     if la != lb {
         return false;
     }
-    let ba = heap.bit_array_bits(pa);
-    let bb = heap.bit_array_bits(pb);
-    let nbytes = la.div_ceil(8) as usize;
-    *charge += (nbytes as u64).div_ceil(8);
-    if nbytes == 0 {
-        return true;
+    let nbytes = la.div_ceil(8);
+    *charge += nbytes.div_ceil(8);
+    let mut left = la;
+    while left > 0 {
+        let n = left.min(8) as u8;
+        let Some(x) = ca.read_bits(n) else {
+            return false;
+        };
+        let Some(y) = cb.read_bits(n) else {
+            return false;
+        };
+        if x != y {
+            return false;
+        }
+        left -= n as u64;
     }
-    // Compare full bytes, then used bits of the last partial byte.
-    let full = (la / 8) as usize;
-    if ba.get(..full) != bb.get(..full) {
-        return false;
-    }
-    if la.is_multiple_of(8) {
-        return true;
-    }
-    let used = (la % 8) as u8;
-    let mask = !((1u8 << (8 - used)) - 1);
-    let aa = ba.get(full).copied().unwrap_or(0) & mask;
-    let bbv = bb.get(full).copied().unwrap_or(0) & mask;
-    aa == bbv
+    true
 }
 
 /// Render `<<1, 2, 3>>` with `:size(n)` on a trailing partial byte.
-pub fn inspect_bit_array(bytes: &[u8], bit_len: u64) -> String {
+pub fn inspect_bit_array_view(heap: &Heap, p: crate::heap::HeapPtr) -> String {
+    let mut cur = BitCursor::new(
+        heap.bit_array_bits(p),
+        heap.bit_array_off(p),
+        heap.bit_array_len(p),
+    );
+    let bit_len = cur.remaining();
     let mut out = String::from("<<");
     if bit_len == 0 {
         out.push_str(">>");
@@ -366,24 +384,30 @@ pub fn inspect_bit_array(bytes: &[u8], bit_len: u64) -> String {
     let full = bit_len / 8;
     let rem = bit_len % 8;
     let mut first = true;
-    for i in 0..full {
+    for _ in 0..full {
         if !first {
             out.push_str(", ");
         }
         first = false;
-        let b = bytes.get(i as usize).copied().unwrap_or(0);
+        let b = cur.read_bits(8).unwrap_or(0) as u8;
         out.push_str(&b.to_string());
     }
     if rem != 0 {
         if !first {
             out.push_str(", ");
         }
-        let b = bytes.get(full as usize).copied().unwrap_or(0);
-        let val = b >> (8 - rem);
+        let val = cur.read_bits(rem as u8).unwrap_or(0);
         out.push_str(&format!("{val}:size({rem})"));
     }
     out.push_str(">>");
     out
+}
+
+/// Convenience for tests that hold a raw buffer starting at bit 0.
+pub fn inspect_bit_array(bytes: &[u8], bit_len: u64) -> String {
+    let mut heap = Heap::new();
+    let p = heap.alloc_bit_array(bytes.to_vec(), bit_len);
+    inspect_bit_array_view(&heap, p)
 }
 
 #[cfg(test)]

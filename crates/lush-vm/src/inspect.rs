@@ -123,8 +123,7 @@ fn inspect_into(heap: &Heap, v: Value, out: &mut String, depth: usize) {
             out.push_str(&format!("//fn({})", heap.closure_arity(p)));
         }
         ObjectKind::BitArray => {
-            let rendered =
-                bitarray::inspect_bit_array(heap.bit_array_bits(p), heap.bit_array_len(p));
+            let rendered = bitarray::inspect_bit_array_view(heap, p);
             out.push_str(&rendered);
         }
     }

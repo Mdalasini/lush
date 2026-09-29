@@ -1,0 +1,13 @@
+import lush/io;
+
+pub fn main() -> Nil {
+  let b = <<0>>;
+  case b {
+    <<x:size(4), rest:bytes>> -> io.println("matched");
+    _ -> io.println("nomatch");
+  };
+  case <<1, 2, 3>> {
+    <<x:size(8), rest:bytes>> -> io.println("aligned");
+    _ -> io.println("no");
+  };
+}

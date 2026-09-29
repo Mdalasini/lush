@@ -247,6 +247,13 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// Match a UTF-8 string prefix (`"ab" <> rest`); write `rest` on success.
+    StringTakePrefix {
+        ok: Reg,
+        rest: Reg,
+        src: Reg,
+        expected: Reg,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -507,6 +514,17 @@ fn verify_op(prog: &Program, f: &Function, fi: usize, pi: usize, op: &Op) -> Res
         Op::BitArrayIsEmpty { dst, src } => {
             reg_ok(f, *dst)?;
             reg_ok(f, *src)?;
+        }
+        Op::StringTakePrefix {
+            ok,
+            rest,
+            src,
+            expected,
+        } => {
+            reg_ok(f, *ok)?;
+            reg_ok(f, *rest)?;
+            reg_ok(f, *src)?;
+            reg_ok(f, *expected)?;
         }
     }
     Ok(())

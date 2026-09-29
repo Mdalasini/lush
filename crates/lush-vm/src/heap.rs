@@ -1,4 +1,6 @@
 //! Bump-arena allocator (no reclamation until step 4).
+use std::rc::Rc;
+
 use crate::value::Value;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HeapPtr(pub u64);
@@ -35,8 +37,10 @@ enum Object {
         arity: u8,
         captures: Vec<Value>,
     },
+    /// Bit array or a view onto a shared buffer (`bit_off`..`bit_off+bit_len`).
     BitArray {
-        bits: Vec<u8>,
+        bits: Rc<Vec<u8>>,
+        bit_off: u64,
         bit_len: u64,
     },
 }
@@ -203,14 +207,55 @@ impl Heap {
     }
     pub fn alloc_bit_array(&mut self, bits: Vec<u8>, bit_len: u64) -> HeapPtr {
         let words = 2 + (bits.len() as u64).div_ceil(8);
-        self.push(Object::BitArray { bits, bit_len }, words)
+        self.push(
+            Object::BitArray {
+                bits: Rc::new(bits),
+                bit_off: 0,
+                bit_len,
+            },
+            words,
+        )
     }
+
+    /// O(1) view onto an existing bit buffer (spec §7.4 sub-slices).
+    pub fn alloc_bit_array_view(
+        &mut self,
+        bits: Rc<Vec<u8>>,
+        bit_off: u64,
+        bit_len: u64,
+    ) -> HeapPtr {
+        self.push(
+            Object::BitArray {
+                bits,
+                bit_off,
+                bit_len,
+            },
+            3,
+        )
+    }
+
+    pub fn bit_array_rc(&self, p: HeapPtr) -> Option<Rc<Vec<u8>>> {
+        match self.get(p) {
+            Object::BitArray { bits, .. } => Some(Rc::clone(bits)),
+            _ => None,
+        }
+    }
+
+    /// Full backing buffer (may include bits before `bit_off`).
     pub fn bit_array_bits(&self, p: HeapPtr) -> &[u8] {
         match self.get(p) {
-            Object::BitArray { bits, .. } => bits,
+            Object::BitArray { bits, .. } => bits.as_slice(),
             _ => &[],
         }
     }
+
+    pub fn bit_array_off(&self, p: HeapPtr) -> u64 {
+        match self.get(p) {
+            Object::BitArray { bit_off, .. } => *bit_off,
+            _ => 0,
+        }
+    }
+
     pub fn bit_array_len(&self, p: HeapPtr) -> u64 {
         match self.get(p) {
             Object::BitArray { bit_len, .. } => *bit_len,

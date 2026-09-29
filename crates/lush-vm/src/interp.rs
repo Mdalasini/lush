@@ -99,6 +99,11 @@ impl Vm {
         }
     }
 
+    /// Cumulative heap words charged since VM creation (for work-counter tests).
+    pub fn heap_words(&self) -> u64 {
+        self.heap.words_allocated
+    }
+
     pub fn run_slice(&mut self, quantum: u64) -> SliceResult {
         if let Some(status) = self.done {
             return SliceResult::Done(self.result(status));
@@ -248,19 +253,31 @@ impl Vm {
                 self.set_reg(fi, dst, Value::from_bool(!r));
             }
             Op::Lt { dst, a, b } => {
-                let r = self.cmp_int(self.reg(fi, a), self.reg(fi, b), |x, y| x < y)?;
+                let r =
+                    self.cmp_num(self.reg(fi, a), self.reg(fi, b), |x, y| x < y, |x, y| x < y)?;
                 self.set_reg(fi, dst, Value::from_bool(r));
             }
             Op::Le { dst, a, b } => {
-                let r = self.cmp_int(self.reg(fi, a), self.reg(fi, b), |x, y| x <= y)?;
+                let r = self.cmp_num(
+                    self.reg(fi, a),
+                    self.reg(fi, b),
+                    |x, y| x <= y,
+                    |x, y| x <= y,
+                )?;
                 self.set_reg(fi, dst, Value::from_bool(r));
             }
             Op::Gt { dst, a, b } => {
-                let r = self.cmp_int(self.reg(fi, a), self.reg(fi, b), |x, y| x > y)?;
+                let r =
+                    self.cmp_num(self.reg(fi, a), self.reg(fi, b), |x, y| x > y, |x, y| x > y)?;
                 self.set_reg(fi, dst, Value::from_bool(r));
             }
             Op::Ge { dst, a, b } => {
-                let r = self.cmp_int(self.reg(fi, a), self.reg(fi, b), |x, y| x >= y)?;
+                let r = self.cmp_num(
+                    self.reg(fi, a),
+                    self.reg(fi, b),
+                    |x, y| x >= y,
+                    |x, y| x >= y,
+                )?;
                 self.set_reg(fi, dst, Value::from_bool(r));
             }
             Op::Jump { target } => {
@@ -412,20 +429,23 @@ impl Vm {
                 signed,
                 little,
             } => {
-                let taken = bitarray::cursor_from_value(&self.heap, self.reg(fi, src)).and_then(
-                    |mut cur| {
-                        let n = cur.take_int(size, signed, little)?;
-                        let rest_buf = cur.take_rest(false)?;
-                        Some((n, rest_buf))
-                    },
-                );
-                if let Some((n, rest_buf)) = taken {
-                    charge += (size as u64).div_ceil(8);
-                    let iv = Value::int(&mut self.heap, n);
-                    let p = self.heap.alloc_bit_array(rest_buf.bytes, rest_buf.bit_len);
-                    self.set_reg(fi, value, iv);
-                    self.set_reg(fi, rest, Value::from_ptr(p));
-                    self.set_reg(fi, ok, Value::from_bool(true));
+                let src_v = self.reg(fi, src);
+                let taken = bitarray::cursor_from_value(&self.heap, src_v).and_then(|mut cur| {
+                    let n = cur.take_int(size, signed, little)?;
+                    let (off, len) = cur.rest_view();
+                    Some((n, off, len))
+                });
+                if let Some((n, off, len)) = taken {
+                    if let Some(bits) = src_v.as_ptr().and_then(|p| self.heap.bit_array_rc(p)) {
+                        charge += (size as u64).div_ceil(8);
+                        let iv = Value::int(&mut self.heap, n);
+                        let p = self.heap.alloc_bit_array_view(bits, off, len);
+                        self.set_reg(fi, value, iv);
+                        self.set_reg(fi, rest, Value::from_ptr(p));
+                        self.set_reg(fi, ok, Value::from_bool(true));
+                    } else {
+                        self.set_reg(fi, ok, Value::from_bool(false));
+                    }
                 } else {
                     self.set_reg(fi, ok, Value::from_bool(false));
                 }
@@ -442,19 +462,24 @@ impl Vm {
                     }
                     _ => None,
                 };
+                let src_v = self.reg(fi, src);
                 let taken = want.and_then(|want| {
-                    let mut cur = bitarray::cursor_from_value(&self.heap, self.reg(fi, src))?;
+                    let mut cur = bitarray::cursor_from_value(&self.heap, src_v)?;
                     if !cur.take_bytes_prefix(&want) {
                         return None;
                     }
-                    let rest_buf = cur.take_rest(false)?;
-                    Some((want.len(), rest_buf))
+                    let (off, len) = cur.rest_view();
+                    Some((want.len(), off, len))
                 });
-                if let Some((n_bytes, rest_buf)) = taken {
-                    charge += (n_bytes as u64).div_ceil(8);
-                    let p = self.heap.alloc_bit_array(rest_buf.bytes, rest_buf.bit_len);
-                    self.set_reg(fi, rest, Value::from_ptr(p));
-                    self.set_reg(fi, ok, Value::from_bool(true));
+                if let Some((n_bytes, off, len)) = taken {
+                    if let Some(bits) = src_v.as_ptr().and_then(|p| self.heap.bit_array_rc(p)) {
+                        charge += (n_bytes as u64).div_ceil(8);
+                        let p = self.heap.alloc_bit_array_view(bits, off, len);
+                        self.set_reg(fi, rest, Value::from_ptr(p));
+                        self.set_reg(fi, ok, Value::from_bool(true));
+                    } else {
+                        self.set_reg(fi, ok, Value::from_bool(false));
+                    }
                 } else {
                     self.set_reg(fi, ok, Value::from_bool(false));
                 }
@@ -465,13 +490,24 @@ impl Vm {
                 src,
                 require_byte_aligned,
             } => {
-                let taken = bitarray::cursor_from_value(&self.heap, self.reg(fi, src))
-                    .and_then(|cur| cur.take_rest(require_byte_aligned));
-                if let Some(buf) = taken {
-                    charge += buf.bytes.len() as u64 / 8 + 1;
-                    let p = self.heap.alloc_bit_array(buf.bytes, buf.bit_len);
-                    self.set_reg(fi, value, Value::from_ptr(p));
-                    self.set_reg(fi, ok, Value::from_bool(true));
+                let src_v = self.reg(fi, src);
+                let taken = bitarray::cursor_from_value(&self.heap, src_v).and_then(|cur| {
+                    if !cur.rest_aligned(require_byte_aligned) {
+                        return None;
+                    }
+                    let (off, len) = cur.rest_view();
+                    Some((off, len))
+                });
+                if let Some((off, len)) = taken {
+                    if let Some(bits) = src_v.as_ptr().and_then(|p| self.heap.bit_array_rc(p)) {
+                        // View object only — O(1) words, not a full buffer copy.
+                        charge += 1;
+                        let p = self.heap.alloc_bit_array_view(bits, off, len);
+                        self.set_reg(fi, value, Value::from_ptr(p));
+                        self.set_reg(fi, ok, Value::from_bool(true));
+                    } else {
+                        self.set_reg(fi, ok, Value::from_bool(false));
+                    }
                 } else {
                     self.set_reg(fi, ok, Value::from_bool(false));
                 }
@@ -482,6 +518,34 @@ impl Vm {
                     None => false,
                 };
                 self.set_reg(fi, dst, Value::from_bool(empty));
+            }
+            Op::StringTakePrefix {
+                ok,
+                rest,
+                src,
+                expected,
+            } => {
+                let want = match self.reg(fi, expected).as_ptr() {
+                    Some(p) if self.heap.kind(p) == ObjectKind::String => {
+                        Some(self.heap.string_bytes(p).to_vec())
+                    }
+                    _ => None,
+                };
+                let src_bytes = match self.reg(fi, src).as_ptr() {
+                    Some(p) if self.heap.kind(p) == ObjectKind::String => {
+                        Some(self.heap.string_bytes(p).to_vec())
+                    }
+                    _ => None,
+                };
+                match (want, src_bytes) {
+                    (Some(want), Some(src_bytes)) if src_bytes.starts_with(&want) => {
+                        charge += want.len() as u64 / 8 + 1;
+                        let p = self.heap.alloc_string(&src_bytes[want.len()..]);
+                        self.set_reg(fi, rest, Value::from_ptr(p));
+                        self.set_reg(fi, ok, Value::from_bool(true));
+                    }
+                    _ => self.set_reg(fi, ok, Value::from_bool(false)),
+                }
             }
         }
 
@@ -677,10 +741,20 @@ impl Vm {
         Err("numeric operation on incompatible values".into())
     }
 
-    fn cmp_int(&self, a: Value, b: Value, op: fn(i64, i64) -> bool) -> Result<bool, String> {
-        let x = a.as_int(&self.heap).ok_or("cmp expects Int")?;
-        let y = b.as_int(&self.heap).ok_or("cmp expects Int")?;
-        Ok(op(x, y))
+    fn cmp_num(
+        &self,
+        a: Value,
+        b: Value,
+        int_op: fn(i64, i64) -> bool,
+        float_op: fn(f64, f64) -> bool,
+    ) -> Result<bool, String> {
+        if let (Some(x), Some(y)) = (a.as_int(&self.heap), b.as_int(&self.heap)) {
+            return Ok(int_op(x, y));
+        }
+        if let (Some(x), Some(y)) = (a.as_float(&self.heap), b.as_float(&self.heap)) {
+            return Ok(float_op(x, y));
+        }
+        Err("cmp expects Int or Float".into())
     }
 
     fn eq_values(&self, a: Value, b: Value, charge: &mut u64) -> Result<bool, String> {
