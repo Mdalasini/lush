@@ -1565,6 +1565,8 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 }
                 let mut body_jumps = Vec::new();
                 for (ri, row) in clause.patterns.iter().enumerate() {
+                    // Compile-time scopes are a linear stack (not runtime control
+                    // flow): one push must pair with exactly one pop per row.
                     self.push_scope();
                     let mut row_fail = Vec::new();
                     for (pat, scrut) in row.patterns.iter().zip(scruts.iter()) {
@@ -1584,13 +1586,12 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                             self.emit(Op::Move { dst, src }, row.span);
                         }
                     }
-                    // Success: pop the row scope, then join the body.
                     self.pop_scope();
                     let to_body = self.code.len();
                     self.emit(Op::Jump { target: 0 }, span);
                     body_jumps.push(to_body);
 
-                    // Failure: row scope is still active (success pop was skipped).
+                    // Runtime failures skip the Move/Jump above and land here.
                     let fail_pc = self.code.len() as u32;
                     for j in row_fail {
                         match &mut self.code[j] {
@@ -1599,7 +1600,6 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                             _ => {}
                         }
                     }
-                    self.pop_scope();
                     if ri + 1 == clause.patterns.len() {
                         let jmp = self.code.len();
                         self.emit(Op::Jump { target: 0 }, span);

@@ -38,6 +38,55 @@ pub fn tuple_alt(p) {
   };
 }
 
+pub fn outer_let(r) {
+  let k = 100;
+  case r {
+    Ok(v) | Error(v) -> v + k;
+  };
+}
+
+pub fn bind_result(r) {
+  let s = case r {
+    Ok(v) | Error(v) -> v;
+  };
+  s * 2;
+}
+
+pub fn case_then_outer(n) {
+  let k = 7;
+  let s = case n {
+    1 | 2 -> 10;
+    _ -> 20;
+  };
+  s + k;
+}
+
+pub fn body_uses_outer(n) {
+  let k = 7;
+  case n {
+    1 | 2 | 3 -> k;
+    _ -> 0;
+  };
+}
+
+pub fn many_locals(n) {
+  let a = 1;
+  let b = 2;
+  let s = case n {
+    1 | 2 -> a;
+    3 | 4 -> b;
+    _ -> 0;
+  };
+  s + a + b;
+}
+
+pub fn triple_bind(p) {
+  case p {
+    #(v, 0) | #(0, v) | #(v, 1) -> v;
+    _ -> -1;
+  };
+}
+
 pub fn main() {
   io.println(int.to_string(ints(0)));
   io.println(int.to_string(ints(1)));
@@ -61,5 +110,23 @@ pub fn main() {
   io.println(int.to_string(tuple_alt(#(0, 7))));
   io.println(int.to_string(tuple_alt(#(8, 0))));
   io.println(int.to_string(tuple_alt(#(3, 4))));
+  io.println(int.to_string(outer_let(Ok(1))));
+  io.println(int.to_string(bind_result(Ok(21))));
+  io.println(int.to_string(case_then_outer(1)));
+  io.println(int.to_string(case_then_outer(9)));
+  io.println(int.to_string(body_uses_outer(2)));
+  io.println(int.to_string(many_locals(1)));
+  io.println(int.to_string(many_locals(3)));
+  io.println(int.to_string(triple_bind(#(5, 0))));
+  io.println(int.to_string(triple_bind(#(0, 6))));
+  io.println(int.to_string(triple_bind(#(7, 1))));
+  let a = 1;
+  let b = 2;
+  let c = 3;
+  let s = case c {
+    1 | 2 | 3 -> a + b;
+    _ -> 0;
+  };
+  io.println(int.to_string(s + a + b + c));
   Nil;
 }
