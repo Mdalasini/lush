@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/lush-syntax",
     "crates/lush-types",
+    "crates/lush-ir",
+    "crates/lush-vm",
     "crates/lush-test-support",
 ]
 

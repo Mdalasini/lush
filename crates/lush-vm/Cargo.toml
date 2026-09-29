@@ -1,0 +1,10 @@
+[package]
+name = "lush-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single-process bytecode interpreter for Lush"
+
+[dependencies]
+lush-ir = { path = "../lush-ir" }
+lush-syntax = { workspace = true }

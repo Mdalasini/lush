@@ -94,6 +94,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "lush-ir"
+version = "0.1.0"
+dependencies = [
+ "lush-syntax",
+ "lush-types",
+]
+
+[[package]]
 name = "lush-syntax"
 version = "0.1.0"
 dependencies = [
@@ -117,6 +125,14 @@ dependencies = [
  "insta",
  "lush-syntax",
  "lush-test-support",
+]
+
+[[package]]
+name = "lush-vm"
+version = "0.1.0"
+dependencies = [
+ "lush-ir",
+ "lush-syntax",
 ]
 
 [[package]]

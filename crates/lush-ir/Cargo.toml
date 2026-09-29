@@ -1,0 +1,10 @@
+[package]
+name = "lush-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core IR, bytecode, verification, and compilation for Lush"
+
+[dependencies]
+lush-syntax = { workspace = true }
+lush-types = { path = "../lush-types" }
