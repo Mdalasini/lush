@@ -499,43 +499,38 @@ fn spec_complete_modules_typecheck() {
 
 #[test]
 fn work_counters_let_doubling() {
-    // Let-doubling must stay linear in the DAG (Rc-shared types).
-    // Deep nesting is iterative in the type DAG but zonk still recurses on
-    // spine depth, so run under a larger stack.
-    let handle = std::thread::Builder::new()
-        .name("let-doubling".into())
-        .stack_size(32 * 1024 * 1024)
-        .spawn(|| {
-            for n in [10usize, 100, 500, 2000] {
-                let mut lets = String::from("  let x0 = 1;\n");
-                for i in 1..n {
-                    lets.push_str(&format!("  let x{i} = #(x{}, x{});\n", i - 1, i - 1));
-                }
-                lets.push_str("  Nil;\n");
-                let src = format!("pub fn main() -> Nil {{\n{lets}}}\n");
-                let result = check_source("double", &src, true);
-                assert!(
-                    ok(&result.diagnostics),
-                    "n={n}: {:?}",
-                    result
-                        .diagnostics
-                        .iter()
-                        .map(|d| format!("{}:{}", d.code, d.message))
-                        .collect::<Vec<_>>()
-                );
-                // Walks over a shared spine of length n cost O(n) per generalise in
-                // the worst case (sum ≈ n²/2); the important bound is polynomial,
-                // not the exponential of an unshared tree.
-                assert!(
-                    result.work < (n as u64) * (n as u64),
-                    "n={n}: work={} exceeds n²={}",
-                    result.work,
-                    (n as u64) * (n as u64)
-                );
-            }
-        })
-        .expect("spawn let-doubling thread");
-    handle.join().expect("let-doubling thread panicked");
+    // Let-doubling must stay near-linear: closed-node caching makes each
+    // generalise O(1) on a shared ground DAG (issue §11(a)).
+    for n in [10usize, 100, 500, 2000, 4000] {
+        let mut lets = String::from("  let x0 = 1;\n");
+        for i in 1..n {
+            lets.push_str(&format!("  let x{i} = #(x{}, x{});\n", i - 1, i - 1));
+        }
+        lets.push_str("  Nil;\n");
+        let src = format!("pub fn main() -> Nil {{\n{lets}}}\n");
+        let t0 = std::time::Instant::now();
+        let result = check_source("double", &src, true);
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            ok(&result.diagnostics),
+            "n={n}: {:?}",
+            result
+                .diagnostics
+                .iter()
+                .map(|d| format!("{}:{}", d.code, d.message))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            result.work < 100 * n as u64,
+            "n={n}: work={} exceeds 100*n={}",
+            result.work,
+            100 * n
+        );
+        assert!(
+            ms < 0.05 * n as f64 + 500.0,
+            "n={n}: {ms:.1}ms looks super-linear (closed-cache regression?)"
+        );
+    }
 }
 
 #[test]

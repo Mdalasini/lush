@@ -54,10 +54,15 @@ impl<'a> InferCtx<'a> {
     }
     pub fn pop_scope(&mut self) {
         self.env.pop();
-        self.shared_env.pop();
+        if let Some(scope) = self.shared_env.pop() {
+            for rc in scope.values() {
+                self.store.closed.remove(&Rc::as_ptr(rc));
+            }
+        }
     }
     pub fn define_local(&mut self, name: String, scheme: Scheme) {
         let shared = Rc::new(scheme.body.clone());
+        self.store.mark_closed_rc(&shared);
         if let Some(scope) = self.env.last_mut() {
             scope.insert(name.clone(), scheme);
         }
@@ -273,7 +278,7 @@ pub fn infer_module(
         ctx.sink.error(
             codes::E1305_TOO_DEEP,
             "type checking exceeded maximum nesting depth",
-            Span::default(),
+            ctx.store.too_deep_span,
             Some("simplify nested types or expressions".into()),
         );
     }
@@ -1759,6 +1764,7 @@ fn subst_params_store(store: &TypeStore, ty: &Type, params: &[String], args: &[T
 }
 
 pub fn infer_expr(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
+    ctx.store.hint_span = expr.span;
     (*infer_expr_shared(ctx, expr)).clone()
 }
 

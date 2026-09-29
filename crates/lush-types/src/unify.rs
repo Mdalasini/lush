@@ -314,7 +314,7 @@ fn apply_subst_rc(
     // Bound native recursion; large Mairson spines hit this and become E1305.
     // Let-doubling uses monomorphic schemes and does not instantiate deep DAGs.
     if depth > MAX_DEPTH || memo.len() > 32_768 {
-        store.too_deep = true;
+        store.note_too_deep();
         return Rc::new(Type::Error);
     }
     let ptr = Rc::as_ptr(ty);
@@ -425,6 +425,12 @@ pub fn scheme_has_escaping_vars(store: &mut TypeStore, scheme: &Scheme) -> bool 
 
 /// Generalise type variables with level > current_level.
 pub fn generalise(store: &mut TypeStore, ty: &Type, env_level: u32, expansive: bool) -> Scheme {
+    // Closed types (no free unification vars) skip zonk/free_vars. Let-doubling
+    // builds these inductively from shared ground nodes, so each binding is O(1).
+    if store.type_is_closed(ty) {
+        store.work = store.work.saturating_add(1);
+        return Scheme::mono(ty.clone());
+    }
     let z = store.zonk(ty);
     if expansive {
         return Scheme::mono(z);

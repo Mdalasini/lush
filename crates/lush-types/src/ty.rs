@@ -8,6 +8,8 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use lush_syntax::span::Span;
+
 use crate::limits::{MAX_PRINT_DEPTH, MAX_PRINT_NODES};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -216,11 +218,73 @@ pub struct TypeStore {
     /// Set when a type walk hits [`crate::limits::MAX_DEPTH`]; the checker
     /// emits E1305 once and continues with `Type::Error` rather than aborting.
     pub too_deep: bool,
+    /// Best-effort span for the expression that first tripped [`Self::too_deep`].
+    pub too_deep_span: Span,
+    /// Shared `Rc<Type>` nodes known to contain no free unification variables.
+    /// Cleared when the owning scope is popped (pointers must not outlive the `Rc`).
+    pub closed: HashSet<*const Type>,
+    /// Hint span copied into [`Self::too_deep_span`] when a walk trips the budget.
+    pub hint_span: Span,
 }
 
 impl TypeStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record that a type walk exceeded its budget, remembering `hint_span` once.
+    pub fn note_too_deep(&mut self) {
+        if !self.too_deep {
+            self.too_deep = true;
+            self.too_deep_span = self.hint_span;
+        }
+    }
+
+    /// Ground types and shared nodes previously marked closed (no free `Var`s).
+    pub fn rc_is_closed(&self, rc: &Rc<Type>) -> bool {
+        match rc.as_ref() {
+            Type::Int
+            | Type::Float
+            | Type::String
+            | Type::Bool
+            | Type::Nil
+            | Type::BitArray
+            | Type::Error
+            | Type::Rigid(_) => true,
+            _ => self.closed.contains(&Rc::as_ptr(rc)),
+        }
+    }
+
+    /// O(arity) closedness check: primitives, or compounds whose child `Rc`s are closed.
+    /// Maintained inductively when locals are bound into [`Self::closed`].
+    pub fn type_is_closed(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Int
+            | Type::Float
+            | Type::String
+            | Type::Bool
+            | Type::Nil
+            | Type::BitArray
+            | Type::Error
+            | Type::Rigid(_) => true,
+            Type::Var(id) => self
+                .vars
+                .get(id)
+                .and_then(|i| i.link.as_ref())
+                .is_some_and(|link| self.rc_is_closed(link)),
+            Type::List(t) => self.rc_is_closed(t),
+            Type::Tuple(ts) => ts.iter().all(|t| self.rc_is_closed(t)),
+            Type::Fun { params, ret } => {
+                params.iter().all(|t| self.rc_is_closed(t)) && self.rc_is_closed(ret)
+            }
+            Type::App { args, .. } => args.iter().all(|t| self.rc_is_closed(t)),
+        }
+    }
+
+    pub fn mark_closed_rc(&mut self, rc: &Rc<Type>) {
+        if self.type_is_closed(rc.as_ref()) {
+            self.closed.insert(Rc::as_ptr(rc));
+        }
     }
 
     pub fn fresh_var(&mut self, level: u32) -> Type {
@@ -249,6 +313,12 @@ impl TypeStore {
     }
 
     pub fn zonk(&mut self, ty: &Type) -> Type {
+        // Only skip the walk for types with no vars *and* no links to follow.
+        // A linked `Var` is "closed" via its target but zonk must still unwrap it.
+        if !matches!(ty, Type::Var(_)) && self.type_is_closed(ty) {
+            self.work = self.work.saturating_add(1);
+            return ty.clone();
+        }
         let mut memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
         (*self.zonk_rc(&Rc::new(ty.clone()), &mut memo)).clone()
     }
@@ -286,11 +356,12 @@ impl TypeStore {
                         continue;
                     }
                     if entered.len() > MAX_ZONK_NODES {
-                        self.too_deep = true;
+                        self.note_too_deep();
                         let err = Rc::new(Type::Error);
                         memo.insert(ptr, err.clone());
                         return err;
                     }
+                    self.work = self.work.saturating_add(1);
                     stack.push(Frame::Build(ty.clone()));
                     match ty.as_ref() {
                         Type::Var(id) => {
@@ -417,6 +488,10 @@ impl TypeStore {
     }
 
     pub fn free_vars(&mut self, ty: &Type, out: &mut BTreeSet<TvId>) {
+        if self.type_is_closed(ty) {
+            self.work = self.work.saturating_add(1);
+            return;
+        }
         let mut visited: HashSet<*const Type> = HashSet::new();
         let mut stack: Vec<Rc<Type>> = vec![Rc::new(ty.clone())];
         while let Some(ty) = stack.pop() {
@@ -424,6 +499,7 @@ impl TypeStore {
             if !visited.insert(ptr) {
                 continue;
             }
+            self.work = self.work.saturating_add(1);
             match ty.as_ref() {
                 Type::Var(id) => {
                     if let Some(info) = self.vars.get(id) {
