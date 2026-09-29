@@ -2270,6 +2270,13 @@ fn float_op_hint(op: BinOp) -> &'static str {
     }
 }
 
+fn record_callee_ty(ctx: &mut InferCtx<'_>, callee: &Expr, ty: &Type) {
+    if !callee.id.is_none() {
+        ctx.typed.begin_expr(callee.id, callee.span);
+        ctx.typed.finish_expr(callee.id, ty.clone());
+    }
+}
+
 fn infer_call(ctx: &mut InferCtx<'_>, callee: &Expr, args: &[Arg], span: Span) -> Type {
     // Resolve labelled calls only for named functions/ctors
     let (fty, labels) = match &callee.kind {
@@ -2277,17 +2284,20 @@ fn infer_call(ctx: &mut InferCtx<'_>, callee: &Expr, args: &[Arg], span: Span) -
             if let Some((scheme, labels, ctor_of)) = ctx.lookup_value(&n.text) {
                 if ctor_of.is_some() {
                     let inst = unify::instantiate(ctx.store, &scheme, ctx.level);
+                    record_callee_ty(ctx, callee, &inst);
                     return finish_call_ctor(ctx, inst, &labels, args, span);
                 }
                 if ctx.scc.contains(&n.text) {
                     // Monomorphic recursive reference — do not instantiate.
                     let inst = ctx.store.zonk(&scheme.body);
+                    record_callee_ty(ctx, callee, &inst);
                     ctx.scc_rec_call = true;
                     let ret = finish_call(ctx, inst, &labels, args, span);
                     ctx.scc_rec_call = false;
                     return ret;
                 }
                 let inst = unify::instantiate(ctx.store, &scheme, ctx.level);
+                record_callee_ty(ctx, callee, &inst);
                 (inst, labels)
             } else {
                 (infer_expr(ctx, callee), vec![])

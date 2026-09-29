@@ -132,18 +132,29 @@ impl TypedModule {
 
     /// True when every stored type is fully zonked (no unresolved vars).
     pub fn is_zonked(&self) -> bool {
-        self.exprs.values().all(|e| e.ty.is_zonked())
-            && self.patterns.values().all(|p| p.ty.is_zonked())
+        self.check_zonked().is_ok()
     }
 
-    /// Assert every stored type is fully zonked (no unresolved vars).
-    pub fn assert_zonked(&self) {
-        assert!(
-            self.is_zonked(),
-            "typed module contains unzonked types (exprs={}, patterns={})",
-            self.exprs.len(),
-            self.patterns.len()
-        );
+    /// Ok when every stored type is fully zonked; otherwise an error describing
+    /// the first unzonked site.
+    pub fn check_zonked(&self) -> Result<(), String> {
+        for e in self.exprs.values() {
+            if !e.ty.is_zonked() {
+                return Err(format!(
+                    "unzonked expr type at {:?} (id={:?}): {:?}",
+                    e.span, e.id, e.ty
+                ));
+            }
+        }
+        for p in self.patterns.values() {
+            if !p.ty.is_zonked() {
+                return Err(format!(
+                    "unzonked pattern type at {:?} (id={:?}): {:?}",
+                    p.span, p.id, p.ty
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

@@ -482,10 +482,9 @@ fn typed_module_exprs_are_zonked() {
             .typed
             .as_ref()
             .expect("positive fixture should produce a typed module");
-        assert!(
-            typed.is_zonked(),
-            "typed module for `{name}` has unzonked types"
-        );
+        typed
+            .check_zonked()
+            .unwrap_or_else(|e| panic!("typed module for `{name}`: {e}"));
         assert!(
             !typed.exprs.is_empty() || result.module.items.is_empty(),
             "typed module for `{name}` recorded no expression nodes"
@@ -504,57 +503,195 @@ fn typed_module_exprs_are_zonked() {
 
 #[test]
 fn node_ids_are_dense_and_keyed_on_ast() {
+    // Multi-fn module with calls, case, pipes (desugared), and helpers out of
+    // dependency order so numbering cannot rely on visit-order coincidence.
     let src = r#"
 pub fn main() -> Nil {
-  let x = 1;
-  let y = x + 2;
-  Nil;
+  let n = helper(1) |> double;
+  case n {
+    0 -> Nil;
+    x -> {
+      let #(a, b) = #(x, x + 1);
+      let _ = a;
+      let _ = b;
+      Nil;
+    };
+  };
+}
+
+fn double(n: Int) -> Int {
+  n + n;
+}
+
+fn helper(n: Int) -> Int {
+  n;
 }
 "#;
     let result = check_fixture("node_ids", src, true);
     assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
     let typed = result.typed.as_ref().expect("typed module");
-    // Every numbered AST expression appears as a key in the typed table.
-    fn walk_expr(e: &lush_syntax::ast::Expr, typed: &lush_types::typed::TypedModule) {
+    use lush_syntax::ast::*;
+    use std::collections::BTreeSet;
+
+    let mut seen_expr: BTreeSet<NodeId> = BTreeSet::new();
+    let mut seen_pat: BTreeSet<NodeId> = BTreeSet::new();
+
+    fn walk_pat(p: &Pattern, typed: &lush_types::typed::TypedModule, seen: &mut BTreeSet<NodeId>) {
+        assert!(!p.id.is_none(), "AST pattern missing NodeId");
+        assert!(seen.insert(p.id), "duplicate pattern NodeId {:?}", p.id);
+        assert!(
+            typed.pattern(p.id).is_some(),
+            "typed table missing pattern NodeId {:?}",
+            p.id
+        );
+        match &p.kind {
+            PatternKind::Constructor {
+                args: Some(args), ..
+            } => {
+                for a in args {
+                    if let Some(inner) = &a.pattern {
+                        walk_pat(inner, typed, seen);
+                    }
+                }
+            }
+            PatternKind::Tuple(ps) => {
+                for inner in ps {
+                    walk_pat(inner, typed, seen);
+                }
+            }
+            PatternKind::List { items, spread } => {
+                for inner in items {
+                    walk_pat(inner, typed, seen);
+                }
+                if let Some(s) = spread {
+                    walk_pat(s, typed, seen);
+                }
+            }
+            PatternKind::Alias { pattern, .. }
+            | PatternKind::StringPrefix { rest: pattern, .. } => {
+                walk_pat(pattern, typed, seen);
+            }
+            PatternKind::BitArray(segs) => {
+                for s in segs {
+                    walk_pat(&s.pattern, typed, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_expr(
+        e: &Expr,
+        typed: &lush_types::typed::TypedModule,
+        seen_e: &mut BTreeSet<NodeId>,
+        seen_p: &mut BTreeSet<NodeId>,
+    ) {
         assert!(!e.id.is_none(), "AST expr missing NodeId");
+        assert!(seen_e.insert(e.id), "duplicate expr NodeId {:?}", e.id);
         assert!(
             typed.expr(e.id).is_some(),
             "typed table missing AST NodeId {:?}",
             e.id
         );
         match &e.kind {
-            lush_syntax::ast::ExprKind::Binary { left, right, .. } => {
-                walk_expr(left, typed);
-                walk_expr(right, typed);
+            ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
+                walk_expr(left, typed, seen_e, seen_p);
+                walk_expr(right, typed, seen_e, seen_p);
             }
-            lush_syntax::ast::ExprKind::Paren(inner)
-            | lush_syntax::ast::ExprKind::Unary { expr: inner, .. } => {
-                walk_expr(inner, typed);
+            ExprKind::Paren(inner)
+            | ExprKind::Unary { expr: inner, .. }
+            | ExprKind::Echo(inner)
+            | ExprKind::Field { base: inner, .. }
+            | ExprKind::Assert { expr: inner, .. } => {
+                walk_expr(inner, typed, seen_e, seen_p);
             }
-            lush_syntax::ast::ExprKind::Block(b) => {
-                for s in &b.statements {
-                    if let lush_syntax::ast::Statement::Expr(ex) = s {
-                        walk_expr(ex, typed);
+            ExprKind::Call { callee, args } => {
+                walk_expr(callee, typed, seen_e, seen_p);
+                for a in args {
+                    if let ArgValue::Expr(inner) = &a.value {
+                        walk_expr(inner, typed, seen_e, seen_p);
                     }
-                    if let lush_syntax::ast::Statement::Let(l) = s {
-                        walk_expr(&l.value, typed);
+                }
+            }
+            ExprKind::Tuple(xs) => {
+                for x in xs {
+                    walk_expr(x, typed, seen_e, seen_p);
+                }
+            }
+            ExprKind::List { items, spread } => {
+                for x in items {
+                    walk_expr(x, typed, seen_e, seen_p);
+                }
+                if let Some(s) = spread {
+                    walk_expr(s, typed, seen_e, seen_p);
+                }
+            }
+            ExprKind::Block(b) => walk_block(b, typed, seen_e, seen_p),
+            ExprKind::Fn { body, .. } => walk_block(body, typed, seen_e, seen_p),
+            ExprKind::Case { subjects, clauses } => {
+                for s in subjects {
+                    walk_expr(s, typed, seen_e, seen_p);
+                }
+                for c in clauses {
+                    for row in &c.patterns {
+                        for p in &row.patterns {
+                            walk_pat(p, typed, seen_p);
+                        }
                     }
+                    if let Some(g) = &c.guard {
+                        walk_expr(g, typed, seen_e, seen_p);
+                    }
+                    walk_expr(&c.body, typed, seen_e, seen_p);
+                }
+            }
+            ExprKind::RecordUpdate { base, fields, .. } => {
+                walk_expr(base, typed, seen_e, seen_p);
+                for (_, v) in fields {
+                    walk_expr(v, typed, seen_e, seen_p);
+                }
+            }
+            ExprKind::BitArray(segs) => {
+                for s in segs {
+                    walk_expr(&s.value, typed, seen_e, seen_p);
                 }
             }
             _ => {}
         }
     }
-    for item in &result.module.items {
-        if let lush_syntax::ast::ModuleItem::Fn(f) = item {
-            for s in &f.body.statements {
-                match s {
-                    lush_syntax::ast::Statement::Expr(e) => walk_expr(e, typed),
-                    lush_syntax::ast::Statement::Let(l) => walk_expr(&l.value, typed),
-                    _ => {}
+
+    fn walk_block(
+        b: &Block,
+        typed: &lush_types::typed::TypedModule,
+        seen_e: &mut BTreeSet<NodeId>,
+        seen_p: &mut BTreeSet<NodeId>,
+    ) {
+        for s in &b.statements {
+            match s {
+                Statement::Expr(e) => walk_expr(e, typed, seen_e, seen_p),
+                Statement::Let(l) => {
+                    walk_pat(&l.pattern, typed, seen_p);
+                    walk_expr(&l.value, typed, seen_e, seen_p);
                 }
+                Statement::Use(u) => {
+                    for p in &u.patterns {
+                        walk_pat(p, typed, seen_p);
+                    }
+                    walk_expr(&u.value, typed, seen_e, seen_p);
+                }
+                Statement::Fn(f) => walk_block(&f.body, typed, seen_e, seen_p),
             }
         }
     }
+
+    for item in &result.module.items {
+        if let ModuleItem::Fn(f) = item {
+            walk_block(&f.body, typed, &mut seen_expr, &mut seen_pat);
+        }
+    }
+    assert!(
+        !seen_expr.is_empty(),
+        "expected numbered expressions in desugared module"
+    );
 }
 
 #[test]
