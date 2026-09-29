@@ -69,7 +69,10 @@ pub fn compile_graph_with_opt(
         if path.starts_with("lush/") {
             continue;
         }
-        typed_modules.push((path, result.typed));
+        let Some(typed) = result.typed else {
+            return Err(diags);
+        };
+        typed_modules.push((path, typed));
     }
     typed_modules.sort_by(|a, b| {
         if a.0 == entry {

@@ -297,19 +297,37 @@ pub fn infer_module(
         );
     }
 
-    ctx.typed.const_values = ctx.const_env.values.clone();
+    ctx.typed.const_values = ctx
+        .const_env
+        .values
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let mut typed = std::mem::take(&mut ctx.typed);
     // Close typed handoff with a shared zonk memo so let-doubling stays linear.
     {
-        let mut types: Vec<Type> = typed.exprs.iter().map(|e| e.ty.clone()).collect();
-        types.extend(typed.patterns.iter().map(|p| p.ty.clone()));
+        let expr_keys: Vec<_> = typed.exprs.keys().copied().collect();
+        let pat_keys: Vec<_> = typed.patterns.keys().copied().collect();
+        let mut types: Vec<Type> = expr_keys
+            .iter()
+            .map(|k| typed.exprs.get(k).unwrap().ty.clone())
+            .collect();
+        types.extend(
+            pat_keys
+                .iter()
+                .map(|k| typed.patterns.get(k).unwrap().ty.clone()),
+        );
         ctx.store.close_types_for_handoff(&mut types);
-        let n = typed.exprs.len();
-        for (i, e) in typed.exprs.iter_mut().enumerate() {
-            e.ty = types[i].clone();
+        let n = expr_keys.len();
+        for (i, k) in expr_keys.iter().enumerate() {
+            if let Some(e) = typed.exprs.get_mut(k) {
+                e.ty = types[i].clone();
+            }
         }
-        for (i, p) in typed.patterns.iter_mut().enumerate() {
-            p.ty = types[n + i].clone();
+        for (i, k) in pat_keys.iter().enumerate() {
+            if let Some(p) = typed.patterns.get_mut(k) {
+                p.ty = types[n + i].clone();
+            }
         }
     }
     let iface = build_interface(path, &mut ctx);
@@ -1373,6 +1391,11 @@ fn is_expansive(e: &Expr) -> bool {
 }
 
 fn infer_pattern(ctx: &mut InferCtx<'_>, pat: &Pattern, expected: &Type, expansive: bool) {
+    let pat_id = pat.id;
+    if !pat_id.is_none() {
+        ctx.typed.begin_pattern(pat_id, pat.span);
+        ctx.typed.finish_pattern(pat_id, expected.clone());
+    }
     match &pat.kind {
         PatternKind::Var(n) => {
             let scheme = unify::generalise(ctx.store, expected, ctx.level, expansive);
@@ -1791,7 +1814,11 @@ pub fn infer_expr(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
 /// Infer an expression, returning a shared type node when the expression is a
 /// monomorphic local variable (enables DAG sharing for `#(x, x)`).
 fn infer_expr_shared(ctx: &mut InferCtx<'_>, expr: &Expr) -> Rc<Type> {
-    let id = ctx.typed.begin_expr(expr.span);
+    debug_assert!(
+        !expr.id.is_none(),
+        "expression missing NodeId; assign_node_ids must run after desugar"
+    );
+    let id = ctx.typed.begin_expr(expr.id, expr.span);
     let ty = match &expr.kind {
         ExprKind::Var(n) => {
             // Mark used / emit errors via the normal path, but reuse the shared node

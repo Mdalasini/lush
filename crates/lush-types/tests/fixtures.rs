@@ -478,11 +478,82 @@ fn typed_module_exprs_are_zonked() {
         if !ok(&result.diagnostics) {
             continue;
         }
-        result.typed.assert_zonked();
+        let typed = result
+            .typed
+            .as_ref()
+            .expect("positive fixture should produce a typed module");
         assert!(
-            !result.typed.exprs.is_empty() || result.module.items.is_empty(),
+            typed.is_zonked(),
+            "typed module for `{name}` has unzonked types"
+        );
+        assert!(
+            !typed.exprs.is_empty() || result.module.items.is_empty(),
             "typed module for `{name}` recorded no expression nodes"
         );
+        for id in typed.exprs.keys() {
+            assert!(!id.is_none(), "typed expr table must not use NodeId::NONE");
+        }
+        for id in typed.patterns.keys() {
+            assert!(
+                !id.is_none(),
+                "typed pattern table must not use NodeId::NONE"
+            );
+        }
+    }
+}
+
+#[test]
+fn node_ids_are_dense_and_keyed_on_ast() {
+    let src = r#"
+pub fn main() -> Nil {
+  let x = 1;
+  let y = x + 2;
+  Nil;
+}
+"#;
+    let result = check_fixture("node_ids", src, true);
+    assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
+    let typed = result.typed.as_ref().expect("typed module");
+    // Every numbered AST expression appears as a key in the typed table.
+    fn walk_expr(e: &lush_syntax::ast::Expr, typed: &lush_types::typed::TypedModule) {
+        assert!(!e.id.is_none(), "AST expr missing NodeId");
+        assert!(
+            typed.expr(e.id).is_some(),
+            "typed table missing AST NodeId {:?}",
+            e.id
+        );
+        match &e.kind {
+            lush_syntax::ast::ExprKind::Binary { left, right, .. } => {
+                walk_expr(left, typed);
+                walk_expr(right, typed);
+            }
+            lush_syntax::ast::ExprKind::Paren(inner)
+            | lush_syntax::ast::ExprKind::Unary { expr: inner, .. } => {
+                walk_expr(inner, typed);
+            }
+            lush_syntax::ast::ExprKind::Block(b) => {
+                for s in &b.statements {
+                    if let lush_syntax::ast::Statement::Expr(ex) = s {
+                        walk_expr(ex, typed);
+                    }
+                    if let lush_syntax::ast::Statement::Let(l) = s {
+                        walk_expr(&l.value, typed);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for item in &result.module.items {
+        if let lush_syntax::ast::ModuleItem::Fn(f) = item {
+            for s in &f.body.statements {
+                match s {
+                    lush_syntax::ast::Statement::Expr(e) => walk_expr(e, typed),
+                    lush_syntax::ast::Statement::Let(l) => walk_expr(&l.value, typed),
+                    _ => {}
+                }
+            }
+        }
     }
 }
 

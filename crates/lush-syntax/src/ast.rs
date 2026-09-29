@@ -8,13 +8,27 @@ use crate::span::Span;
 use crate::token::{FloatLit, IntLit, StringLit};
 
 /// Stable identity for an expression or pattern node, assigned after desugaring
-/// for the typed-AST handoff (§15.3 step 3). Parser-produced nodes use [`NodeId::NONE`].
-/// Excluded from [`PartialEq`] so formatter round-trips stay span/structure based.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// for the typed-AST handoff (§15.3 step 3). Parser-produced nodes use
+/// [`NodeId::NONE`] (`u32::MAX`) so a dense numbering that starts at 0 never
+/// collides with the sentinel. Excluded from [`PartialEq`] so formatter
+/// round-trips stay span/structure based.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u32);
 
+impl Default for NodeId {
+    fn default() -> Self {
+        NodeId::NONE
+    }
+}
+
 impl NodeId {
-    pub const NONE: NodeId = NodeId(0);
+    /// Sentinel for nodes that have not yet been numbered. Never equal to a
+    /// post-desugar id (those are dense starting at 0).
+    pub const NONE: NodeId = NodeId(u32::MAX);
+
+    pub fn is_none(self) -> bool {
+        self == Self::NONE
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

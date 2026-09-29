@@ -1201,7 +1201,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         Some(dst)
     }
     fn field_index(&self, _base: &Expr, name: &str) -> Option<u16> {
-        for info in &self.m.typed.exprs {
+        for info in self.m.typed.exprs.values() {
             if let Some(site) = &info.field {
                 if site.field_name == name {
                     let idxs: Vec<_> = site.indices_by_variant.iter().flatten().copied().collect();

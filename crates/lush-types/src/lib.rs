@@ -12,6 +12,7 @@ pub mod exhaust;
 pub mod infer;
 pub mod interface;
 pub mod limits;
+pub mod node_ids;
 pub mod numeric;
 pub mod resolve;
 pub mod stubs;
@@ -28,20 +29,15 @@ use lush_syntax::span::Span;
 use crate::diag::TypeSink;
 use crate::interface::ModuleInterface;
 use crate::ty::TypeStore;
-use crate::typed::{TypedBuilder, TypedModule};
-
-fn empty_typed(path: &str, module: Module) -> TypedModule {
-    TypedBuilder::new().build(path.to_string(), module, TypeStore::new())
-}
 
 /// Result of checking one module.
 pub struct CheckResult {
     pub interface: ModuleInterface,
     /// Desugared module (captures/pipes/use rewritten).
     pub module: Module,
-    /// Typed-AST handoff for Core IR lowering. Present even when there are
-    /// diagnostics; lowering must not run when any error exists.
-    pub typed: typed::TypedModule,
+    /// Typed-AST handoff for Core IR lowering. `None` on early error exits
+    /// (parse failure, node/def limits, import cycles) where inference never ran.
+    pub typed: Option<typed::TypedModule>,
     pub diagnostics: Vec<Diagnostic>,
     pub work: u64,
 }
@@ -99,7 +95,7 @@ fn check_module_with_budget(
         let module = module.clone();
         return CheckResult {
             interface: ModuleInterface::empty(path),
-            typed: empty_typed(path, module.clone()),
+            typed: None,
             module,
             diagnostics: sink.into_diagnostics(),
             work: 0,
@@ -120,6 +116,8 @@ fn check_module_with_budget(
 
     let mut module = module.clone();
     let gensyms = crate::desugar::desugar_module(&mut module, &mut sink);
+    // Dense NodeIds after desugar so typed tables key by the AST's own ids.
+    let _ = crate::node_ids::assign_node_ids(&mut module);
 
     let mut ctx = resolve::ResolveCtx {
         store: &mut store,
@@ -148,7 +146,7 @@ fn check_module_with_budget(
     let typed = typed_builder.build(path.to_string(), module.clone(), store);
     CheckResult {
         interface,
-        typed,
+        typed: Some(typed),
         module,
         diagnostics: sink.into_diagnostics(),
         work,
@@ -397,7 +395,7 @@ pub fn check_graph(
                 path.clone(),
                 CheckResult {
                     interface: ModuleInterface::empty(path),
-                    typed: empty_typed(path, module.clone()),
+                    typed: None,
                     module,
                     diagnostics: vec![],
                     work: 0,
@@ -439,7 +437,7 @@ pub fn check_graph(
                 path.clone(),
                 CheckResult {
                     interface: ModuleInterface::empty(path),
-                    typed: empty_typed(path, module.clone()),
+                    typed: None,
                     module,
                     diagnostics: vec![diag],
                     work: 0,
@@ -569,7 +567,7 @@ pub fn check_source(path: &str, source: &str, entry: bool) -> CheckResult {
         });
         return CheckResult {
             interface: ModuleInterface::empty(path),
-            typed: empty_typed(path, module.clone()),
+            typed: None,
             module,
             diagnostics: prior,
             work: 0,
@@ -584,7 +582,7 @@ pub fn check_source(path: &str, source: &str, entry: bool) -> CheckResult {
             };
             return CheckResult {
                 interface: ModuleInterface::empty(path),
-                typed: empty_typed(path, module.clone()),
+                typed: None,
                 module,
                 diagnostics: prior,
                 work: 0,

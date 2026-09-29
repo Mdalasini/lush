@@ -1,10 +1,11 @@
 //! Typed-AST handoff for compile step 3 (§15.3).
 //!
-//! Node identities are preorder indices assigned while walking the desugared
-//! module. Inference records side tables in the same visit order; lowering
-//! consumes them through [`TypedCursor`].
+//! After desugaring, [`crate::node_ids::assign_node_ids`] writes dense ids into
+//! every expression and pattern. Inference records side tables keyed by those
+//! AST ids; lowering looks them up with [`TypedModule::expr`] /
+//! [`TypedModule::pattern`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use lush_syntax::ast::Module;
 use lush_syntax::span::Span;
@@ -15,7 +16,7 @@ use crate::ty::{Type, TypeDefId, TypeStore};
 pub use lush_syntax::ast::NodeId;
 
 /// Unique local binding identity within a module.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BindingId(pub u32);
 
 /// Where an identifier use resolves.
@@ -106,56 +107,54 @@ pub struct PatternInfo {
 /// Fully typed module ready for Core IR lowering.
 pub struct TypedModule {
     pub path: String,
-    /// Desugared syntactic module (node ids are preorder indices into the tables).
+    /// Desugared syntactic module (node ids are dense keys into the tables).
     pub module: Module,
     pub store: TypeStore,
-    pub exprs: Vec<ExprInfo>,
-    pub patterns: Vec<PatternInfo>,
-    pub const_values: HashMap<String, ConstValue>,
+    /// Expression facts keyed by the AST node's own [`NodeId`].
+    pub exprs: BTreeMap<NodeId, ExprInfo>,
+    /// Pattern facts keyed by the AST node's own [`NodeId`].
+    pub patterns: BTreeMap<NodeId, PatternInfo>,
+    pub const_values: BTreeMap<String, ConstValue>,
     /// Compiler-generated capture / use names; never shown as user names in traces.
-    pub gensyms: HashSet<String>,
-    /// Local binding names → binding id (for the module's binding table).
-    pub bindings: HashMap<BindingId, String>,
+    pub gensyms: BTreeSet<String>,
+    /// Local binding id → name (deterministic iteration order).
+    pub bindings: BTreeMap<BindingId, String>,
 }
 
 impl TypedModule {
-    pub fn expr(&self, id: NodeId) -> &ExprInfo {
-        &self.exprs[id.0 as usize]
+    pub fn expr(&self, id: NodeId) -> Option<&ExprInfo> {
+        self.exprs.get(&id)
     }
 
-    pub fn pattern(&self, id: NodeId) -> &PatternInfo {
-        &self.patterns[id.0 as usize]
+    pub fn pattern(&self, id: NodeId) -> Option<&PatternInfo> {
+        self.patterns.get(&id)
+    }
+
+    /// True when every stored type is fully zonked (no unresolved vars).
+    pub fn is_zonked(&self) -> bool {
+        self.exprs.values().all(|e| e.ty.is_zonked())
+            && self.patterns.values().all(|p| p.ty.is_zonked())
     }
 
     /// Assert every stored type is fully zonked (no unresolved vars).
     pub fn assert_zonked(&self) {
-        for e in &self.exprs {
-            assert!(
-                e.ty.is_zonked(),
-                "unzonked expr type at {:?}: {:?}",
-                e.span,
-                e.ty
-            );
-        }
-        for p in &self.patterns {
-            assert!(
-                p.ty.is_zonked(),
-                "unzonked pattern type at {:?}: {:?}",
-                p.span,
-                p.ty
-            );
-        }
+        assert!(
+            self.is_zonked(),
+            "typed module contains unzonked types (exprs={}, patterns={})",
+            self.exprs.len(),
+            self.patterns.len()
+        );
     }
 }
 
 /// Builder filled during inference.
 #[derive(Debug, Default)]
 pub struct TypedBuilder {
-    pub exprs: Vec<ExprInfo>,
-    pub patterns: Vec<PatternInfo>,
-    pub const_values: HashMap<String, ConstValue>,
-    pub gensyms: HashSet<String>,
-    pub bindings: HashMap<BindingId, String>,
+    pub exprs: BTreeMap<NodeId, ExprInfo>,
+    pub patterns: BTreeMap<NodeId, PatternInfo>,
+    pub const_values: BTreeMap<String, ConstValue>,
+    pub gensyms: BTreeSet<String>,
+    pub bindings: BTreeMap<BindingId, String>,
     next_binding: u32,
     /// Stack of tail-position flags for the expression being inferred.
     pub tail_stack: Vec<bool>,
@@ -185,77 +184,84 @@ impl TypedBuilder {
         id
     }
 
-    pub fn begin_expr(&mut self, span: Span) -> NodeId {
-        let id = NodeId(self.exprs.len() as u32);
-        self.exprs.push(ExprInfo {
+    /// Record (or refresh) an expression slot using the AST node's own id.
+    pub fn begin_expr(&mut self, id: NodeId, span: Span) -> NodeId {
+        debug_assert!(!id.is_none(), "begin_expr called with NodeId::NONE");
+        self.exprs.insert(
             id,
-            ty: Type::Error,
-            span,
-            resolve: None,
-            call: None,
-            field: None,
-            bit_segments: None,
-            tail: self.in_tail(),
-        });
+            ExprInfo {
+                id,
+                ty: Type::Error,
+                span,
+                resolve: None,
+                call: None,
+                field: None,
+                bit_segments: None,
+                tail: self.in_tail(),
+            },
+        );
         id
     }
 
     pub fn finish_expr(&mut self, id: NodeId, ty: Type) {
-        if let Some(info) = self.exprs.get_mut(id.0 as usize) {
+        if let Some(info) = self.exprs.get_mut(&id) {
             info.ty = ty;
         }
     }
 
     pub fn set_resolve(&mut self, id: NodeId, r: ResolvedRef) {
-        if let Some(info) = self.exprs.get_mut(id.0 as usize) {
+        if let Some(info) = self.exprs.get_mut(&id) {
             info.resolve = Some(r);
         }
     }
 
     pub fn set_call(&mut self, id: NodeId, call: CallInfo) {
-        if let Some(info) = self.exprs.get_mut(id.0 as usize) {
+        if let Some(info) = self.exprs.get_mut(&id) {
             info.call = Some(call);
         }
     }
 
     pub fn set_field(&mut self, id: NodeId, field: FieldSite) {
-        if let Some(info) = self.exprs.get_mut(id.0 as usize) {
+        if let Some(info) = self.exprs.get_mut(&id) {
             info.field = Some(field);
         }
     }
 
     pub fn set_bit_segments(&mut self, id: NodeId, segs: Vec<BitSegmentKind>) {
-        if let Some(info) = self.exprs.get_mut(id.0 as usize) {
+        if let Some(info) = self.exprs.get_mut(&id) {
             info.bit_segments = Some(segs);
         }
     }
 
-    pub fn begin_pattern(&mut self, span: Span) -> NodeId {
-        let id = NodeId(self.patterns.len() as u32);
-        self.patterns.push(PatternInfo {
+    pub fn begin_pattern(&mut self, id: NodeId, span: Span) -> NodeId {
+        debug_assert!(!id.is_none(), "begin_pattern called with NodeId::NONE");
+        self.patterns.insert(
             id,
-            ty: Type::Error,
-            span,
-            resolve: None,
-            bit_segments: None,
-        });
+            PatternInfo {
+                id,
+                ty: Type::Error,
+                span,
+                resolve: None,
+                bit_segments: None,
+            },
+        );
         id
     }
 
     pub fn finish_pattern(&mut self, id: NodeId, ty: Type) {
-        if let Some(info) = self.patterns.get_mut(id.0 as usize) {
+        if let Some(info) = self.patterns.get_mut(&id) {
             info.ty = ty;
         }
     }
 
     pub fn set_pattern_resolve(&mut self, id: NodeId, r: ResolvedRef) {
-        if let Some(info) = self.patterns.get_mut(id.0 as usize) {
+        if let Some(info) = self.patterns.get_mut(&id) {
             info.resolve = Some(r);
         }
     }
 
     pub fn set_pattern_bit_segments(&mut self, id: NodeId, segs: Vec<BitSegmentKind>) {
-        if let Some(info) = self.patterns.get_mut(id.0 as usize) {
+        if let Some(info) = self.patterns.get_mut(&id) {
             info.bit_segments = Some(segs);
         }
     }
@@ -271,44 +277,5 @@ impl TypedBuilder {
             gensyms: self.gensyms,
             bindings: self.bindings,
         }
-    }
-}
-
-/// Cursor that yields [`NodeId`]s in the same preorder used by inference.
-pub struct TypedCursor<'a> {
-    exprs: &'a [ExprInfo],
-    patterns: &'a [PatternInfo],
-    ei: usize,
-    pi: usize,
-}
-
-impl<'a> TypedCursor<'a> {
-    pub fn new(module: &'a TypedModule) -> Self {
-        Self {
-            exprs: &module.exprs,
-            patterns: &module.patterns,
-            ei: 0,
-            pi: 0,
-        }
-    }
-
-    pub fn next_expr(&mut self) -> &'a ExprInfo {
-        let info = &self.exprs[self.ei];
-        self.ei += 1;
-        info
-    }
-
-    pub fn next_pattern(&mut self) -> &'a PatternInfo {
-        let info = &self.patterns[self.pi];
-        self.pi += 1;
-        info
-    }
-
-    pub fn exprs_remaining(&self) -> usize {
-        self.exprs.len().saturating_sub(self.ei)
-    }
-
-    pub fn patterns_remaining(&self) -> usize {
-        self.patterns.len().saturating_sub(self.pi)
     }
 }
