@@ -80,6 +80,90 @@ pub fn main() -> Nil {{
 }
 
 #[test]
+fn pipe_chain_4000_reuses_registers() {
+    let mut stages = String::from("1");
+    for _ in 0..4000 {
+        stages.push_str(" |> id");
+    }
+    let src = format!(
+        r#"
+import lush/io;
+import lush/int;
+
+fn id(n: Int) -> Int {{
+  n;
+}}
+
+pub fn main() -> Nil {{
+  io.println(int.to_string({stages}));
+}}
+"#
+    );
+    let program = compile_sources(&[("main".into(), src)], "main").expect("compile pipe chain");
+    let main = program
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main");
+    assert!(
+        (main.regs as usize) < lush_ir::limits::MAX_REGISTERS,
+        "4000-stage pipe should free dead locals, regs={}",
+        main.regs
+    );
+}
+
+#[test]
+fn sequential_dead_lets_reuse_registers() {
+    let mut lets = String::new();
+    for i in 0..300 {
+        lets.push_str(&format!("  let x{i} = {i};\n  let _ = x{i};\n"));
+    }
+    let src = format!(
+        r#"
+pub fn main() -> Nil {{
+{lets}  Nil;
+}}
+"#
+    );
+    let program = compile_sources(&[("main".into(), src)], "main").expect("compile lets");
+    let main = program
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main");
+    assert!(
+        (main.regs as usize) < 64,
+        "dead sequential lets should reuse regs, got {}",
+        main.regs
+    );
+}
+
+#[test]
+fn e2001_reported_once() {
+    let mut elems = String::new();
+    for i in 0..300 {
+        if i > 0 {
+            elems.push_str(", ");
+        }
+        elems.push_str(&i.to_string());
+    }
+    let src = format!(
+        r#"
+pub fn main() -> Nil {{
+  let _t = #({elems});
+  Nil;
+}}
+"#
+    );
+    let err = compile_sources(&[("main".into(), src)], "main").expect_err("should fail");
+    let n = err
+        .iter()
+        .filter(|d| d.code == codes::E2001_TOO_MANY_REGISTERS)
+        .count();
+    assert_eq!(n, 1, "E2001 should be reported once, got {err:?}");
+}
+
+#[test]
 fn panic_debug_info_uses_real_line_col() {
     let src = r#"
 import lush/io;

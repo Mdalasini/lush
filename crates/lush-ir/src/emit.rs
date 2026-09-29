@@ -36,6 +36,8 @@ struct FnEmitter<'a, 'm> {
     free: Vec<Reg>,
     /// Registers currently holding unnamed temporaries (safe to recycle).
     temps: HashSet<Reg>,
+    /// True after the first `E2001` for this function (avoid duplicate diags).
+    reg_limit_reported: bool,
     code: Vec<Op>,
     lines: Vec<(u32, u32)>,
     env: Vec<HashMap<String, Reg>>,
@@ -92,6 +94,7 @@ pub fn emit_program(
                     regs: f.params.len(),
                     free: Vec::new(),
                     temps: HashSet::new(),
+                    reg_limit_reported: false,
                     code: vec![],
                     lines: vec![],
                     env: vec![HashMap::new()],
@@ -189,11 +192,14 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             return Some(r);
         }
         if self.regs >= MAX_REGISTERS {
-            self.error(
-                codes::E2001_TOO_MANY_REGISTERS,
-                format!("function `{}` exceeds {MAX_REGISTERS} registers", self.name),
-                Span::default(),
-            );
+            if !self.reg_limit_reported {
+                self.error(
+                    codes::E2001_TOO_MANY_REGISTERS,
+                    format!("function `{}` exceeds {MAX_REGISTERS} registers", self.name),
+                    Span::default(),
+                );
+                self.reg_limit_reported = true;
+            }
             return None;
         }
         let r = self.regs as Reg;
@@ -202,10 +208,20 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         Some(r)
     }
 
-    /// Recycle a temporary register after its last use. Named bindings and
-    /// parameters are never recycled.
+    /// Recycle a temporary register after its last use.
     fn recycle(&mut self, r: Reg) {
         if self.temps.remove(&r) {
+            self.free_reg(r);
+        }
+    }
+
+    /// Return a register to the free list (parameters are never freed).
+    fn free_reg(&mut self, r: Reg) {
+        if (r as usize) < self.arity as usize {
+            return;
+        }
+        self.temps.remove(&r);
+        if !self.free.contains(&r) {
             self.free.push(r);
         }
     }
@@ -246,7 +262,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
     }
 
     fn define(&mut self, name: String, r: Reg) {
-        // Bindings stay live for the rest of the scope — not temporaries.
+        // Bindings stay live until last use / scope exit — not temps.
         self.temps.remove(&r);
         if let Some(scope) = self.env.last_mut() {
             scope.insert(name, r);
@@ -267,7 +283,36 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
     }
 
     fn pop_scope(&mut self) {
-        self.env.pop();
+        if let Some(scope) = self.env.pop() {
+            for (_, r) in scope {
+                self.free_reg(r);
+            }
+        }
+    }
+
+    /// Free locals in the current scope whose last use was statement `stmt_i`.
+    fn free_dead_locals(&mut self, last_use: &HashMap<String, usize>, stmt_i: usize) {
+        let dead: Vec<(String, Reg)> = {
+            let Some(scope) = self.env.last() else {
+                return;
+            };
+            scope
+                .iter()
+                .filter_map(|(name, r)| {
+                    if last_use.get(name).copied() == Some(stmt_i) {
+                        Some((name.clone(), *r))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for (name, r) in dead {
+            if let Some(scope) = self.env.last_mut() {
+                scope.remove(&name);
+            }
+            self.free_reg(r);
+        }
     }
 
     fn intern_string(&mut self, s: String) -> ConstId {
@@ -286,6 +331,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
 
     fn emit_block(&mut self, block: &Block, tail: bool) -> Option<Reg> {
         self.push_scope();
+        let last_use = last_uses_in_block(block);
         let n = block.statements.len();
         let mut last = None;
         for (i, stmt) in block.statements.iter().enumerate() {
@@ -320,6 +366,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     return None;
                 }
             }
+            self.free_dead_locals(&last_use, i);
         }
         self.pop_scope();
         if last.is_none() {
@@ -334,12 +381,20 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
     fn bind_pattern(&mut self, pat: &Pattern, src: Reg) -> Option<()> {
         match &pat.kind {
             PatternKind::Var(n) | PatternKind::UnderscoreName(n) => {
-                let r = self.fresh()?;
-                self.emit(Op::Move { dst: r, src }, pat.span);
-                self.define(n.text.clone(), r);
+                // Promote a temporary into the binding instead of copying.
+                if self.temps.remove(&src) {
+                    self.define(n.text.clone(), src);
+                } else {
+                    let r = self.fresh()?;
+                    self.emit(Op::Move { dst: r, src }, pat.span);
+                    self.define(n.text.clone(), r);
+                }
                 Some(())
             }
-            PatternKind::Discard => Some(()),
+            PatternKind::Discard => {
+                self.recycle(src);
+                Some(())
+            }
             PatternKind::Tuple(ps) => {
                 for (i, p) in ps.iter().enumerate() {
                     let r = self.fresh()?;
@@ -353,6 +408,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     );
                     self.bind_pattern(p, r)?;
                 }
+                self.recycle(src);
                 Some(())
             }
             _ => {
@@ -1340,6 +1396,158 @@ fn binop_op(op: BinOp, dst: Reg, a: Reg, b: Reg) -> Op {
         BinOp::Gt | BinOp::GtFloat => Op::Gt { dst, a, b },
         BinOp::GtEq | BinOp::GtEqFloat => Op::Ge { dst, a, b },
         BinOp::And | BinOp::Or => unreachable!("short-circuit ops use emit_and_or"),
+    }
+}
+
+/// Map each name bound in this block to the index of the last statement that
+/// uses it (so registers can be freed after that statement).
+fn last_uses_in_block(block: &Block) -> HashMap<String, usize> {
+    let mut last = HashMap::new();
+    let mut bound: HashSet<String> = HashSet::new();
+    for (i, stmt) in block.statements.iter().enumerate() {
+        match stmt {
+            Statement::Expr(e) => note_var_uses(e, i, &bound, &mut last),
+            Statement::Let(l) => {
+                note_var_uses(&l.value, i, &bound, &mut last);
+                note_pat_binds(&l.pattern, &mut bound);
+            }
+            Statement::Use(u) => {
+                note_var_uses(&u.value, i, &bound, &mut last);
+                for p in &u.patterns {
+                    note_pat_binds(p, &mut bound);
+                }
+            }
+            Statement::Fn(f) => {
+                // Nested fn body may read outer locals.
+                note_block_uses(&f.body, i, &bound, &mut last);
+            }
+        }
+    }
+    last
+}
+
+fn note_pat_binds(pat: &Pattern, bound: &mut HashSet<String>) {
+    match &pat.kind {
+        PatternKind::Var(n) | PatternKind::UnderscoreName(n) => {
+            bound.insert(n.text.clone());
+        }
+        PatternKind::Alias { pattern, name } => {
+            bound.insert(name.text.clone());
+            note_pat_binds(pattern, bound);
+        }
+        PatternKind::Tuple(ps) => {
+            for p in ps {
+                note_pat_binds(p, bound);
+            }
+        }
+        PatternKind::List { items, spread } => {
+            for p in items {
+                note_pat_binds(p, bound);
+            }
+            if let Some(s) = spread {
+                note_pat_binds(s, bound);
+            }
+        }
+        PatternKind::Constructor {
+            args: Some(args), ..
+        } => {
+            for a in args {
+                if let Some(p) = &a.pattern {
+                    note_pat_binds(p, bound);
+                }
+            }
+        }
+        PatternKind::StringPrefix { rest, .. } => note_pat_binds(rest, bound),
+        PatternKind::BitArray(segs) => {
+            for s in segs {
+                note_pat_binds(&s.pattern, bound);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn note_block_uses(
+    block: &Block,
+    stmt_i: usize,
+    bound: &HashSet<String>,
+    last: &mut HashMap<String, usize>,
+) {
+    for s in &block.statements {
+        match s {
+            Statement::Expr(e) => note_var_uses(e, stmt_i, bound, last),
+            Statement::Let(l) => note_var_uses(&l.value, stmt_i, bound, last),
+            Statement::Use(u) => note_var_uses(&u.value, stmt_i, bound, last),
+            Statement::Fn(f) => note_block_uses(&f.body, stmt_i, bound, last),
+        }
+    }
+}
+
+fn note_var_uses(
+    expr: &Expr,
+    stmt_i: usize,
+    bound: &HashSet<String>,
+    last: &mut HashMap<String, usize>,
+) {
+    let mut stack: Vec<&Expr> = vec![expr];
+    while let Some(e) = stack.pop() {
+        match &e.kind {
+            ExprKind::Var(n) => {
+                if bound.contains(&n.text) {
+                    last.insert(n.text.clone(), stmt_i);
+                }
+            }
+            ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            ExprKind::Call { callee, args } => {
+                stack.push(callee);
+                for a in args {
+                    if let ArgValue::Expr(inner) = &a.value {
+                        stack.push(inner);
+                    }
+                }
+            }
+            ExprKind::Tuple(xs) => stack.extend(xs.iter()),
+            ExprKind::List { items, spread } => {
+                stack.extend(items.iter());
+                if let Some(s) = spread {
+                    stack.push(s);
+                }
+            }
+            ExprKind::Paren(inner)
+            | ExprKind::Unary { expr: inner, .. }
+            | ExprKind::Echo(inner)
+            | ExprKind::Field { base: inner, .. }
+            | ExprKind::Assert { expr: inner, .. } => stack.push(inner),
+            ExprKind::Block(b) | ExprKind::Fn { body: b, .. } => {
+                note_block_uses(b, stmt_i, bound, last);
+            }
+            ExprKind::Case { subjects, clauses } => {
+                for s in subjects {
+                    stack.push(s);
+                }
+                for c in clauses {
+                    if let Some(g) = &c.guard {
+                        stack.push(g);
+                    }
+                    stack.push(&c.body);
+                }
+            }
+            ExprKind::RecordUpdate { base, fields, .. } => {
+                stack.push(base);
+                for (_, v) in fields {
+                    stack.push(v);
+                }
+            }
+            ExprKind::BitArray(segs) => {
+                for s in segs {
+                    stack.push(&s.value);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
