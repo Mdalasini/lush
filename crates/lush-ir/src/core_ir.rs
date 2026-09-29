@@ -18,7 +18,7 @@ pub fn validate_program_anf_shape(program: &Program) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_function_shape(fi: usize, regs: u8, code: &[Op]) -> Result<(), String> {
+fn validate_function_shape(fi: usize, regs: u16, code: &[Op]) -> Result<(), String> {
     // Collect jump targets — redefinitions after a join are allowed.
     let mut joins: HashSet<usize> = HashSet::new();
     for op in code {
@@ -44,7 +44,7 @@ fn validate_function_shape(fi: usize, regs: u8, code: &[Op]) -> Result<(), Strin
             defined.clear();
         }
         if let Some(dst) = dest_reg(op) {
-            if dst >= regs {
+            if dst as u16 >= regs {
                 return Err(format!("fn {fi}:{pi} dest r{dst} out of range"));
             }
             // Soft ANF: warn-style — we allow redefs at joins only.
@@ -53,7 +53,7 @@ fn validate_function_shape(fi: usize, regs: u8, code: &[Op]) -> Result<(), Strin
         // Use-before-def is hard to check precisely with SSA-less regs; ensure
         // referenced regs are in range.
         for r in use_regs(op) {
-            if r >= regs {
+            if r as u16 >= regs {
                 return Err(format!("fn {fi}:{pi} use r{r} out of range"));
             }
         }

@@ -181,7 +181,7 @@ fn encode_function(w: &mut Writer, f: &Function) {
     w.str(&f.module);
     w.str(&f.name);
     w.u8(f.arity);
-    w.u8(f.regs);
+    w.u16(f.regs);
     w.str(&f.source_path);
     w.u32(f.code.len() as u32);
     for (op, (line, col)) in f
@@ -199,7 +199,7 @@ fn decode_function(r: &mut Reader<'_>) -> Result<Function, String> {
     let module = r.str()?;
     let name = r.str()?;
     let arity = r.u8()?;
-    let regs = r.u8()?;
+    let regs = r.u16()?;
     let source_path = r.str()?;
     let n = r.u32()? as usize;
     let mut code = Vec::with_capacity(n);

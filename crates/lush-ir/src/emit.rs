@@ -1,6 +1,6 @@
 //! Register bytecode emission from a typed module.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use lush_syntax::ast::*;
 use lush_syntax::diagnostic::{Diagnostic, DiagnosticKind};
@@ -19,13 +19,23 @@ struct ModuleEmitter<'a> {
     functions: Vec<Function>,
     func_ids: HashMap<(String, String), FuncId>,
     diagnostics: Vec<Diagnostic>,
+    /// Module path → source text (for per-op line/col).
+    sources: &'a BTreeMap<String, String>,
+    /// Cached line-start byte offsets per module path.
+    line_starts: HashMap<String, Vec<usize>>,
 }
 
 struct FnEmitter<'a, 'm> {
     m: &'m mut ModuleEmitter<'a>,
     module: String,
     name: String,
-    regs: u8,
+    /// Next unused register index / high-water mark (`usize` so the E2001
+    /// guard can fire at `MAX_REGISTERS` without wrapping a `u8`).
+    regs: usize,
+    /// Recycled temporary registers (dead after their last use).
+    free: Vec<Reg>,
+    /// Registers currently holding unnamed temporaries (safe to recycle).
+    temps: HashSet<Reg>,
     code: Vec<Op>,
     lines: Vec<(u32, u32)>,
     env: Vec<HashMap<String, Reg>>,
@@ -35,6 +45,7 @@ struct FnEmitter<'a, 'm> {
 pub fn emit_program(
     modules: &[(String, TypedModule)],
     entry_path: &str,
+    sources: &BTreeMap<String, String>,
 ) -> Result<Program, Vec<Diagnostic>> {
     let mut em = ModuleEmitter {
         typed: &modules[0].1, // overwritten per module
@@ -42,6 +53,8 @@ pub fn emit_program(
         functions: Vec::new(),
         func_ids: HashMap::new(),
         diagnostics: Vec::new(),
+        sources,
+        line_starts: HashMap::new(),
     };
 
     // First pass: assign FuncIds.
@@ -76,7 +89,9 @@ pub fn emit_program(
                     m: &mut em,
                     module: path.clone(),
                     name: f.name.text.clone(),
-                    regs: f.params.len() as u8,
+                    regs: f.params.len(),
+                    free: Vec::new(),
+                    temps: HashSet::new(),
                     code: vec![],
                     lines: vec![],
                     env: vec![HashMap::new()],
@@ -110,7 +125,7 @@ pub fn emit_program(
                         fe.emit(Op::Return { src: r }, f.span);
                     }
                 }
-                let regs = fe.regs.max(fe.arity);
+                let regs = fe.regs.max(fe.arity as usize) as u16;
                 let code = std::mem::take(&mut fe.code);
                 let lines = std::mem::take(&mut fe.lines);
                 let func = &mut em.functions[fid as usize];
@@ -169,7 +184,11 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
     }
 
     fn fresh(&mut self) -> Option<Reg> {
-        if self.regs as usize >= MAX_REGISTERS {
+        if let Some(r) = self.free.pop() {
+            self.temps.insert(r);
+            return Some(r);
+        }
+        if self.regs >= MAX_REGISTERS {
             self.error(
                 codes::E2001_TOO_MANY_REGISTERS,
                 format!("function `{}` exceeds {MAX_REGISTERS} registers", self.name),
@@ -177,9 +196,18 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             );
             return None;
         }
-        let r = self.regs;
+        let r = self.regs as Reg;
         self.regs += 1;
+        self.temps.insert(r);
         Some(r)
+    }
+
+    /// Recycle a temporary register after its last use. Named bindings and
+    /// parameters are never recycled.
+    fn recycle(&mut self, r: Reg) {
+        if self.temps.remove(&r) {
+            self.free.push(r);
+        }
     }
 
     fn emit(&mut self, op: Op, span: Span) {
@@ -191,12 +219,35 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             );
             return;
         }
+        let (line, col) = self.span_line_col(span);
         self.code.push(op);
-        self.lines.push((1, 1));
-        let _ = span;
+        self.lines.push((line, col));
+    }
+
+    fn span_line_col(&mut self, span: Span) -> (u32, u32) {
+        if !self.m.line_starts.contains_key(&self.module) {
+            let src = self
+                .m
+                .sources
+                .get(&self.module)
+                .map(String::as_str)
+                .unwrap_or("");
+            let starts = line_start_offsets(src);
+            self.m.line_starts.insert(self.module.clone(), starts);
+        }
+        let starts = &self.m.line_starts[&self.module];
+        let src = self
+            .m
+            .sources
+            .get(&self.module)
+            .map(String::as_str)
+            .unwrap_or("");
+        byte_to_line_col(src, starts, span.start.0 as usize)
     }
 
     fn define(&mut self, name: String, r: Reg) {
+        // Bindings stay live for the rest of the scope — not temporaries.
+        self.temps.remove(&r);
         if let Some(scope) = self.env.last_mut() {
             scope.insert(name, r);
         }
@@ -430,34 +481,26 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                             expr.span,
                         );
                         self.emit(Op::Eq { dst, a: src, b: f }, expr.span);
+                        self.recycle(f);
                     }
                 }
+                self.recycle(src);
                 Some(dst)
             }
-            ExprKind::Binary { op, left, right } => {
+            ExprKind::Binary { op, .. } => {
                 if matches!(op, BinOp::And | BinOp::Or) {
+                    let ExprKind::Binary { left, right, .. } = &expr.kind else {
+                        unreachable!()
+                    };
                     return self.emit_and_or(*op, left, right, expr.span, tail);
                 }
-                let a = self.emit_expr(left, false)?;
-                let b = self.emit_expr(right, false)?;
-                let dst = self.fresh()?;
-                let opcode = match op {
-                    BinOp::Add | BinOp::AddFloat => Op::Add { dst, a, b },
-                    BinOp::Sub | BinOp::SubFloat => Op::Sub { dst, a, b },
-                    BinOp::Mul | BinOp::MulFloat => Op::Mul { dst, a, b },
-                    BinOp::Div | BinOp::DivFloat => Op::Div { dst, a, b },
-                    BinOp::Rem => Op::Rem { dst, a, b },
-                    BinOp::Concat => Op::Concat { dst, a, b },
-                    BinOp::Eq => Op::Eq { dst, a, b },
-                    BinOp::NotEq => Op::Ne { dst, a, b },
-                    BinOp::Lt | BinOp::LtFloat => Op::Lt { dst, a, b },
-                    BinOp::LtEq | BinOp::LtEqFloat => Op::Le { dst, a, b },
-                    BinOp::Gt | BinOp::GtFloat => Op::Gt { dst, a, b },
-                    BinOp::GtEq | BinOp::GtEqFloat => Op::Ge { dst, a, b },
-                    BinOp::And | BinOp::Or => unreachable!(),
+                if is_left_assoc_chainable(*op) {
+                    return self.emit_left_assoc_chain(*op, expr);
+                }
+                let ExprKind::Binary { left, right, .. } = &expr.kind else {
+                    unreachable!()
                 };
-                self.emit(opcode, expr.span);
-                Some(dst)
+                self.emit_binary_op(*op, left, right, expr.span)
             }
             ExprKind::Call { callee, args } => self.emit_call(callee, args, expr.span, tail),
             ExprKind::Case { subjects, clauses } => {
@@ -537,6 +580,8 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         },
                         expr.span,
                     );
+                    self.recycle(h);
+                    self.recycle(acc);
                     acc = dst;
                 }
                 Some(acc)
@@ -566,6 +611,44 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 None
             }
         }
+    }
+
+    fn emit_binary_op(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Option<Reg> {
+        let a = self.emit_expr(left, false)?;
+        let b = self.emit_expr(right, false)?;
+        let dst = self.fresh()?;
+        self.emit(binop_op(op, dst, a, b), span);
+        self.recycle(a);
+        self.recycle(b);
+        Some(dst)
+    }
+
+    /// Flatten a left-associative operator spine iteratively so a 4096-term
+    /// chain does not recurse on the native stack, and recycle operand temps
+    /// so the chain fits in a handful of registers.
+    fn emit_left_assoc_chain(&mut self, op: BinOp, expr: &Expr) -> Option<Reg> {
+        let mut rights: Vec<(&Expr, Span)> = Vec::new();
+        let mut cur = expr;
+        while let ExprKind::Binary {
+            op: o, left, right, ..
+        } = &cur.kind
+        {
+            if *o != op {
+                break;
+            }
+            rights.push((right.as_ref(), cur.span));
+            cur = left.as_ref();
+        }
+        let mut acc = self.emit_expr(cur, false)?;
+        for (right, span) in rights.into_iter().rev() {
+            let b = self.emit_expr(right, false)?;
+            let dst = self.fresh()?;
+            self.emit(binop_op(op, dst, acc, b), span);
+            self.recycle(acc);
+            self.recycle(b);
+            acc = dst;
+        }
+        Some(acc)
     }
 
     fn emit_and_or(
@@ -1224,4 +1307,63 @@ fn field_name(f: &FieldName) -> String {
         FieldName::Name(n) => n.text.clone(),
         FieldName::UName(n) => n.text.clone(),
     }
+}
+
+fn is_left_assoc_chainable(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Add
+            | BinOp::AddFloat
+            | BinOp::Sub
+            | BinOp::SubFloat
+            | BinOp::Mul
+            | BinOp::MulFloat
+            | BinOp::Div
+            | BinOp::DivFloat
+            | BinOp::Rem
+            | BinOp::Concat
+    )
+}
+
+fn binop_op(op: BinOp, dst: Reg, a: Reg, b: Reg) -> Op {
+    match op {
+        BinOp::Add | BinOp::AddFloat => Op::Add { dst, a, b },
+        BinOp::Sub | BinOp::SubFloat => Op::Sub { dst, a, b },
+        BinOp::Mul | BinOp::MulFloat => Op::Mul { dst, a, b },
+        BinOp::Div | BinOp::DivFloat => Op::Div { dst, a, b },
+        BinOp::Rem => Op::Rem { dst, a, b },
+        BinOp::Concat => Op::Concat { dst, a, b },
+        BinOp::Eq => Op::Eq { dst, a, b },
+        BinOp::NotEq => Op::Ne { dst, a, b },
+        BinOp::Lt | BinOp::LtFloat => Op::Lt { dst, a, b },
+        BinOp::LtEq | BinOp::LtEqFloat => Op::Le { dst, a, b },
+        BinOp::Gt | BinOp::GtFloat => Op::Gt { dst, a, b },
+        BinOp::GtEq | BinOp::GtEqFloat => Op::Ge { dst, a, b },
+        BinOp::And | BinOp::Or => unreachable!("short-circuit ops use emit_and_or"),
+    }
+}
+
+fn line_start_offsets(src: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (i, b) in src.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// Map a byte offset to 1-based `(line, column)` counted in Unicode scalar values.
+fn byte_to_line_col(src: &str, line_starts: &[usize], byte: usize) -> (u32, u32) {
+    let byte = byte.min(src.len());
+    let line_idx = match line_starts.binary_search(&byte) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+    let line_start = line_starts.get(line_idx).copied().unwrap_or(0);
+    let col = src
+        .get(line_start..byte)
+        .map(|s| s.chars().count())
+        .unwrap_or(0);
+    ((line_idx as u32) + 1, (col as u32) + 1)
 }

@@ -84,7 +84,7 @@ pub fn compile_graph_with_opt(
         }
     });
 
-    match emit::emit_program(&typed_modules, entry) {
+    match emit::emit_program(&typed_modules, entry, &sources) {
         Ok(mut program) => {
             program.sources = sources;
             if let Err(msg) = opt::optimise(&mut program, level) {

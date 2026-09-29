@@ -60,6 +60,11 @@ fn panic_div_zero() {
         err.contains("division by zero") || err.contains("div"),
         "{err}"
     );
+    // `let _x = 1 / 0` is on line 2 of panic_div.lush — not the stub `1:1`.
+    assert!(
+        err.contains("src/main.lush:2:") || err.contains(":2:"),
+        "panic location should be line 2, got:\n{err}"
+    );
 }
 
 #[test]

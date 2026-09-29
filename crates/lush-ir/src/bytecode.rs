@@ -193,7 +193,8 @@ pub struct Function {
     pub module: String,
     pub name: String,
     pub arity: u8,
-    pub regs: u8,
+    /// Number of registers used (indices `0 .. regs`). May be 256 (`MAX_REGISTERS`).
+    pub regs: u16,
     pub code: Vec<Op>,
     /// Per-instruction (line, col) — 1-based; (0,0) if unknown.
     pub lines: Vec<(u32, u32)>,
