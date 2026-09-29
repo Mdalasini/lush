@@ -22,12 +22,6 @@ fn fib_e2e() {
     let program = compile_sources(&[("main".into(), src)], "main").expect("compile fib");
     let mut vm = Vm::new(program, VmConfig::default());
     let exit = vm.run_to_completion();
-    eprintln!(
-        "status={} stdout={:?} stderr={}",
-        exit.status,
-        String::from_utf8_lossy(&exit.stdout),
-        String::from_utf8_lossy(&exit.stderr)
-    );
     assert_eq!(exit.status, expect_status);
     assert_eq!(String::from_utf8_lossy(&exit.stdout), expect_out);
     assert_eq!(String::from_utf8_lossy(&exit.stderr), expect_err);

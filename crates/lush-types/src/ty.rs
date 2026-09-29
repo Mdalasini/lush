@@ -343,39 +343,62 @@ impl TypeStore {
 
     /// Zonk, then replace any remaining unbound unification variables with
     /// fresh rigid variables so the typed-AST handoff has no open `Var`s.
+    ///
+    /// Uses a pointer-keyed memo so shared DAGs (let-doubling) stay linear.
     pub fn zonk_closed(&mut self, ty: &Type) -> Type {
         let z = self.zonk(ty);
-        self.rigidify_vars(&z)
+        // Always walk with a pointer memo: let-doubling DAGs must stay linear, and
+        // a pre-check via [`Type::is_zonked`] would itself explode without memo.
+        let mut memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
+        let mut tv_map: HashMap<TvId, Type> = HashMap::new();
+        (*self.rigidify_rc(&Rc::new(z), &mut memo, &mut tv_map)).clone()
     }
 
-    fn rigidify_vars(&mut self, ty: &Type) -> Type {
-        match ty {
+    fn rigidify_rc(
+        &mut self,
+        ty: &Rc<Type>,
+        memo: &mut HashMap<*const Type, Rc<Type>>,
+        tv_map: &mut HashMap<TvId, Type>,
+    ) -> Rc<Type> {
+        let ptr = Rc::as_ptr(ty);
+        if let Some(cached) = memo.get(&ptr) {
+            return cached.clone();
+        }
+        let out = match ty.as_ref() {
             Type::Var(id) => {
-                // Still unbound after zonk — treat as an unconstrained polymorphic var.
-                let name = format!("α{}", id.0);
-                // Prefer a stable rigid per TvId within one call by allocating fresh.
-                self.fresh_rigid(name)
+                let rigid = tv_map
+                    .entry(*id)
+                    .or_insert_with(|| {
+                        let name = format!("α{}", id.0);
+                        self.fresh_rigid(name)
+                    })
+                    .clone();
+                Rc::new(rigid)
             }
-            Type::List(t) => Type::List(Rc::new(self.rigidify_vars(t))),
-            Type::Tuple(ts) => {
-                Type::Tuple(ts.iter().map(|t| Rc::new(self.rigidify_vars(t))).collect())
-            }
-            Type::Fun { params, ret } => Type::Fun {
+            Type::List(t) => Rc::new(Type::List(self.rigidify_rc(t, memo, tv_map))),
+            Type::Tuple(ts) => Rc::new(Type::Tuple(
+                ts.iter()
+                    .map(|t| self.rigidify_rc(t, memo, tv_map))
+                    .collect(),
+            )),
+            Type::Fun { params, ret } => Rc::new(Type::Fun {
                 params: params
                     .iter()
-                    .map(|t| Rc::new(self.rigidify_vars(t)))
+                    .map(|t| self.rigidify_rc(t, memo, tv_map))
                     .collect(),
-                ret: Rc::new(self.rigidify_vars(ret)),
-            },
-            Type::App { def, args } => Type::App {
+                ret: self.rigidify_rc(ret, memo, tv_map),
+            }),
+            Type::App { def, args } => Rc::new(Type::App {
                 def: *def,
                 args: args
                     .iter()
-                    .map(|t| Rc::new(self.rigidify_vars(t)))
+                    .map(|t| self.rigidify_rc(t, memo, tv_map))
                     .collect(),
-            },
-            other => other.clone(),
-        }
+            }),
+            other => Rc::new(other.clone()),
+        };
+        memo.insert(ptr, out.clone());
+        out
     }
 
     /// Zonk a shared type node with an explicit stack and pointer-keyed memo so
