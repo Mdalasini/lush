@@ -1309,7 +1309,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         let mut seen: HashSet<String> = HashSet::new();
         collect_free_vars_block(body, &mut bound, &mut |name| {
             if self.lookup(name).is_some()
-                && self.local_fns.get(name).is_none()
+                && !self.local_fns.contains_key(name)
                 && self.resolve_fn(name).is_none()
                 && !extra_bound.contains(name)
                 && seen.insert(name.to_string())
