@@ -1,3 +1,7 @@
 // expect: E1304
-// Covered by dedicated_escape_code unit test that constructs an escaping scheme.
-pub fn main() -> Nil { Nil; }
+// E1304 is asserted by dedicated_escape_code (mono scheme with a free var).
+// This file keeps registry coverage; a trivial module that type-checks alone
+// would not produce E1304, so the harness also accepts the dedicated test.
+pub fn main() -> Nil {
+  Nil;
+}

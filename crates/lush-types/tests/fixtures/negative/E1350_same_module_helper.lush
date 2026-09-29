@@ -1,0 +1,3 @@
+// expect: E1350
+fn same(a, b) { a == b; }
+pub fn f() -> Bool { same(fn(x) { x; }, fn(x) { x; }); }

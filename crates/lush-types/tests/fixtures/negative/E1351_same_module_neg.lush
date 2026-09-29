@@ -1,0 +1,3 @@
+// expect: E1351
+fn neg(x) { -x; }
+pub fn f() -> Bool { neg(True); }

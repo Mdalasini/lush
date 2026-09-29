@@ -173,10 +173,12 @@ pub fn infer_module(
             .remove(&c.name.text)
             .unwrap_or_else(|| c.value.clone());
         if let Some(val) = const_eval::eval_const_expr(&expr, &mut ctx.const_env, ctx.sink) {
-            // Empty lists/are polymorphic at the type level; keep a free variable so
-            // public expansive bindings can surface E1304 rather than silently using Error.
+            // Empty lists are polymorphic: introduce the element variable above the
+            // ambient level so generalisation can quantify it (`[]` is non-expansive).
             let ty = match &val {
-                ConstValue::List(items) if items.is_empty() => Type::list(ctx.store.fresh_var(0)),
+                ConstValue::List(items) if items.is_empty() => {
+                    Type::list(ctx.store.fresh_var(ctx.level + 1))
+                }
                 _ => const_value_type(&val),
             };
             if let Some(ann) = &c.ty {
@@ -202,10 +204,11 @@ pub fn infer_module(
                 }
             }
             ctx.const_env.values.insert(c.name.text.clone(), val);
-            let scheme = Scheme::mono(ty.clone());
+            let scheme = unify::generalise(ctx.store, &ty, ctx.level, false);
             if let Some(v) = ctx.resolved.values.get_mut(&c.name.text) {
                 v.scheme = scheme.clone();
             }
+            ctx.define_local(c.name.text.clone(), scheme);
             ctx.const_env.types.insert(c.name.text.clone(), ty);
         }
         ctx.const_env.visiting.pop();
@@ -227,8 +230,10 @@ pub fn infer_module(
         .collect();
     let deps = fn_deps(&fns);
     let sccs = strong_components(&deps);
+    // Build once: rebuilding per SCC is O(n²) for n independent functions.
+    let by_name: HashMap<&str, &FnDef> = fns.iter().map(|f| (f.name.text.as_str(), *f)).collect();
     for scc in sccs {
-        infer_fn_scc(&mut ctx, &fns, &scc);
+        infer_fn_scc(&mut ctx, &by_name, &scc);
     }
 
     // Entry main check
@@ -954,16 +959,15 @@ fn strong_components(deps: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
         }
     }
 
-    // Tarjan emits SCCs in reverse topological order of the condensation;
-    // reverse so callees are inferred before callers.
-    sccs.reverse();
+    // Tarjan emits each component after its successors are explored. With edges
+    // meaning "depends on" / "calls", that is already callees-before-callers
+    // (topological order of the condensation). Do not reverse.
     sccs
 }
 
-fn infer_fn_scc(ctx: &mut InferCtx<'_>, fns: &[&FnDef], scc: &[String]) {
+fn infer_fn_scc(ctx: &mut InferCtx<'_>, by_name: &HashMap<&str, &FnDef>, scc: &[String]) {
     ctx.scc = scc.iter().cloned().collect();
     ctx.level += 1;
-    let by_name: HashMap<&str, &FnDef> = fns.iter().map(|f| (f.name.text.as_str(), *f)).collect();
     // Assign fresh mono types
     let mut mono: HashMap<String, Type> = HashMap::new();
     let mut rigid_maps: HashMap<String, HashMap<String, Type>> = HashMap::new();
@@ -1152,7 +1156,10 @@ fn infer_block(ctx: &mut InferCtx<'_>, block: &Block, _is_fn_body: bool) -> Type
                 for n in &names {
                     ctx.binding_names.insert(n.clone());
                 }
+                // Infer the RHS one level up so its free variables can be generalised.
+                ctx.level += 1;
                 let val_ty = infer_expr(ctx, &l.value);
+                ctx.level -= 1;
                 for n in &names {
                     ctx.binding_names.remove(n);
                 }
@@ -2528,7 +2535,7 @@ fn discharge_after_unify(ctx: &mut InferCtx<'_>, ty: &Type, span: Span) {
         if let Some(info) = ctx.store.vars.get(id) {
             let c = info.constraints.clone();
             if let Some(link) = info.link.clone() {
-                let concrete = ctx.store.zonk(&link);
+                let concrete = ctx.store.zonk(link.as_ref());
                 if c.eq && !eq_capability::has_eq(ctx.store, &concrete) {
                     ctx.sink.error(
                         codes::E1350_NO_EQ,
@@ -3038,32 +3045,6 @@ fn warn_unused(ctx: &mut InferCtx<'_>, module: &Module) {
     }
 }
 
-fn collect_free_vars_imm(ty: &Type, out: &mut std::collections::BTreeSet<crate::ty::TvId>) {
-    match ty {
-        Type::Var(id) => {
-            out.insert(*id);
-        }
-        Type::List(t) => collect_free_vars_imm(t, out),
-        Type::Tuple(ts) => {
-            for t in ts {
-                collect_free_vars_imm(t, out);
-            }
-        }
-        Type::Fun { params, ret } => {
-            for p in params {
-                collect_free_vars_imm(p, out);
-            }
-            collect_free_vars_imm(ret, out);
-        }
-        Type::App { args, .. } => {
-            for a in args {
-                collect_free_vars_imm(a, out);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn build_interface(path: &str, ctx: &mut InferCtx<'_>) -> ModuleInterface {
     let mut iface = ModuleInterface::empty(path);
     for (name, v) in &ctx.resolved.values {
@@ -3074,22 +3055,14 @@ fn build_interface(path: &str, ctx: &mut InferCtx<'_>) -> ModuleInterface {
             continue;
         }
         // Ensure no unresolved non-generalised vars escape
-        let body = v.scheme.body.clone();
-        let mut free = std::collections::BTreeSet::new();
-        // free_vars needs &mut store — use a local walk
-        collect_free_vars_imm(&body, &mut free);
-        let quantified: std::collections::HashSet<_> = v.scheme.vars.iter().copied().collect();
-        for id in &free {
-            if !quantified.contains(id) {
-                // Check if linked to concrete — skip if we can't tell without store
-                ctx.sink.error(
-                    codes::E1304_ESCAPE,
-                    format!("ungeneralised type variable escapes in public value `{name}`"),
-                    Span::default(),
-                    Some("add a type annotation or avoid expansive bindings in the export".into()),
-                );
-                break;
-            }
+        let body = ctx.store.zonk(&v.scheme.body);
+        if unify::scheme_has_escaping_vars(ctx.store, &v.scheme) {
+            ctx.sink.error(
+                codes::E1304_ESCAPE,
+                format!("ungeneralised type variable escapes in public value `{name}`"),
+                v.span,
+                Some("add a type annotation or avoid expansive bindings in the export".into()),
+            );
         }
         iface.values.insert(
             name.clone(),

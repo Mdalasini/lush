@@ -1,0 +1,6 @@
+pub fn f() -> Bool {
+  let e = [];
+  let a: List(Int) = e;
+  let b: List(String) = e;
+  True;
+}
