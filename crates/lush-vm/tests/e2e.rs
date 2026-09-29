@@ -29,6 +29,16 @@ fn lists_e2e() {
 }
 
 #[test]
+fn result_case_e2e() {
+    common::assert_case("result_case");
+}
+
+#[test]
+fn result_error_e2e() {
+    common::assert_case("result_error");
+}
+
+#[test]
 fn list_length_e2e() {
     common::assert_case("list_length");
 }

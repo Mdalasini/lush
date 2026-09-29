@@ -1,0 +1,9 @@
+import lush/io;
+
+pub fn main() {
+  let r = Error("x");
+  case r {
+    Ok(_) -> io.println("ok");
+    Error(_) -> io.println("err");
+  };
+}

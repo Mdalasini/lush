@@ -393,13 +393,18 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     self.emit(Op::LoadNil { dst }, expr.span);
                     Some(dst)
                 }
-                _ => {
+                name => {
+                    let variant = match name {
+                        "Ok" | "Some" => 0u16,
+                        "Error" | "None" => 1u16,
+                        _ => 0u16,
+                    };
                     let dst = self.fresh()?;
                     self.emit(
                         Op::MakeAdt {
                             dst,
                             type_tag: 0,
-                            variant: 0,
+                            variant,
                             fields: vec![],
                         },
                         expr.span,
@@ -655,17 +660,21 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 None
             }
             ExprKind::Constructor(c) => {
+                let variant = match c.name.text.as_str() {
+                    "Ok" | "Some" => 0u16,
+                    "Error" | "None" => 1u16,
+                    _ => 0u16,
+                };
                 let dst = self.fresh()?;
                 self.emit(
                     Op::MakeAdt {
                         dst,
                         type_tag: 0,
-                        variant: 0,
+                        variant,
                         fields: arg_regs,
                     },
                     span,
                 );
-                let _ = c;
                 Some(dst)
             }
             _ => {
@@ -891,6 +900,75 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         );
                         fail_jumps.push(jmp);
                     }
+                    PatternKind::Constructor {
+                        constructor: c,
+                        args,
+                    } if !matches!(c.name.text.as_str(), "True" | "False") => {
+                        let tag: u16 = match c.name.text.as_str() {
+                            "Ok" | "Some" => 0,
+                            "Error" | "None" => 1,
+                            _ => {
+                                // User ADTs: declaration order unknown here — use 0.
+                                0
+                            }
+                        };
+                        let switch_idx = self.code.len();
+                        self.emit(
+                            Op::SwitchTag {
+                                scrutinee: *scrut,
+                                arms: vec![(tag, 0)],
+                                default: 0,
+                            },
+                            pat.span,
+                        );
+                        let match_pc = self.code.len() as u32;
+                        if let Op::SwitchTag { arms, .. } = &mut self.code[switch_idx] {
+                            arms[0].1 = match_pc;
+                        }
+                        // Record switch default for fail patching (reuse fail_jumps via sentinel JumpIfFalse).
+                        // Emit a nop JumpIfFalse on True so we can reuse the fail_jumps patcher for the
+                        // SwitchTag default by also storing switch_idx separately.
+                        // Patch default when fail_pc known: push switch_idx into a side list.
+                        // Simpler: after binding fields, we rely on fail_jumps patching below — add
+                        // SwitchTag default patch alongside fail_jumps by pushing switch_idx + FLAG.
+                        // Use: fail_jumps.push(switch_idx | 1<<31) convention — too hacky.
+                        // Instead patch default now to a placeholder and collect switch_idx in fail_jumps
+                        // as a JumpIfFalse we invent:
+                        fail_jumps.push(switch_idx);
+                        if let Some(pargs) = args {
+                            let mut field_i = 0u16;
+                            for pa in pargs {
+                                if pa.spread {
+                                    continue;
+                                }
+                                let Some(inner) = &pa.pattern else {
+                                    continue;
+                                };
+                                let field = self.fresh()?;
+                                self.emit(
+                                    Op::GetField {
+                                        dst: field,
+                                        base: *scrut,
+                                        index: field_i,
+                                    },
+                                    inner.span,
+                                );
+                                field_i += 1;
+                                match &inner.kind {
+                                    PatternKind::Var(n) => self.define(n.text.clone(), field),
+                                    PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
+                                    _ => {
+                                        self.error(
+                                            codes::E2011_LOWER,
+                                            "nested constructor field pattern not supported yet",
+                                            inner.span,
+                                        );
+                                        return None;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     PatternKind::List { items, spread } => {
                         // Nested list patterns beyond one cons cell are lowered
                         // by walking items then the optional spread tail.
@@ -1080,8 +1158,10 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             }
             let fail_pc = self.code.len() as u32;
             for j in fail_jumps {
-                if let Op::JumpIfFalse { target, .. } = &mut self.code[j] {
-                    *target = fail_pc;
+                match &mut self.code[j] {
+                    Op::JumpIfFalse { target, .. } => *target = fail_pc,
+                    Op::SwitchTag { default, .. } => *default = fail_pc,
+                    _ => {}
                 }
             }
             self.pop_scope();

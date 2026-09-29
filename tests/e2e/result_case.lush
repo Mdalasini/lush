@@ -1,0 +1,10 @@
+import lush/io;
+import lush/int;
+
+pub fn main() {
+  let r = Ok(42);
+  case r {
+    Ok(x) -> io.println(int.to_string(x));
+    Error(_) -> io.println("err");
+  };
+}
