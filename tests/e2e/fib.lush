@@ -1,0 +1,14 @@
+import lush/io;
+import lush/int;
+
+pub fn fib(n, a, b) {
+  case n {
+    0 -> a;
+    1 -> b;
+    _ -> fib(n - 1, b, a + b);
+  };
+}
+
+pub fn main() {
+  io.println("fib(50) = " <> int.to_string(fib(50, 0, 1)));
+}

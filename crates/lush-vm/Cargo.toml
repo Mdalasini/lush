@@ -1,0 +1,15 @@
+[package]
+name = "lush-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single-process bytecode interpreter and values for Lush"
+
+[dependencies]
+lush-ir = { workspace = true }
+lush-syntax = { workspace = true }
+lush-types = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true, features = ["yaml"] }
+lush-test-support = { workspace = true }

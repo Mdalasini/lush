@@ -470,6 +470,23 @@ fn exhaustiveness_soundness_bool() {
 }
 
 #[test]
+fn typed_module_exprs_are_zonked() {
+    // Additive typed-AST handoff: every positive fixture yields zonked expr types.
+    let root = fixture_root().join("positive");
+    for (name, src) in read_lush_files(&root) {
+        let result = check_fixture(&format!("fixtures/{name}"), &src, name.contains("main"));
+        if !ok(&result.diagnostics) {
+            continue;
+        }
+        result.typed.assert_zonked();
+        assert!(
+            !result.typed.exprs.is_empty() || result.module.items.is_empty(),
+            "typed module for `{name}` recorded no expression nodes"
+        );
+    }
+}
+
+#[test]
 fn spec_complete_modules_typecheck() {
     let spec = read_spec_md(Path::new(env!("CARGO_MANIFEST_DIR")));
     let fences = extract_lush_fences(&spec);

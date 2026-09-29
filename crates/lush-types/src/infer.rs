@@ -298,7 +298,16 @@ pub fn infer_module(
     }
 
     ctx.typed.const_values = ctx.const_env.values.clone();
-    let typed = std::mem::take(&mut ctx.typed);
+    let mut typed = std::mem::take(&mut ctx.typed);
+    // Re-zonk after the whole module is inferred — earlier recordings may still
+    // hold variables that later unifications resolved. Remaining free vars become
+    // rigid so the typed handoff has no open unification variables.
+    for info in &mut typed.exprs {
+        info.ty = ctx.store.zonk_closed(&info.ty);
+    }
+    for info in &mut typed.patterns {
+        info.ty = ctx.store.zonk_closed(&info.ty);
+    }
     let iface = build_interface(path, &mut ctx);
     (iface, typed)
 }

@@ -14,12 +14,16 @@ This repository is a Rust workspace. Implemented crates:
 
 - `lush-syntax` — lexer, parser, AST, formatter (step 1)
 - `lush-types` — name resolution, desugaring, HM inference, exhaustiveness (step 2)
+- `lush-ir` — Core IR, optimiser, bytecode, verifier, `.lushc` (step 3)
+- `lush-vm` — values, bump arena, single-process interpreter, builtins (step 3)
 - `lush-test-support` — shared `spec.md` fence inventory and fixture helpers
 
 ```bash
 cargo test --workspace --locked
 cargo test -p lush-syntax --locked
 cargo test -p lush-types --locked
+cargo test -p lush-ir --locked
+cargo test -p lush-vm --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```

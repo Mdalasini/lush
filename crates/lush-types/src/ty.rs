@@ -341,6 +341,43 @@ impl TypeStore {
         (*self.zonk_rc(&Rc::new(ty.clone()), &mut memo)).clone()
     }
 
+    /// Zonk, then replace any remaining unbound unification variables with
+    /// fresh rigid variables so the typed-AST handoff has no open `Var`s.
+    pub fn zonk_closed(&mut self, ty: &Type) -> Type {
+        let z = self.zonk(ty);
+        self.rigidify_vars(&z)
+    }
+
+    fn rigidify_vars(&mut self, ty: &Type) -> Type {
+        match ty {
+            Type::Var(id) => {
+                // Still unbound after zonk — treat as an unconstrained polymorphic var.
+                let name = format!("α{}", id.0);
+                // Prefer a stable rigid per TvId within one call by allocating fresh.
+                self.fresh_rigid(name)
+            }
+            Type::List(t) => Type::List(Rc::new(self.rigidify_vars(t))),
+            Type::Tuple(ts) => {
+                Type::Tuple(ts.iter().map(|t| Rc::new(self.rigidify_vars(t))).collect())
+            }
+            Type::Fun { params, ret } => Type::Fun {
+                params: params
+                    .iter()
+                    .map(|t| Rc::new(self.rigidify_vars(t)))
+                    .collect(),
+                ret: Rc::new(self.rigidify_vars(ret)),
+            },
+            Type::App { def, args } => Type::App {
+                def: *def,
+                args: args
+                    .iter()
+                    .map(|t| Rc::new(self.rigidify_vars(t)))
+                    .collect(),
+            },
+            other => other.clone(),
+        }
+    }
+
     /// Zonk a shared type node with an explicit stack and pointer-keyed memo so
     /// DAG spines (let-doubling) stay linear and never overflow the native
     /// stack. A single-walk node budget yields E1305 for Mairson-sized trees.

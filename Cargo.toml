@@ -4,6 +4,8 @@ members = [
     "crates/lush-syntax",
     "crates/lush-types",
     "crates/lush-test-support",
+    "crates/lush-ir",
+    "crates/lush-vm",
 ]
 
 [workspace.package]
@@ -16,4 +18,7 @@ repository = "https://github.com/Mdalasini/lush"
 ariadne = "0.5"
 insta = "1.42"
 lush-syntax = { path = "crates/lush-syntax" }
+lush-types = { path = "crates/lush-types" }
 lush-test-support = { path = "crates/lush-test-support" }
+lush-ir = { path = "crates/lush-ir" }
+lush-vm = { path = "crates/lush-vm" }
