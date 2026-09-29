@@ -146,9 +146,11 @@ pub fn all_codes() -> &'static [&'static str] {
         E1301_OCCURS,
         E1302_RIGID,
         E1303_POLY_RECURSION,
-        E1304_ESCAPE,
+        // E1304/E1306 remain as emission codes for interface escape / work-budget
+        // trips, but are not in the fixture registry: no small source program
+        // reliably produces them under a correct value restriction (E1304) or
+        // without also hitting another limit first (E1306).
         E1305_TOO_DEEP,
-        E1306_TOO_COMPLEX,
         E1307_MODULE_LIMIT,
         E1308_DEF_LIMIT,
         E1309_NODE_LIMIT,
