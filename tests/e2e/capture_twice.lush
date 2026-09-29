@@ -1,0 +1,17 @@
+import lush/io;
+import lush/int;
+
+fn add(a, b) {
+  a + b;
+}
+
+fn show(n) {
+  io.println(int.to_string(n));
+  n;
+}
+
+pub fn main() {
+  let f = add(show(1), _);
+  io.println(int.to_string(f(10)));
+  io.println(int.to_string(f(20)));
+}

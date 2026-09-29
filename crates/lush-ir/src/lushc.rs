@@ -14,7 +14,7 @@
 use crate::bytecode::{Builtin, Constant, Function, Op, Program};
 
 pub const MAGIC: &[u8; 4] = b"LUSH";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub fn encode(program: &Program) -> Vec<u8> {
     let mut w = Writer::default();
@@ -181,6 +181,7 @@ fn encode_function(w: &mut Writer, f: &Function) {
     w.str(&f.module);
     w.str(&f.name);
     w.u8(f.arity);
+    w.u8(f.n_captures);
     w.u16(f.regs);
     w.str(&f.source_path);
     w.u32(f.code.len() as u32);
@@ -199,6 +200,7 @@ fn decode_function(r: &mut Reader<'_>) -> Result<Function, String> {
     let module = r.str()?;
     let name = r.str()?;
     let arity = r.u8()?;
+    let n_captures = r.u8()?;
     let regs = r.u16()?;
     let source_path = r.str()?;
     let n = r.u32()? as usize;
@@ -212,6 +214,7 @@ fn decode_function(r: &mut Reader<'_>) -> Result<Function, String> {
         module,
         name,
         arity,
+        n_captures,
         regs,
         code,
         lines,
@@ -417,6 +420,16 @@ fn encode_op(w: &mut Writer, op: &Op) {
             w.u16(52);
             w.u8(*dst);
         }
+        Op::MakeClosure {
+            dst,
+            func,
+            captures,
+        } => {
+            w.u16(59);
+            w.u8(*dst);
+            w.u32(*func);
+            encode_regs(w, captures);
+        }
         Op::MakeAdt {
             dst,
             type_tag,
@@ -591,6 +604,11 @@ fn decode_op(r: &mut Reader<'_>) -> Result<Op, String> {
             tail: r.u8()?,
         }),
         52 => Ok(Op::MakeEmptyList { dst: r.u8()? }),
+        59 => Ok(Op::MakeClosure {
+            dst: r.u8()?,
+            func: r.u32()?,
+            captures: decode_regs(r)?,
+        }),
         53 => Ok(Op::MakeAdt {
             dst: r.u8()?,
             type_tag: r.u16()?,

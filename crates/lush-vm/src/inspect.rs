@@ -118,7 +118,9 @@ fn inspect_into(heap: &Heap, v: Value, out: &mut String, depth: usize) {
             }
             out.push_str(&s);
         }
-        ObjectKind::Closure => out.push_str("//fn(?)"),
+        ObjectKind::Closure => {
+            out.push_str(&format!("//fn({})", heap.closure_arity(p)));
+        }
         ObjectKind::BitArray => out.push_str("<<…>>"),
     }
 }

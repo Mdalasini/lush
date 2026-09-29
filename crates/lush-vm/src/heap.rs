@@ -30,9 +30,9 @@ enum Object {
         variant: u16,
         fields: Vec<Value>,
     },
-    #[allow(dead_code)]
     Closure {
         func: u32,
+        arity: u8,
         captures: Vec<Value>,
     },
     #[allow(dead_code)]
@@ -172,6 +172,34 @@ impl Heap {
         match self.get(p) {
             Object::Adt { fields, .. } => fields[i],
             _ => Value::nil(),
+        }
+    }
+    pub fn alloc_closure(&mut self, func: u32, arity: u8, captures: &[Value]) -> HeapPtr {
+        self.push(
+            Object::Closure {
+                func,
+                arity,
+                captures: captures.to_vec(),
+            },
+            3 + captures.len() as u64,
+        )
+    }
+    pub fn closure_func(&self, p: HeapPtr) -> u32 {
+        match self.get(p) {
+            Object::Closure { func, .. } => *func,
+            _ => 0,
+        }
+    }
+    pub fn closure_arity(&self, p: HeapPtr) -> u8 {
+        match self.get(p) {
+            Object::Closure { arity, .. } => *arity,
+            _ => 0,
+        }
+    }
+    pub fn closure_captures(&self, p: HeapPtr) -> &[Value] {
+        match self.get(p) {
+            Object::Closure { captures, .. } => captures,
+            _ => &[],
         }
     }
 }

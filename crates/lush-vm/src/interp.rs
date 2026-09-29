@@ -301,8 +301,11 @@ impl Vm {
             Op::TailCall { func, args } => {
                 self.call(fi, func as usize, &args, 0, true)?;
             }
-            Op::CallClosure { .. } | Op::TailCallClosure { .. } => {
-                return Err("closure calls not yet supported".into());
+            Op::CallClosure { dst, clo, args } => {
+                self.call_closure(fi, clo, &args, dst, false)?;
+            }
+            Op::TailCallClosure { clo, args } => {
+                self.call_closure(fi, clo, &args, 0, true)?;
             }
             Op::Return { src } => {
                 let v = self.reg(fi, src);
@@ -338,6 +341,16 @@ impl Vm {
             }
             Op::MakeEmptyList { dst } => {
                 let p = self.heap.empty_list();
+                self.set_reg(fi, dst, Value::from_ptr(p));
+            }
+            Op::MakeClosure {
+                dst,
+                func,
+                captures,
+            } => {
+                let caps: Vec<_> = captures.iter().map(|a| self.reg(fi, *a)).collect();
+                let arity = self.program.functions[func as usize].arity;
+                let p = self.heap.alloc_closure(func, arity, &caps);
                 self.set_reg(fi, dst, Value::from_ptr(p));
             }
             Op::MakeAdt {
@@ -405,6 +418,69 @@ impl Vm {
         for (i, a) in args.iter().enumerate() {
             new_regs[i] = self.reg(caller_fi, *a);
         }
+        // Same-group recursive / mutually-recursive local functions share a
+        // capture environment: copy the caller's capture registers across.
+        let n_caps = fun.n_captures as usize;
+        if n_caps > 0 {
+            let caller_func = self.frames[caller_fi].func;
+            let caller = &self.program.functions[caller_func];
+            if caller.n_captures as usize != n_caps {
+                return Err("capture mismatch on direct call into closure function".into());
+            }
+            let base = fun.arity as usize;
+            let caller_base = caller.arity as usize;
+            for i in 0..n_caps {
+                new_regs[base + i] = self.reg(caller_fi, (caller_base + i) as u8);
+            }
+        }
+        self.enter_frame(caller_fi, func, new_regs, ret_dst, tail)
+    }
+
+    fn call_closure(
+        &mut self,
+        caller_fi: usize,
+        clo: u8,
+        args: &[u8],
+        ret_dst: u8,
+        tail: bool,
+    ) -> Result<(), String> {
+        let clo_v = self.reg(caller_fi, clo);
+        let p = clo_v.as_ptr().ok_or("CallClosure on non-closure")?;
+        if self.heap.kind(p) != ObjectKind::Closure {
+            return Err("CallClosure on non-closure".into());
+        }
+        let func = self.heap.closure_func(p) as usize;
+        let caps: Vec<Value> = self.heap.closure_captures(p).to_vec();
+        let fun = &self.program.functions[func];
+        if args.len() != fun.arity as usize {
+            return Err(format!(
+                "arity mismatch: expected {}, got {}",
+                fun.arity,
+                args.len()
+            ));
+        }
+        if caps.len() != fun.n_captures as usize {
+            return Err("closure capture count mismatch".into());
+        }
+        let mut new_regs = vec![Value::nil(); fun.regs.max(1) as usize];
+        for (i, a) in args.iter().enumerate() {
+            new_regs[i] = self.reg(caller_fi, *a);
+        }
+        let base = fun.arity as usize;
+        for (i, c) in caps.into_iter().enumerate() {
+            new_regs[base + i] = c;
+        }
+        self.enter_frame(caller_fi, func, new_regs, ret_dst, tail)
+    }
+
+    fn enter_frame(
+        &mut self,
+        caller_fi: usize,
+        func: usize,
+        new_regs: Vec<Value>,
+        ret_dst: u8,
+        tail: bool,
+    ) -> Result<(), String> {
         if tail {
             self.had_tail_call = true;
             let frame = &mut self.frames[caller_fi];

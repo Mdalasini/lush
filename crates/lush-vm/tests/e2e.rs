@@ -242,3 +242,18 @@ fn panic_overflow_golden_e2e() {
 fn panic_assert_golden_e2e() {
     common::assert_case("panic_assert");
 }
+
+#[test]
+fn local_fn_id_e2e() {
+    common::assert_case("local_fn_id");
+}
+
+#[test]
+fn capture_twice_e2e() {
+    common::assert_case("capture_twice");
+}
+
+#[test]
+fn local_fn_mutual_e2e() {
+    common::assert_case("local_fn_mutual");
+}

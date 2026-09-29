@@ -1,0 +1,24 @@
+import lush/io;
+
+pub fn main() {
+  fn is_even(n) {
+    case n {
+      0 -> True;
+      _ -> is_odd(n - 1);
+    };
+  }
+  fn is_odd(n) {
+    case n {
+      0 -> False;
+      _ -> is_even(n - 1);
+    };
+  }
+  case is_even(4) {
+    True -> io.println("even");
+    False -> io.println("odd");
+  };
+  case is_odd(4) {
+    True -> io.println("odd");
+    False -> io.println("even");
+  };
+}

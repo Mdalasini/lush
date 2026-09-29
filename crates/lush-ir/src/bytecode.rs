@@ -155,6 +155,12 @@ pub enum Op {
     MakeEmptyList {
         dst: Reg,
     },
+    /// `dst = closure(func, captures…)` — captures are taken by value from registers.
+    MakeClosure {
+        dst: Reg,
+        func: FuncId,
+        captures: Vec<Reg>,
+    },
     MakeAdt {
         dst: Reg,
         type_tag: u16,
@@ -193,6 +199,10 @@ pub struct Function {
     pub module: String,
     pub name: String,
     pub arity: u8,
+    /// Captured values occupy registers `arity .. arity + n_captures` after entry
+    /// via `CallClosure`, or after a same-group `Call`/`TailCall` that copies them
+    /// from the caller frame.
+    pub n_captures: u8,
     /// Number of registers used (indices `0 .. regs`). May be 256 (`MAX_REGISTERS`).
     pub regs: u16,
     pub code: Vec<Op>,
@@ -368,6 +378,23 @@ fn verify_op(prog: &Program, f: &Function, fi: usize, pi: usize, op: &Op) -> Res
             reg_ok(f, *tail)?;
         }
         Op::MakeEmptyList { dst } => reg_ok(f, *dst)?,
+        Op::MakeClosure {
+            dst,
+            func,
+            captures,
+        } => {
+            reg_ok(f, *dst)?;
+            func_ok(*func)?;
+            for a in captures {
+                reg_ok(f, *a)?;
+            }
+            let n_caps = prog.functions[*func as usize].n_captures as usize;
+            if captures.len() != n_caps {
+                return Err(format!(
+                    "capture count mismatch on MakeClosure in {fi}:{pi}"
+                ));
+            }
+        }
         Op::GetField { dst, base, .. } => {
             reg_ok(f, *dst)?;
             reg_ok(f, *base)?;

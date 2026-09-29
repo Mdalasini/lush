@@ -1,0 +1,9 @@
+import lush/io;
+import lush/int;
+
+pub fn main() {
+  fn id(x) {
+    x;
+  }
+  io.println(int.to_string(id(42)));
+}

@@ -87,6 +87,7 @@ fn dest_reg(op: &Op) -> Option<Reg> {
         | Op::MakeTuple { dst, .. }
         | Op::MakeCons { dst, .. }
         | Op::MakeEmptyList { dst }
+        | Op::MakeClosure { dst, .. }
         | Op::MakeAdt { dst, .. }
         | Op::GetField { dst, .. }
         | Op::IsInt { dst, .. }
@@ -130,7 +131,11 @@ fn use_regs(op: &Op) -> Vec<Reg> {
             v.extend(args);
             v
         }
-        Op::MakeTuple { fields, .. } | Op::MakeAdt { fields, .. } => fields.clone(),
+        Op::MakeTuple { fields, .. }
+        | Op::MakeAdt { fields, .. }
+        | Op::MakeClosure {
+            captures: fields, ..
+        } => fields.clone(),
         Op::GetField { base, .. } => vec![*base],
         Op::SwitchTag { scrutinee, .. } => vec![*scrutinee],
         _ => vec![],

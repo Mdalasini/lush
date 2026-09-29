@@ -23,6 +23,8 @@ struct ModuleEmitter<'a> {
     sources: &'a BTreeMap<String, String>,
     /// Cached line-start byte offsets per module path.
     line_starts: HashMap<String, Vec<usize>>,
+    /// Counter for synthetic closure function names (`$fnN`).
+    gensym: u32,
 }
 
 struct FnEmitter<'a, 'm> {
@@ -42,6 +44,10 @@ struct FnEmitter<'a, 'm> {
     lines: Vec<(u32, u32)>,
     env: Vec<HashMap<String, Reg>>,
     arity: u8,
+    /// Captures occupy `arity .. arity + n_captures` (not recycled).
+    n_captures: u8,
+    /// Local / mutual-group function names → FuncId (direct Call/TailCall).
+    local_fns: HashMap<String, FuncId>,
 }
 
 pub fn emit_program(
@@ -57,6 +63,7 @@ pub fn emit_program(
         diagnostics: Vec::new(),
         sources,
         line_starts: HashMap::new(),
+        gensym: 0,
     };
 
     // First pass: assign FuncIds.
@@ -69,6 +76,7 @@ pub fn emit_program(
                     module: path.clone(),
                     name: f.name.text.clone(),
                     arity: f.params.len() as u8,
+                    n_captures: 0,
                     regs: 0,
                     code: vec![],
                     lines: vec![],
@@ -99,6 +107,8 @@ pub fn emit_program(
                     lines: vec![],
                     env: vec![HashMap::new()],
                     arity: f.params.len() as u8,
+                    n_captures: 0,
+                    local_fns: HashMap::new(),
                 };
                 for (i, p) in f.params.iter().enumerate() {
                     fe.define(p.name.text.clone(), i as Reg);
@@ -223,9 +233,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         }
     }
 
-    /// Return a register to the free list (parameters are never freed).
+    /// Return a register to the free list (parameters and captures are never freed).
     fn free_reg(&mut self, r: Reg) {
-        if (r as usize) < self.arity as usize {
+        if (r as usize) < self.arity as usize + self.n_captures as usize {
             return;
         }
         self.temps.remove(&r);
@@ -367,9 +377,10 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         let last_use = last_uses_in_block(block);
         let n = block.statements.len();
         let mut last = None;
-        for (i, stmt) in block.statements.iter().enumerate() {
+        let mut i = 0;
+        while i < n {
             let is_last = i + 1 == n;
-            match stmt {
+            match &block.statements[i] {
                 Statement::Expr(e) => {
                     let r = self.emit_expr(e, tail && is_last);
                     if is_last {
@@ -378,6 +389,8 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         // Non-final expression statements are dead after the `;`.
                         self.free_reg(r);
                     }
+                    self.free_dead_locals(&last_use, i);
+                    i += 1;
                 }
                 Statement::Let(l) => {
                     let v = self.emit_expr(&l.value, false)?;
@@ -389,14 +402,31 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         self.emit(Op::LoadNil { dst: r }, l.span);
                         last = Some(r);
                     }
+                    self.free_dead_locals(&last_use, i);
+                    i += 1;
                 }
                 Statement::Fn(_) => {
-                    self.error(
-                        codes::E2011_LOWER,
-                        "local functions are not yet lowered in this checkpoint",
-                        Span::default(),
-                    );
-                    return None;
+                    // Maximal consecutive local-fn group (mutually recursive).
+                    let start = i;
+                    while i < n && matches!(&block.statements[i], Statement::Fn(_)) {
+                        i += 1;
+                    }
+                    let group_end = i;
+                    let group_last = group_end == n;
+                    self.emit_local_fn_group(&block.statements[start..group_end])?;
+                    if group_last {
+                        let r = self.fresh()?;
+                        let span = match &block.statements[start] {
+                            Statement::Fn(f) => f.span,
+                            _ => block.span,
+                        };
+                        self.emit(Op::LoadNil { dst: r }, span);
+                        last = Some(r);
+                    }
+                    // Free locals whose last use was any statement in the group.
+                    for stmt_i in start..group_end {
+                        self.free_dead_locals(&last_use, stmt_i);
+                    }
                 }
                 Statement::Use(_) => {
                     self.error(
@@ -407,7 +437,6 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     return None;
                 }
             }
-            self.free_dead_locals(&last_use, i);
         }
         self.pop_scope();
         if last.is_none() {
@@ -497,6 +526,24 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             ExprKind::Var(n) => {
                 if let Some(r) = self.lookup(&n.text) {
                     return Some(r);
+                }
+                // Top-level function used as a value → closure with zero captures.
+                if let Some((module, name)) = self.resolve_fn(&n.text) {
+                    let fid = *self
+                        .m
+                        .func_ids
+                        .get(&(module, name))
+                        .expect("func id for value");
+                    let dst = self.fresh()?;
+                    self.emit(
+                        Op::MakeClosure {
+                            dst,
+                            func: fid,
+                            captures: vec![],
+                        },
+                        expr.span,
+                    );
+                    return Some(dst);
                 }
                 // True/False/Nil as constructors may appear as Var after resolve? Usually Constructor.
                 match n.text.as_str() {
@@ -715,9 +762,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 );
                 Some(dst)
             }
+            ExprKind::Fn { params, body, .. } => self.emit_anon_fn(params, body, expr.span),
             other => {
                 let msg = match other {
-                    ExprKind::Fn { .. } => "closures are not yet lowered",
                     ExprKind::Pipe { .. } => "pipe expressions should have been desugared",
                     ExprKind::RecordUpdate { .. } => "record updates are not yet lowered",
                     ExprKind::BitArray(_) => "bit arrays are not yet lowered",
@@ -842,9 +889,16 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
 
         match &callee.kind {
             ExprKind::Var(n) => {
-                // Local? shouldn't be a call target usually.
+                // Same-group local fn → direct Call (captures copied by the VM).
+                if let Some(&fid) = self.local_fns.get(&n.text) {
+                    return self.emit_func_call(fid, arg_regs, span, tail);
+                }
                 if let Some((module, name)) = self.resolve_fn(&n.text) {
                     return self.emit_direct_call(&module, &name, arg_regs, span, tail);
+                }
+                // Local binding holding a closure.
+                if let Some(clo) = self.lookup(&n.text) {
+                    return self.emit_closure_call(clo, arg_regs, span, tail);
                 }
                 self.error(
                     codes::E2011_LOWER,
@@ -897,32 +951,60 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 Some(dst)
             }
             _ => {
-                // Closure call
                 let clo = self.emit_expr(callee, false)?;
-                if tail {
-                    self.emit(
-                        Op::TailCallClosure {
-                            clo,
-                            args: arg_regs,
-                        },
-                        span,
-                    );
-                    self.fresh()
-                } else {
-                    let dst = self.fresh()?;
-                    self.emit(
-                        Op::CallClosure {
-                            dst,
-                            clo,
-                            args: arg_regs.clone(),
-                        },
-                        span,
-                    );
-                    self.recycle(clo);
-                    self.recycle_regs(&arg_regs);
-                    Some(dst)
-                }
+                self.emit_closure_call(clo, arg_regs, span, tail)
             }
+        }
+    }
+
+    fn emit_closure_call(
+        &mut self,
+        clo: Reg,
+        args: Vec<Reg>,
+        span: Span,
+        tail: bool,
+    ) -> Option<Reg> {
+        if tail {
+            self.emit(Op::TailCallClosure { clo, args }, span);
+            self.fresh()
+        } else {
+            let dst = self.fresh()?;
+            self.emit(
+                Op::CallClosure {
+                    dst,
+                    clo,
+                    args: args.clone(),
+                },
+                span,
+            );
+            self.recycle(clo);
+            self.recycle_regs(&args);
+            Some(dst)
+        }
+    }
+
+    fn emit_func_call(
+        &mut self,
+        fid: FuncId,
+        args: Vec<Reg>,
+        span: Span,
+        tail: bool,
+    ) -> Option<Reg> {
+        if tail {
+            self.emit(Op::TailCall { func: fid, args }, span);
+            self.fresh()
+        } else {
+            let dst = self.fresh()?;
+            self.emit(
+                Op::Call {
+                    dst,
+                    func: fid,
+                    args: args.clone(),
+                },
+                span,
+            );
+            self.recycle_regs(&args);
+            Some(dst)
         }
     }
 
@@ -975,22 +1057,267 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 return None;
             }
         };
-        if tail {
-            self.emit(Op::TailCall { func: fid, args }, span);
-            self.fresh()
-        } else {
+        self.emit_func_call(fid, args, span, tail)
+    }
+
+    /// Lower an anonymous `fn` / capture desugar to a synthetic function + `MakeClosure`.
+    fn emit_anon_fn(&mut self, params: &[Param], body: &Block, span: Span) -> Option<Reg> {
+        let capture_names = self.free_vars_of_fn(params, body, &HashSet::new());
+        let syn = self.fresh_synth_name();
+        let fid =
+            self.emit_closure_function(&syn, params, body, &capture_names, &HashMap::new(), span)?;
+        let mut caps = Vec::with_capacity(capture_names.len());
+        for name in &capture_names {
+            let Some(reg) = self.lookup(name) else {
+                self.error(
+                    codes::E2011_LOWER,
+                    format!("capture `{name}` has no register"),
+                    span,
+                );
+                return None;
+            };
+            caps.push(reg);
+        }
+        let dst = self.fresh()?;
+        self.emit(
+            Op::MakeClosure {
+                dst,
+                func: fid,
+                captures: caps,
+            },
+            span,
+        );
+        Some(dst)
+    }
+
+    /// Lower a maximal consecutive group of local `fn` statements.
+    fn emit_local_fn_group(&mut self, stmts: &[Statement]) -> Option<()> {
+        let defs: Vec<&FnDef> = stmts
+            .iter()
+            .map(|s| match s {
+                Statement::Fn(f) => f,
+                _ => unreachable!(),
+            })
+            .collect();
+        if defs.is_empty() {
+            return Some(());
+        }
+
+        let peer_names: HashSet<String> = defs.iter().map(|f| f.name.text.clone()).collect();
+
+        // Shared capture environment = union of free vars of every peer body,
+        // excluding peer names themselves (resolved via direct Call).
+        let mut capture_names: Vec<String> = Vec::new();
+        let mut seen_caps: HashSet<String> = HashSet::new();
+        for f in &defs {
+            for name in self.free_vars_of_fn(&f.params, &f.body, &peer_names) {
+                if seen_caps.insert(name.clone()) {
+                    capture_names.push(name);
+                }
+            }
+        }
+
+        // Pass 1: stubs + name→FuncId so mutual recursion can Call by FuncId.
+        let mut local_fns: HashMap<String, FuncId> = HashMap::new();
+        let mut fids: Vec<FuncId> = Vec::with_capacity(defs.len());
+        for f in &defs {
+            let n = self.m.gensym;
+            self.m.gensym += 1;
+            let syn = format!("${}_{}", f.name.text, n);
+            let fid = self.m.functions.len() as FuncId;
+            if fid as usize >= crate::limits::MAX_FUNCTIONS_PER_MODULE {
+                self.error(
+                    codes::E2003_TOO_MANY_FUNCTIONS,
+                    "too many functions in module",
+                    f.span,
+                );
+                return None;
+            }
+            self.m.functions.push(Function {
+                module: self.module.clone(),
+                name: syn,
+                arity: f.params.len() as u8,
+                n_captures: capture_names.len() as u8,
+                regs: 0,
+                code: vec![],
+                lines: vec![],
+                source_path: format!("src/{}.lush", self.module),
+            });
+            local_fns.insert(f.name.text.clone(), fid);
+            fids.push(fid);
+        }
+
+        // Pass 2: bodies with the full peer map.
+        for (f, &fid) in defs.iter().zip(fids.iter()) {
+            self.fill_closure_function(
+                fid,
+                &f.params,
+                &f.body,
+                &capture_names,
+                &local_fns,
+                f.span,
+            )?;
+        }
+
+        // Pass 3: MakeClosure at the group site and bind each name.
+        let mut cap_regs = Vec::with_capacity(capture_names.len());
+        for name in &capture_names {
+            match self.lookup(name) {
+                Some(r) => cap_regs.push(r),
+                None => {
+                    self.error(
+                        codes::E2011_LOWER,
+                        format!("capture `{name}` has no register"),
+                        defs[0].span,
+                    );
+                    return None;
+                }
+            }
+        }
+        for (f, &fid) in defs.iter().zip(fids.iter()) {
             let dst = self.fresh()?;
             self.emit(
-                Op::Call {
+                Op::MakeClosure {
                     dst,
                     func: fid,
-                    args: args.clone(),
+                    captures: cap_regs.clone(),
                 },
+                f.span,
+            );
+            self.define(f.name.text.clone(), dst);
+        }
+        Some(())
+    }
+
+    fn fresh_synth_name(&mut self) -> String {
+        let n = self.m.gensym;
+        self.m.gensym += 1;
+        format!("$fn{n}")
+    }
+
+    fn emit_closure_function(
+        &mut self,
+        name: &str,
+        params: &[Param],
+        body: &Block,
+        capture_names: &[String],
+        local_fns: &HashMap<String, FuncId>,
+        span: Span,
+    ) -> Option<FuncId> {
+        let fid = self.m.functions.len() as FuncId;
+        if fid as usize >= crate::limits::MAX_FUNCTIONS_PER_MODULE {
+            self.error(
+                codes::E2003_TOO_MANY_FUNCTIONS,
+                "too many functions in module",
                 span,
             );
-            self.recycle_regs(&args);
-            Some(dst)
+            return None;
         }
+        self.m.functions.push(Function {
+            module: self.module.clone(),
+            name: name.to_string(),
+            arity: params.len() as u8,
+            n_captures: capture_names.len() as u8,
+            regs: 0,
+            code: vec![],
+            lines: vec![],
+            source_path: format!("src/{}.lush", self.module),
+        });
+        self.fill_closure_function(fid, params, body, capture_names, local_fns, span)?;
+        Some(fid)
+    }
+
+    fn fill_closure_function(
+        &mut self,
+        fid: FuncId,
+        params: &[Param],
+        body: &Block,
+        capture_names: &[String],
+        local_fns: &HashMap<String, FuncId>,
+        span: Span,
+    ) -> Option<()> {
+        let module = self.module.clone();
+        let name = self.m.functions[fid as usize].name.clone();
+        let arity = params.len() as u8;
+        let n_captures = capture_names.len() as u8;
+        let mut nested = FnEmitter {
+            m: self.m,
+            module,
+            name,
+            regs: params.len() + capture_names.len(),
+            free: Vec::new(),
+            temps: HashSet::new(),
+            reg_limit_reported: false,
+            code: vec![],
+            lines: vec![],
+            env: vec![HashMap::new()],
+            arity,
+            n_captures,
+            local_fns: local_fns.clone(),
+        };
+        for (i, p) in params.iter().enumerate() {
+            nested.define(p.name.text.clone(), i as Reg);
+        }
+        for (i, c) in capture_names.iter().enumerate() {
+            nested.define(c.clone(), (params.len() + i) as Reg);
+        }
+        if let Some(ret) = nested.emit_block(body, true) {
+            if !matches!(
+                nested.code.last(),
+                Some(Op::Return { .. } | Op::TailCall { .. } | Op::TailCallClosure { .. })
+            ) {
+                nested.emit(Op::Return { src: ret }, span);
+            }
+        } else if !matches!(
+            nested.code.last(),
+            Some(
+                Op::Return { .. }
+                    | Op::TailCall { .. }
+                    | Op::TailCallClosure { .. }
+                    | Op::Panic { .. }
+            )
+        ) {
+            if let Some(r) = nested.fresh() {
+                nested.emit(Op::LoadNil { dst: r }, span);
+                nested.emit(Op::Return { src: r }, span);
+            }
+        }
+        let regs = nested
+            .regs
+            .max(nested.arity as usize + nested.n_captures as usize) as u16;
+        let code = std::mem::take(&mut nested.code);
+        let lines = std::mem::take(&mut nested.lines);
+        let func = &mut self.m.functions[fid as usize];
+        func.regs = regs;
+        func.code = code;
+        func.lines = lines;
+        Some(())
+    }
+
+    /// Names read in `body` that resolve to the *enclosing* emitter's env and
+    /// are not parameters, not in `extra_bound` (peer local-fn names), and not
+    /// top-level functions.
+    fn free_vars_of_fn(
+        &self,
+        params: &[Param],
+        body: &Block,
+        extra_bound: &HashSet<String>,
+    ) -> Vec<String> {
+        let mut bound: HashSet<String> = params.iter().map(|p| p.name.text.clone()).collect();
+        bound.extend(extra_bound.iter().cloned());
+        let mut found: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        collect_free_vars_block(body, &mut bound, &mut |name| {
+            if self.lookup(name).is_some()
+                && self.local_fns.get(name).is_none()
+                && self.resolve_fn(name).is_none()
+                && !extra_bound.contains(name)
+                && seen.insert(name.to_string())
+            {
+                found.push(name.to_string());
+            }
+        });
+        found
     }
 
     fn emit_builtin(
@@ -1472,27 +1799,176 @@ fn binop_op(op: BinOp, dst: Reg, a: Reg, b: Reg) -> Op {
     }
 }
 
+/// Walk `body`, tracking locally bound names, and invoke `on_free` for each
+/// variable use that is not bound in this function.
+fn collect_free_vars_block(
+    block: &Block,
+    bound: &mut HashSet<String>,
+    on_free: &mut dyn FnMut(&str),
+) {
+    let mut i = 0;
+    while i < block.statements.len() {
+        match &block.statements[i] {
+            Statement::Expr(e) => collect_free_vars_expr(e, bound, on_free),
+            Statement::Let(l) => {
+                collect_free_vars_expr(&l.value, bound, on_free);
+                note_pat_binds(&l.pattern, bound);
+            }
+            Statement::Use(u) => {
+                collect_free_vars_expr(&u.value, bound, on_free);
+                for p in &u.patterns {
+                    note_pat_binds(p, bound);
+                }
+            }
+            Statement::Fn(_) => {
+                let start = i;
+                while i < block.statements.len() && matches!(&block.statements[i], Statement::Fn(_))
+                {
+                    i += 1;
+                }
+                // Peer names are bound for the whole group.
+                for s in &block.statements[start..i] {
+                    if let Statement::Fn(f) = s {
+                        bound.insert(f.name.text.clone());
+                    }
+                }
+                for s in &block.statements[start..i] {
+                    if let Statement::Fn(f) = s {
+                        let mut nested_bound = bound.clone();
+                        for p in &f.params {
+                            nested_bound.insert(p.name.text.clone());
+                        }
+                        collect_free_vars_block(&f.body, &mut nested_bound, on_free);
+                    }
+                }
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn collect_free_vars_expr(expr: &Expr, bound: &mut HashSet<String>, on_free: &mut dyn FnMut(&str)) {
+    let mut stack: Vec<&Expr> = vec![expr];
+    while let Some(e) = stack.pop() {
+        match &e.kind {
+            ExprKind::Var(n) => {
+                if !bound.contains(&n.text) {
+                    on_free(&n.text);
+                }
+            }
+            ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            ExprKind::Call { callee, args } => {
+                stack.push(callee);
+                for a in args {
+                    if let ArgValue::Expr(inner) = &a.value {
+                        stack.push(inner);
+                    }
+                }
+            }
+            ExprKind::Tuple(xs) => stack.extend(xs.iter()),
+            ExprKind::List { items, spread } => {
+                stack.extend(items.iter());
+                if let Some(s) = spread {
+                    stack.push(s);
+                }
+            }
+            ExprKind::Paren(inner)
+            | ExprKind::Unary { expr: inner, .. }
+            | ExprKind::Echo(inner)
+            | ExprKind::Field { base: inner, .. }
+            | ExprKind::Assert { expr: inner, .. } => stack.push(inner),
+            ExprKind::Block(b) => {
+                let mut nested = bound.clone();
+                collect_free_vars_block(b, &mut nested, on_free);
+            }
+            ExprKind::Fn { params, body, .. } => {
+                let mut nested = bound.clone();
+                for p in params {
+                    nested.insert(p.name.text.clone());
+                }
+                collect_free_vars_block(body, &mut nested, on_free);
+            }
+            ExprKind::Case { subjects, clauses } => {
+                for s in subjects {
+                    stack.push(s);
+                }
+                for c in clauses {
+                    let mut arm_bound = bound.clone();
+                    for row in &c.patterns {
+                        for p in &row.patterns {
+                            note_pat_binds(p, &mut arm_bound);
+                        }
+                    }
+                    if let Some(g) = &c.guard {
+                        collect_free_vars_expr(g, &mut arm_bound, on_free);
+                    }
+                    collect_free_vars_expr(&c.body, &mut arm_bound, on_free);
+                }
+            }
+            ExprKind::RecordUpdate { base, fields, .. } => {
+                stack.push(base);
+                for (_, v) in fields {
+                    stack.push(v);
+                }
+            }
+            ExprKind::BitArray(segs) => {
+                for s in segs {
+                    stack.push(&s.value);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Map each name bound in this block to the index of the last statement that
 /// uses it (so registers can be freed after that statement).
 fn last_uses_in_block(block: &Block) -> HashMap<String, usize> {
     let mut last = HashMap::new();
     let mut bound: HashSet<String> = HashSet::new();
-    for (i, stmt) in block.statements.iter().enumerate() {
-        match stmt {
-            Statement::Expr(e) => note_var_uses(e, i, &bound, &mut last),
+    let mut i = 0;
+    while i < block.statements.len() {
+        match &block.statements[i] {
+            Statement::Expr(e) => {
+                note_var_uses(e, i, &bound, &mut last);
+                i += 1;
+            }
             Statement::Let(l) => {
                 note_var_uses(&l.value, i, &bound, &mut last);
                 note_pat_binds(&l.pattern, &mut bound);
+                i += 1;
             }
             Statement::Use(u) => {
                 note_var_uses(&u.value, i, &bound, &mut last);
                 for p in &u.patterns {
                     note_pat_binds(p, &mut bound);
                 }
+                i += 1;
             }
-            Statement::Fn(f) => {
-                // Nested fn body may read outer locals.
-                note_block_uses(&f.body, i, &bound, &mut last);
+            Statement::Fn(_) => {
+                let start = i;
+                while i < block.statements.len() && matches!(&block.statements[i], Statement::Fn(_))
+                {
+                    i += 1;
+                }
+                // Bodies may read outer locals; attribute those uses to the
+                // last statement of the group (captures stay live through it).
+                let use_i = i - 1;
+                for s in &block.statements[start..i] {
+                    if let Statement::Fn(f) = s {
+                        note_block_uses(&f.body, use_i, &bound, &mut last);
+                    }
+                }
+                // Local fn names are bound for the rest of the block.
+                for s in &block.statements[start..i] {
+                    if let Statement::Fn(f) = s {
+                        bound.insert(f.name.text.clone());
+                    }
+                }
             }
         }
     }
