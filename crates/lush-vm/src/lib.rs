@@ -2,6 +2,7 @@
 
 pub mod builtin;
 pub mod heap;
+pub mod inspect;
 pub mod interp;
 pub mod panic_report;
 pub mod value;

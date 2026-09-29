@@ -504,8 +504,10 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 Some(ok)
             }
             ExprKind::Echo(e) => {
-                // echo: evaluate, builtin-less debug via eprintln of inspect — simplify: just yield value
-                self.emit_expr(e, false)
+                let src = self.emit_expr(e, false)?;
+                let dst = self.fresh()?;
+                self.emit(Op::Echo { dst, src }, expr.span);
+                Some(dst)
             }
             ExprKind::Tuple(xs) => {
                 let mut fields = Vec::new();

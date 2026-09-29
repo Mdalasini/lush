@@ -116,6 +116,12 @@ impl Heap {
     pub fn alloc_tuple(&mut self, fields: &[Value]) -> HeapPtr {
         self.push(Object::Tuple(fields.to_vec()), 2 + fields.len() as u64)
     }
+    pub fn tuple_len(&self, p: HeapPtr) -> usize {
+        match self.get(p) {
+            Object::Tuple(fs) => fs.len(),
+            _ => 0,
+        }
+    }
     pub fn tuple_field(&self, p: HeapPtr, i: usize) -> Value {
         match self.get(p) {
             Object::Tuple(fs) => fs[i],
@@ -153,6 +159,12 @@ impl Heap {
     pub fn adt_variant(&self, p: HeapPtr) -> u16 {
         match self.get(p) {
             Object::Adt { variant, .. } => *variant,
+            _ => 0,
+        }
+    }
+    pub fn adt_len(&self, p: HeapPtr) -> usize {
+        match self.get(p) {
+            Object::Adt { fields, .. } => fields.len(),
             _ => 0,
         }
     }

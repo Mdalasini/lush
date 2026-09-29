@@ -460,6 +460,11 @@ fn encode_op(w: &mut Writer, op: &Op) {
             w.u8(*dst);
             w.u8(*src);
         }
+        Op::Echo { dst, src } => {
+            w.u16(58);
+            w.u8(*dst);
+            w.u8(*src);
+        }
     }
 }
 
@@ -616,6 +621,10 @@ fn decode_op(r: &mut Reader<'_>) -> Result<Op, String> {
             value: r.i64()?,
         }),
         57 => Ok(Op::IsEmptyList {
+            dst: r.u8()?,
+            src: r.u8()?,
+        }),
+        58 => Ok(Op::Echo {
             dst: r.u8()?,
             src: r.u8()?,
         }),

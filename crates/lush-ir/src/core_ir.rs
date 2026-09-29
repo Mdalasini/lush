@@ -90,7 +90,8 @@ fn dest_reg(op: &Op) -> Option<Reg> {
         | Op::MakeAdt { dst, .. }
         | Op::GetField { dst, .. }
         | Op::IsInt { dst, .. }
-        | Op::IsEmptyList { dst, .. } => Some(*dst),
+        | Op::IsEmptyList { dst, .. }
+        | Op::Echo { dst, .. } => Some(*dst),
         _ => None,
     }
 }
@@ -101,7 +102,8 @@ fn use_regs(op: &Op) -> Vec<Reg> {
         | Op::Neg { src, .. }
         | Op::Return { src }
         | Op::IsInt { src, .. }
-        | Op::IsEmptyList { src, .. } => {
+        | Op::IsEmptyList { src, .. }
+        | Op::Echo { src, .. } => {
             vec![*src]
         }
         Op::Add { a, b, .. }

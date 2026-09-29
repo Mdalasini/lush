@@ -181,6 +181,11 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// Write location + inspect(src) to stderr; result is src.
+    Echo {
+        dst: Reg,
+        src: Reg,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -296,7 +301,10 @@ fn verify_op(prog: &Program, f: &Function, fi: usize, pi: usize, op: &Op) -> Res
             reg_ok(f, *a)?;
             reg_ok(f, *b)?;
         }
-        Op::Neg { dst, src } | Op::IsInt { dst, src, .. } | Op::IsEmptyList { dst, src } => {
+        Op::Neg { dst, src }
+        | Op::IsInt { dst, src, .. }
+        | Op::IsEmptyList { dst, src }
+        | Op::Echo { dst, src } => {
             reg_ok(f, *dst)?;
             reg_ok(f, *src)?;
         }

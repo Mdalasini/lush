@@ -160,3 +160,16 @@ fn panic_assert_e2e() {
     assert!(err.contains("nope"), "{err}");
     assert!(err.starts_with("panic:"), "{err}");
 }
+
+#[test]
+fn echo_e2e() {
+    let (src, _, _, expect_status) = common::read_case("echo");
+    let exit = common::run_source("main", &src, OptLevel::default());
+    assert_eq!(exit.status, expect_status);
+    let err = String::from_utf8_lossy(&exit.stderr);
+    assert!(
+        err.contains(" 3\n") || err.ends_with("3\n"),
+        "stderr={err:?}"
+    );
+    assert!(err.contains("src/main.lush:"), "{err}");
+}

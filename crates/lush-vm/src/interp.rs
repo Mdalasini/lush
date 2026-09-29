@@ -5,6 +5,7 @@ use lush_types::numeric;
 
 use crate::builtin;
 use crate::heap::{Heap, ObjectKind};
+use crate::inspect;
 use crate::panic_report::{self, FrameInfo};
 use crate::value::Value;
 
@@ -279,6 +280,20 @@ impl Vm {
                     None => false,
                 };
                 self.set_reg(fi, dst, Value::from_bool(ok));
+            }
+            Op::Echo { dst, src } => {
+                let v = self.reg(fi, src);
+                let rendered = inspect::inspect(&self.heap, v);
+                let fun = &self.program.functions[func_idx];
+                let (line, col) = fun.lines.get(pc).copied().unwrap_or((1, 1));
+                let line = format!(
+                    "{}:{}:{} {}
+",
+                    fun.source_path, line, col, rendered
+                );
+                self.stderr.extend_from_slice(line.as_bytes());
+                charge += (rendered.len() as u64).div_ceil(8);
+                self.set_reg(fi, dst, v);
             }
             Op::Call { dst, func, args } => {
                 self.call(fi, func as usize, &args, dst, false)?;
