@@ -123,60 +123,30 @@ impl Vm {
             self.counters.reductions += 1;
             self.counters.instructions += 1;
             spent += 1;
-            match instruction {
-                Instruction::Move { dst, src } => {
+            match decode_instruction(instruction) {
+                DecodedInstruction::Integer { op, dst, lhs, rhs } => {
+                    if let Err(kind) = self.execute_int_op(dst, lhs, rhs, op) {
+                        return self.fail(pc, kind);
+                    }
+                }
+                DecodedInstruction::Move { dst, src } => {
                     self.registers[dst as usize] = self.registers[src as usize].clone();
                 }
-                Instruction::LoadInt { dst, value } => {
+                DecodedInstruction::LoadInt { dst, value } => {
                     self.registers[dst as usize] = Value::Int(value);
                 }
-                Instruction::LoadBool { dst, value } => {
+                DecodedInstruction::LoadBool { dst, value } => {
                     self.registers[dst as usize] = Value::Bool(value);
                 }
-                Instruction::AddInt { dst, lhs, rhs } => {
-                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Add) {
-                        return self.fail(pc, kind);
-                    }
-                }
-                Instruction::SubInt { dst, lhs, rhs } => {
-                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Sub) {
-                        return self.fail(pc, kind);
-                    }
-                }
-                Instruction::MulInt { dst, lhs, rhs } => {
-                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Mul) {
-                        return self.fail(pc, kind);
-                    }
-                }
-                Instruction::DivInt { dst, lhs, rhs } => {
-                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Div) {
-                        return self.fail(pc, kind);
-                    }
-                }
-                Instruction::RemInt { dst, lhs, rhs } => {
-                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Rem) {
-                        return self.fail(pc, kind);
-                    }
-                }
-                Instruction::EqInt { dst, lhs, rhs } => {
-                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Eq) {
-                        return self.fail(pc, kind);
-                    }
-                }
-                Instruction::LtInt { dst, lhs, rhs } => {
-                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Lt) {
-                        return self.fail(pc, kind);
-                    }
-                }
-                Instruction::Jump { target } => self.pc = target as usize,
-                Instruction::JumpIfFalse { condition, target } => {
+                DecodedInstruction::Jump { target } => self.pc = target as usize,
+                DecodedInstruction::JumpIfFalse { condition, target } => {
                     match self.registers[condition as usize] {
                         Value::Bool(false) => self.pc = target as usize,
                         Value::Bool(true) => {}
                         _ => return self.fail(pc, PanicKind::ExpectedBool),
                     }
                 }
-                Instruction::Return { src } => {
+                DecodedInstruction::Return { src } => {
                     return self.finish(Exit::Returned(self.registers[src as usize].clone()));
                 }
             }
@@ -192,10 +162,10 @@ impl Vm {
         }
     }
 
-    fn apply_int_op(&mut self, dst: u8, lhs: u8, rhs: u8, op: IntOp) -> Result<(), PanicKind> {
+    fn execute_int_op(&mut self, dst: u8, lhs: u8, rhs: u8, op: IntOp) -> Result<(), PanicKind> {
         let left = self.read_int(lhs)?;
         let right = self.read_int(rhs)?;
-        self.registers[dst as usize] = apply_int_op(op, left, right)?;
+        self.registers[dst as usize] = eval_int_op(op, left, right)?;
         Ok(())
     }
 
@@ -233,7 +203,93 @@ enum IntOp {
     Lt,
 }
 
-fn apply_int_op(op: IntOp, lhs: i64, rhs: i64) -> Result<Value, PanicKind> {
+enum DecodedInstruction {
+    Integer {
+        op: IntOp,
+        dst: u8,
+        lhs: u8,
+        rhs: u8,
+    },
+    Move {
+        dst: u8,
+        src: u8,
+    },
+    LoadInt {
+        dst: u8,
+        value: i64,
+    },
+    LoadBool {
+        dst: u8,
+        value: bool,
+    },
+    Jump {
+        target: u32,
+    },
+    JumpIfFalse {
+        condition: u8,
+        target: u32,
+    },
+    Return {
+        src: u8,
+    },
+}
+
+fn decode_instruction(instruction: Instruction) -> DecodedInstruction {
+    match instruction {
+        Instruction::AddInt { dst, lhs, rhs } => DecodedInstruction::Integer {
+            op: IntOp::Add,
+            dst,
+            lhs,
+            rhs,
+        },
+        Instruction::SubInt { dst, lhs, rhs } => DecodedInstruction::Integer {
+            op: IntOp::Sub,
+            dst,
+            lhs,
+            rhs,
+        },
+        Instruction::MulInt { dst, lhs, rhs } => DecodedInstruction::Integer {
+            op: IntOp::Mul,
+            dst,
+            lhs,
+            rhs,
+        },
+        Instruction::DivInt { dst, lhs, rhs } => DecodedInstruction::Integer {
+            op: IntOp::Div,
+            dst,
+            lhs,
+            rhs,
+        },
+        Instruction::RemInt { dst, lhs, rhs } => DecodedInstruction::Integer {
+            op: IntOp::Rem,
+            dst,
+            lhs,
+            rhs,
+        },
+        Instruction::EqInt { dst, lhs, rhs } => DecodedInstruction::Integer {
+            op: IntOp::Eq,
+            dst,
+            lhs,
+            rhs,
+        },
+        Instruction::LtInt { dst, lhs, rhs } => DecodedInstruction::Integer {
+            op: IntOp::Lt,
+            dst,
+            lhs,
+            rhs,
+        },
+        Instruction::Move { dst, src } => DecodedInstruction::Move { dst, src },
+        Instruction::LoadInt { dst, value } => DecodedInstruction::LoadInt { dst, value },
+        Instruction::LoadBool { dst, value } => DecodedInstruction::LoadBool { dst, value },
+        Instruction::Jump { target } => DecodedInstruction::Jump { target },
+        Instruction::JumpIfFalse { condition, target } => {
+            DecodedInstruction::JumpIfFalse { condition, target }
+        }
+        Instruction::Return { src } => DecodedInstruction::Return { src },
+    }
+}
+
+fn eval_int_op(op: IntOp, lhs: i64, rhs: i64) -> Result<Value, PanicKind> {
     let value = match op {
         IntOp::Add => Value::Int(lhs.checked_add(rhs).ok_or(PanicKind::IntegerOverflow)?),
         IntOp::Sub => Value::Int(lhs.checked_sub(rhs).ok_or(PanicKind::IntegerOverflow)?),
