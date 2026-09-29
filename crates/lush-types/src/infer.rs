@@ -18,7 +18,7 @@ use crate::ty::{
     ConstraintSet, FieldInfo, Scheme, Type, TypeDefId, TypeDefInfo, TypeDefKind, TypeStore,
     VariantInfo,
 };
-use crate::typed::{BitSegmentKind, TypedBuilder};
+use crate::typed::{BitSegmentKind, FieldSite, TypedBuilder};
 use crate::unify::{self, Origin, Unifier};
 
 pub struct InferCtx<'a> {
@@ -2065,7 +2065,7 @@ fn infer_expr_inner(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
             }
         }
         ExprKind::Call { callee, args } => infer_call(ctx, expr.id, callee, args, expr.span),
-        ExprKind::Field { base, field } => infer_field(ctx, base, field, expr.span),
+        ExprKind::Field { base, field } => infer_field(ctx, expr.id, base, field, expr.span),
         ExprKind::RecordUpdate {
             constructor,
             base,
@@ -2817,7 +2817,13 @@ fn discharge_after_unify(ctx: &mut InferCtx<'_>, ty: &Type, span: Span) {
     }
 }
 
-fn infer_field(ctx: &mut InferCtx<'_>, base: &Expr, field: &FieldName, span: Span) -> Type {
+fn infer_field(
+    ctx: &mut InferCtx<'_>,
+    expr_id: NodeId,
+    base: &Expr,
+    field: &FieldName,
+    span: Span,
+) -> Type {
     // Module-qualified value: process.send as field access used as callee is handled in infer_call.
     // Here: record field access OR module.value as expression
     if let ExprKind::Var(m) = &base.kind {
@@ -2896,11 +2902,13 @@ fn infer_field(ctx: &mut InferCtx<'_>, base: &Expr, field: &FieldName, span: Spa
                 return Type::Error;
             }
             let mut field_ty: Option<Type> = None;
+            let mut indices_by_variant: Vec<Option<u16>> = Vec::with_capacity(info.variants.len());
             for v in &info.variants {
                 let ft = v
                     .fields
                     .iter()
-                    .find(|f| f.label.as_deref() == Some(field_name.as_str()));
+                    .enumerate()
+                    .find(|(_, f)| f.label.as_deref() == Some(field_name.as_str()));
                 match ft {
                     None => {
                         ctx.sink.error(
@@ -2914,7 +2922,8 @@ fn infer_field(ctx: &mut InferCtx<'_>, base: &Expr, field: &FieldName, span: Spa
                         );
                         return Type::Error;
                     }
-                    Some(f) => {
+                    Some((idx, f)) => {
+                        indices_by_variant.push(Some(idx as u16));
                         // subst params
                         let owned: Vec<Type> = args.iter().map(|t| (**t).clone()).collect();
                         let concrete = apply_tdef_args(ctx.store, &f.ty, &info, &owned);
@@ -2927,6 +2936,16 @@ fn infer_field(ctx: &mut InferCtx<'_>, base: &Expr, field: &FieldName, span: Spa
                         }
                     }
                 }
+            }
+            if !expr_id.is_none() {
+                ctx.typed.set_field(
+                    expr_id,
+                    FieldSite {
+                        type_def: def,
+                        indices_by_variant,
+                        field_name: field_name.clone(),
+                    },
+                );
             }
             field_ty.unwrap_or(Type::Error)
         }

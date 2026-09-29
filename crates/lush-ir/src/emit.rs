@@ -7,7 +7,7 @@ use lush_syntax::diagnostic::{Diagnostic, DiagnosticKind};
 use lush_syntax::span::Span;
 use lush_syntax::token::IntBase;
 use lush_types::numeric;
-use lush_types::typed::{BitSegmentKind, TypedModule};
+use lush_types::typed::{BitSegmentKind, FieldSite, TypedModule};
 
 use crate::bytecode::{BitSegEnc, Builtin, ConstId, Constant, FuncId, Function, Op, Program, Reg};
 use crate::codes;
@@ -589,11 +589,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     Some(dst)
                 }
                 name => {
-                    let variant = match name {
-                        "Ok" | "Some" => 0u16,
-                        "Error" | "None" => 1u16,
-                        _ => 0u16,
-                    };
+                    let variant = self.constructor_tag(name).unwrap_or(0);
                     let dst = self.fresh()?;
                     self.emit(
                         Op::MakeAdt {
@@ -752,16 +748,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 // Module.alias for values shouldn't appear; treat as field access.
                 let base_r = self.emit_expr(base, false)?;
                 let name = field_name(field);
-                let index = self.field_index(base, &name).unwrap_or(0);
-                let dst = self.fresh()?;
-                self.emit(
-                    Op::GetField {
-                        dst,
-                        base: base_r,
-                        index,
-                    },
-                    expr.span,
-                );
+                let site = self.m.typed.expr(expr.id).and_then(|i| i.field.clone());
+                let dst = self.emit_field_access(base_r, site.as_ref(), &name, expr.span)?;
+                self.recycle(base_r);
                 Some(dst)
             }
             ExprKind::Fn { params, body, .. } => self.emit_anon_fn(params, body, expr.span),
@@ -1069,11 +1058,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 None
             }
             ExprKind::Constructor(c) => {
-                let variant = match c.name.text.as_str() {
-                    "Ok" | "Some" => 0u16,
-                    "Error" | "None" => 1u16,
-                    _ => 0u16,
-                };
+                let variant = self.constructor_tag(&c.name.text).unwrap_or(0);
                 let dst = self.fresh()?;
                 self.emit(
                     Op::MakeAdt {
@@ -1627,14 +1612,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         constructor: c,
                         args,
                     } if !matches!(c.name.text.as_str(), "True" | "False") => {
-                        let tag: u16 = match c.name.text.as_str() {
-                            "Ok" | "Some" => 0,
-                            "Error" | "None" => 1,
-                            _ => {
-                                // User ADTs: declaration order unknown here — use 0.
-                                0
-                            }
-                        };
+                        let tag: u16 = self.constructor_tag(&c.name.text).unwrap_or(0);
                         let switch_idx = self.code.len();
                         self.emit(
                             Op::SwitchTag {
@@ -2163,22 +2141,120 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         Some(())
     }
 
-    fn field_index(&self, _base: &Expr, name: &str) -> Option<u16> {
-        for info in self.m.typed.exprs.values() {
-            if let Some(site) = &info.field {
-                if site.field_name == name {
-                    let idxs: Vec<_> = site.indices_by_variant.iter().flatten().copied().collect();
-                    if let Some(i) = idxs.first() {
-                        return Some(*i);
-                    }
-                }
+    /// Declaration-order variant tag for a constructor name from the typed store.
+    fn constructor_tag(&self, name: &str) -> Option<u16> {
+        // Deterministic scan: HashMap iteration order is not stable across runs.
+        let mut defs: Vec<_> = self.m.typed.store.defs.values().collect();
+        defs.sort_by(|a, b| (&a.module, &a.name).cmp(&(&b.module, &b.name)));
+        for def in defs {
+            if let Some((i, _)) = def
+                .variants
+                .iter()
+                .enumerate()
+                .find(|(_, v)| v.name == name)
+            {
+                return Some(i as u16);
             }
         }
-        Some(match name {
-            "x" | "first" => 0,
-            "y" | "second" => 1,
-            _ => 0,
-        })
+        match name {
+            "Ok" | "Some" => Some(0),
+            "Error" | "None" => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Lower `base.field` using the call site's [`FieldSite`] when present.
+    /// Multi-variant fields with differing indices become `SwitchTag` + `GetField`.
+    fn emit_field_access(
+        &mut self,
+        base_r: Reg,
+        site: Option<&FieldSite>,
+        name: &str,
+        span: Span,
+    ) -> Option<Reg> {
+        let dst = self.fresh()?;
+        let arms: Vec<(u16, u16)> = site
+            .map(|s| {
+                s.indices_by_variant
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(vi, oi)| oi.map(|idx| (vi as u16, idx)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if arms.is_empty() {
+            let index = match name {
+                "x" | "first" => 0,
+                "y" | "second" => 1,
+                _ => 0,
+            };
+            self.emit(
+                Op::GetField {
+                    dst,
+                    base: base_r,
+                    index,
+                },
+                span,
+            );
+            return Some(dst);
+        }
+        let all_same = arms.windows(2).all(|w| w[0].1 == w[1].1);
+        if arms.len() == 1 || all_same {
+            self.emit(
+                Op::GetField {
+                    dst,
+                    base: base_r,
+                    index: arms[0].1,
+                },
+                span,
+            );
+            return Some(dst);
+        }
+        let switch_idx = self.code.len();
+        self.emit(
+            Op::SwitchTag {
+                scrutinee: base_r,
+                arms: vec![],
+                default: 0,
+            },
+            span,
+        );
+        let mut end_jumps = Vec::new();
+        let mut switch_arms = Vec::with_capacity(arms.len());
+        for (tag, index) in &arms {
+            let arm_pc = self.code.len() as u32;
+            switch_arms.push((*tag, arm_pc));
+            self.emit(
+                Op::GetField {
+                    dst,
+                    base: base_r,
+                    index: *index,
+                },
+                span,
+            );
+            let jmp = self.code.len();
+            self.emit(Op::Jump { target: 0 }, span);
+            end_jumps.push(jmp);
+        }
+        let default_pc = self.code.len() as u32;
+        if let Op::SwitchTag {
+            arms: a, default, ..
+        } = &mut self.code[switch_idx]
+        {
+            *a = switch_arms;
+            *default = default_pc;
+        }
+        let msg = self.intern_string("internal error: field access unmatched tag".into());
+        self.emit(Op::Panic { msg }, span);
+        let end = self.code.len() as u32;
+        for j in end_jumps {
+            if let Op::Jump { target } = &mut self.code[j] {
+                *target = end;
+            }
+        }
+        // Real instruction so end jumps land past the panic.
+        self.emit(Op::Move { dst, src: dst }, span);
+        Some(dst)
     }
 }
 

@@ -1,0 +1,27 @@
+import lush/io;
+import lush/int;
+
+pub type T {
+  A(name: String, x: Int)
+  B(y: Int, name: String)
+}
+
+fn name_of(t: T) -> String {
+  t.name;
+}
+
+fn tag_label(t: T) -> String {
+  case t {
+    A(_, _) -> "A";
+    B(_, _) -> "B";
+  };
+}
+
+pub fn main() -> Nil {
+  let a = A("a", 1);
+  let b = B(2, "b");
+  io.println(name_of(a));
+  io.println(name_of(b));
+  io.println(tag_label(a));
+  io.println(tag_label(b));
+}

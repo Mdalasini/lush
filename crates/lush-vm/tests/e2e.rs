@@ -253,6 +253,11 @@ fn labelled_args_e2e() {
 }
 
 #[test]
+fn multi_variant_field_e2e() {
+    common::assert_case("multi_variant_field");
+}
+
+#[test]
 fn numeric_imm_boundary_e2e() {
     common::assert_case("numeric_imm");
 }
