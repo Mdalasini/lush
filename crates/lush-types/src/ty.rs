@@ -386,45 +386,58 @@ impl TypeStore {
     }
 
     fn rc_contains_var(ty: &Rc<Type>, memo: &mut HashMap<*const Type, bool>) -> bool {
-        // Iterative DAG walk: mark nodes as visited (false) before enqueueing
-        // children so shared structure is not re-expanded forever.
+        // Two-phase iterative DAG walk. Phase 1 collects a post-order of unique
+        // nodes without expanding shared children twice. Phase 2 memoises the
+        // definitive bool only after children are known — never store `false`
+        // before exploring, or a later root that shares a child can miss a Var
+        // that an earlier early-return left unrecorded on the parent.
         let mut stack = vec![ty.clone()];
+        let mut order: Vec<Rc<Type>> = Vec::new();
+        let mut seen: HashSet<*const Type> = HashSet::new();
         while let Some(t) = stack.pop() {
             let ptr = Rc::as_ptr(&t);
-            if let Some(&v) = memo.get(&ptr) {
-                if v {
-                    return true;
-                }
+            if memo.contains_key(&ptr) || !seen.insert(ptr) {
                 continue;
             }
+            order.push(t.clone());
             match t.as_ref() {
-                Type::Var(_) => {
-                    memo.insert(ptr, true);
-                    return true;
-                }
-                Type::List(c) => {
-                    memo.insert(ptr, false);
-                    stack.push(c.clone());
-                }
+                Type::List(c) => stack.push(c.clone()),
                 Type::Tuple(cs) | Type::App { args: cs, .. } => {
-                    memo.insert(ptr, false);
                     for c in cs {
                         stack.push(c.clone());
                     }
                 }
                 Type::Fun { params, ret } => {
-                    memo.insert(ptr, false);
                     for c in params {
                         stack.push(c.clone());
                     }
                     stack.push(ret.clone());
                 }
-                _ => {
-                    memo.insert(ptr, false);
-                }
+                _ => {}
             }
         }
-        false
+        for t in order.into_iter().rev() {
+            let ptr = Rc::as_ptr(&t);
+            if memo.contains_key(&ptr) {
+                continue;
+            }
+            let has = match t.as_ref() {
+                Type::Var(_) => true,
+                Type::List(c) => memo.get(&Rc::as_ptr(c)).copied().unwrap_or(false),
+                Type::Tuple(cs) | Type::App { args: cs, .. } => cs
+                    .iter()
+                    .any(|c| memo.get(&Rc::as_ptr(c)).copied().unwrap_or(false)),
+                Type::Fun { params, ret } => {
+                    params
+                        .iter()
+                        .any(|c| memo.get(&Rc::as_ptr(c)).copied().unwrap_or(false))
+                        || memo.get(&Rc::as_ptr(ret)).copied().unwrap_or(false)
+                }
+                _ => false,
+            };
+            memo.insert(ptr, has);
+        }
+        memo.get(&Rc::as_ptr(ty)).copied().unwrap_or(false)
     }
 
     /// Iterative var scan with pointer memo (stack-safe on deep DAGs).
