@@ -2,6 +2,11 @@
 
 use std::fmt;
 
+use lush_syntax::diagnostic::{Diagnostic, DiagnosticKind};
+use lush_syntax::span::Span;
+
+pub mod codes;
+
 pub const MAX_REGISTERS: u16 = 256;
 pub const MAX_ERRORS: usize = lush_syntax::diagnostic::MAX_ERRORS;
 
@@ -80,6 +85,22 @@ pub enum VerifyErrorKind {
     TooManyErrors,
 }
 
+impl VerifyErrorKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::EntryOutOfRange => codes::E2000_ENTRY_OUT_OF_RANGE,
+            Self::RegisterLimit => codes::E2001_REGISTER_LIMIT,
+            Self::ArityExceedsRegisters => codes::E2002_ARITY_EXCEEDS_REGISTERS,
+            Self::EmptyFunction => codes::E2003_EMPTY_FUNCTION,
+            Self::DebugInfoMismatch => codes::E2004_DEBUG_INFO_MISMATCH,
+            Self::RegisterOutOfRange { .. } => codes::E2005_REGISTER_OUT_OF_RANGE,
+            Self::JumpTargetOutOfRange => codes::E2006_JUMP_TARGET_OUT_OF_RANGE,
+            Self::MissingTerminator => codes::E2007_MISSING_TERMINATOR,
+            Self::TooManyErrors => codes::E2099_TOO_MANY_ERRORS,
+        }
+    }
+}
+
 impl fmt::Display for VerifyErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -116,6 +137,21 @@ impl fmt::Display for VerifyError {
             (Some(function), None) => write!(f, "function {function}: {}", self.kind),
             (None, _) => self.kind.fmt(f),
         }
+    }
+}
+
+impl VerifyError {
+    /// Convert this verifier failure to the shared diagnostic representation.
+    /// `span` is supplied by the caller because bytecode source locations are
+    /// not byte offsets into the original source text.
+    pub fn to_diagnostic(self, span: Span) -> Diagnostic {
+        Diagnostic::error(
+            self.kind.code(),
+            self.to_string(),
+            span,
+            None,
+            DiagnosticKind::Bytecode,
+        )
     }
 }
 
@@ -483,6 +519,61 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn verifier_diagnostic_registry_covers_every_error_kind() {
+        let cases = [
+            (
+                VerifyErrorKind::EntryOutOfRange,
+                codes::E2000_ENTRY_OUT_OF_RANGE,
+            ),
+            (VerifyErrorKind::RegisterLimit, codes::E2001_REGISTER_LIMIT),
+            (
+                VerifyErrorKind::ArityExceedsRegisters,
+                codes::E2002_ARITY_EXCEEDS_REGISTERS,
+            ),
+            (VerifyErrorKind::EmptyFunction, codes::E2003_EMPTY_FUNCTION),
+            (
+                VerifyErrorKind::DebugInfoMismatch,
+                codes::E2004_DEBUG_INFO_MISMATCH,
+            ),
+            (
+                VerifyErrorKind::RegisterOutOfRange {
+                    role: RegisterRole::Destination,
+                    register: 1,
+                },
+                codes::E2005_REGISTER_OUT_OF_RANGE,
+            ),
+            (
+                VerifyErrorKind::JumpTargetOutOfRange,
+                codes::E2006_JUMP_TARGET_OUT_OF_RANGE,
+            ),
+            (
+                VerifyErrorKind::MissingTerminator,
+                codes::E2007_MISSING_TERMINATOR,
+            ),
+            (VerifyErrorKind::TooManyErrors, codes::E2099_TOO_MANY_ERRORS),
+        ];
+
+        assert_eq!(codes::all_codes().len(), cases.len());
+        for (kind, code) in cases {
+            assert_eq!(kind.code(), code);
+            assert!(codes::all_codes().contains(&code));
+            let diagnostic = VerifyError {
+                function: Some(2),
+                instruction: Some(4),
+                kind,
+            }
+            .to_diagnostic(Span::new(10, 11));
+            assert_eq!(diagnostic.code, code);
+            assert_eq!(diagnostic.kind, DiagnosticKind::Bytecode);
+            assert_eq!(diagnostic.span, Span::new(10, 11));
+            assert_eq!(
+                diagnostic.message,
+                format!("function 2 instruction 4: {kind}")
+            );
+        }
     }
 
     #[test]

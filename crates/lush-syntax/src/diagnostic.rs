@@ -21,6 +21,8 @@ pub enum DiagnosticKind {
     Parser,
     /// Name resolution, inference, exhaustiveness, and related type-stage checks.
     Type,
+    /// Core IR, bytecode verification, and compiler-generated artifacts.
+    Bytecode,
 }
 
 /// A labelled span attached to a diagnostic (primary or secondary).
