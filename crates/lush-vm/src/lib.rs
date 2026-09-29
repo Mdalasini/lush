@@ -9,8 +9,28 @@ pub enum Value {
     Nil,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanicKind {
+    ExpectedInt,
+    ExpectedBool,
+    IntegerOverflow,
+    DivisionByZero,
+}
+
+impl PanicKind {
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::ExpectedInt => "expected Int",
+            Self::ExpectedBool => "expected Bool condition",
+            Self::IntegerOverflow => "integer overflow",
+            Self::DivisionByZero => "division by zero",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Panic {
+    pub kind: PanicKind,
     pub message: String,
     pub location: SourceLoc,
     pub function: String,
@@ -138,7 +158,7 @@ impl Vm {
                     match self.registers[condition as usize] {
                         Value::Bool(false) => self.pc = target as usize,
                         Value::Bool(true) => {}
-                        _ => return self.fail(pc, "expected Bool condition"),
+                        _ => return self.fail(pc, PanicKind::ExpectedBool),
                     }
                 }
                 Instruction::Return { src } => {
@@ -157,17 +177,18 @@ impl Vm {
         }
     }
 
-    fn read_int(&self, register: u8) -> Result<i64, &'static str> {
+    fn read_int(&self, register: u8) -> Result<i64, PanicKind> {
         match &self.registers[register as usize] {
             Value::Int(n) => Ok(*n),
-            _ => Err("expected Int"),
+            _ => Err(PanicKind::ExpectedInt),
         }
     }
 
-    fn fail(&mut self, pc: usize, message: impl Into<String>) -> SliceResult {
+    fn fail(&mut self, pc: usize, kind: PanicKind) -> SliceResult {
         let function = &self.program.functions[self.function];
         let panic = Panic {
-            message: message.into(),
+            kind,
+            message: kind.message().into(),
             location: function.locations[pc],
             function: function.name.clone(),
         };
@@ -180,16 +201,16 @@ impl Vm {
     }
 }
 
-fn checked_binary(instruction: Instruction, lhs: i64, rhs: i64) -> Result<i64, &'static str> {
+fn checked_binary(instruction: Instruction, lhs: i64, rhs: i64) -> Result<i64, PanicKind> {
     match instruction {
-        Instruction::AddInt { .. } => lhs.checked_add(rhs).ok_or("integer overflow"),
-        Instruction::SubInt { .. } => lhs.checked_sub(rhs).ok_or("integer overflow"),
-        Instruction::MulInt { .. } => lhs.checked_mul(rhs).ok_or("integer overflow"),
+        Instruction::AddInt { .. } => lhs.checked_add(rhs).ok_or(PanicKind::IntegerOverflow),
+        Instruction::SubInt { .. } => lhs.checked_sub(rhs).ok_or(PanicKind::IntegerOverflow),
+        Instruction::MulInt { .. } => lhs.checked_mul(rhs).ok_or(PanicKind::IntegerOverflow),
         Instruction::DivInt { .. } | Instruction::RemInt { .. } => {
             if rhs == 0 {
-                Err("division by zero")
+                Err(PanicKind::DivisionByZero)
             } else if lhs == i64::MIN && rhs == -1 {
-                Err("integer overflow")
+                Err(PanicKind::IntegerOverflow)
             } else if matches!(instruction, Instruction::DivInt { .. }) {
                 Ok(lhs / rhs)
             } else {
@@ -396,7 +417,12 @@ mod tests {
     }
 
     fn panic_value(message: &str) -> Panic {
+        let kind = match message {
+            "division by zero" => PanicKind::DivisionByZero,
+            _ => PanicKind::IntegerOverflow,
+        };
         Panic {
+            kind,
             message: message.into(),
             location: SourceLoc { line: 1, column: 3 },
             function: "main".into(),
@@ -535,6 +561,7 @@ mod tests {
         let Exit::Panicked(panic) = Vm::new(p, &[]).unwrap().run_to_completion() else {
             panic!("expected panic")
         };
+        assert_eq!(panic.kind, PanicKind::IntegerOverflow);
         assert_eq!(panic.message, "integer overflow");
         assert_eq!(panic.location, SourceLoc { line: 1, column: 3 });
     }
