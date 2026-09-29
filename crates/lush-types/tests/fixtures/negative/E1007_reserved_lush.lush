@@ -1,0 +1,2 @@
+// expect: E1007
+pub fn main() -> Nil { Nil; }

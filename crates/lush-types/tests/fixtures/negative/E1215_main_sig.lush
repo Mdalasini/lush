@@ -1,0 +1,2 @@
+// expect: E1215
+pub fn main(x: Int) -> Int { x; }

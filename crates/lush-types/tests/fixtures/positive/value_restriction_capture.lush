@@ -1,0 +1,6 @@
+pub fn add(a: Int, b: Int) -> Int { a + b; }
+pub fn main() -> Nil {
+  let add5 = add(5, _);
+  let _ = add5(3);
+  Nil;
+}

@@ -1,0 +1,3 @@
+// expect: W1001
+import lush/io;
+pub fn main() -> Nil { Nil; }

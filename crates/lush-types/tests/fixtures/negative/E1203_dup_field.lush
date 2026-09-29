@@ -1,0 +1,4 @@
+// expect: E1203
+pub type T {
+  T(name: String, name: Int)
+}

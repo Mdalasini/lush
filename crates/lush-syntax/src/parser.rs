@@ -535,7 +535,39 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::LBrace, "ADT bodies use `{ ... }`");
             let mut variants = Vec::new();
             while !matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
+                // Skip stray separators so `type B { , }` / `type B { | }` cannot
+                // spin forever allocating (review: 8 GiB OOM on those inputs).
+                if matches!(self.kind(), TokenKind::Comma | TokenKind::Pipe) {
+                    self.error(
+                        self.span(),
+                        codes::E0171_EXPECTED_UNAME,
+                        format!(
+                            "expected a type/constructor name, found {}",
+                            self.kind().describe()
+                        ),
+                        Some("type and constructor names are PascalCase".into()),
+                    );
+                    self.bump();
+                    continue;
+                }
+                let before = self.pos;
                 variants.push(self.parse_variant());
+                if self.pos == before {
+                    // parse_uname failed to consume — advance to avoid an infinite loop
+                    self.bump();
+                }
+                if variants.len() > MAX_CHAIN as usize {
+                    self.error(
+                        self.span(),
+                        codes::E0190_TOO_DEEP,
+                        "too many variants in type definition",
+                        Some(format!("maximum variant count is {MAX_CHAIN}")),
+                    );
+                    while !matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
+                        self.bump();
+                    }
+                    break;
+                }
             }
             self.expect(TokenKind::RBrace, "close the type body with `}`");
             TypeDefBody::Adt(variants)
@@ -1073,14 +1105,9 @@ impl<'a> Parser<'a> {
             .iter()
             .filter(|a| matches!(a.value, ArgValue::Hole))
             .count();
-        if hole_count > 1 {
-            self.error(
-                callee.span.merge(self.span()),
-                codes::E0181_MULTI_HOLE,
-                "a call may contain at most one capture hole `_`",
-                Some("write separate partial calls, or use a lambda".into()),
-            );
-        }
+        // Multi-hole rejection is a type-stage concern (E1100); keep the AST
+        // intact so desugar can emit the type-stage diagnostic.
+        let _ = hole_count;
         let end = self.expect(TokenKind::RParen, "close the call with `)`");
         Expr {
             span: callee.span.merge(end),

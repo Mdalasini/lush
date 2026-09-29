@@ -1,0 +1,5 @@
+// expect: W1000
+pub fn main() -> Nil {
+  let x = 1;
+  Nil;
+}

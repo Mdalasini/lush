@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1450:52..90: non-exhaustive patterns: `Some(False)` not covered

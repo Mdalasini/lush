@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1209:100..124: record update is only allowed on single-variant types (`Shape` has 2 variants)

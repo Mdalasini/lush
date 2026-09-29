@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1350:82..114: type `fn(a) -> a` does not support equality (`Eq`)

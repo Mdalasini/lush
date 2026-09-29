@@ -1,0 +1,5 @@
+// expect: E1300
+pub fn main() -> Nil {
+  let x: Int = True;
+  Nil;
+}

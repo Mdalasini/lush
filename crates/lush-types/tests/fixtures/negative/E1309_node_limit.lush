@@ -1,0 +1,3 @@
+// expect: E1309
+// Covered by dedicated_node_limit unit test.
+pub fn main() -> Nil { Nil; }

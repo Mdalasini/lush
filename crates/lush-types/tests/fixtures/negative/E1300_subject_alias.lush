@@ -1,0 +1,9 @@
+// expect: E1300
+import lush/process;
+pub fn main() -> Nil {
+  let s = process.new_subject();
+  let t = s;
+  process.send(s, 1);
+  process.send(t, "no");
+  Nil;
+}

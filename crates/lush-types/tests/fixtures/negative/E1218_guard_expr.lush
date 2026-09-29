@@ -1,0 +1,7 @@
+// expect: E1218
+pub fn f(n: Int) -> Int {
+  case n {
+    x if todo as "no" -> x;
+    _ -> 0;
+  };
+}

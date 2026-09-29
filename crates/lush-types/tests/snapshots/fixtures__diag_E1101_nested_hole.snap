@@ -1,0 +1,6 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1101:191..201: nested placeholders are not allowed when the outer call also has `_`
+E1300:191..201: type mismatch: expected `fn(Int) -> Int`, found `Int`

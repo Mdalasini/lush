@@ -1,0 +1,3 @@
+// expect: E1004
+pub fn f() -> Nil { Nil; }
+pub fn f() -> Nil { Nil; }

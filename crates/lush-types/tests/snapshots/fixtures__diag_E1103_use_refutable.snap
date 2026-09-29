@@ -1,0 +1,7 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1300:58..107: type mismatch: expected `Result(a, Nil)`, found `Nil`
+E1103:66..70: use patterns must be irrefutable
+E1300:75..97: type mismatch: expected `Nil`, found `Result(a, Nil)`

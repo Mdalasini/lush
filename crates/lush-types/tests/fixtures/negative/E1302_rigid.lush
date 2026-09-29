@@ -1,0 +1,4 @@
+// expect: E1302
+pub fn f(x: a) -> a {
+  x + 1;
+}

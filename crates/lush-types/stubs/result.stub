@@ -1,0 +1,9 @@
+# Stand-in stubs for lush/result until step 10.
+module lush/result
+
+pub fn try(Result(a, e), fn(a) -> Result(b, e)) -> Result(b, e)
+pub fn map(Result(a, e), fn(a) -> b) -> Result(b, e)
+pub fn map_error(Result(a, e), fn(e) -> f) -> Result(a, f)
+pub fn unwrap(Result(a, e)) -> a
+pub fn is_ok(Result(a, e)) -> Bool
+pub fn is_error(Result(a, e)) -> Bool

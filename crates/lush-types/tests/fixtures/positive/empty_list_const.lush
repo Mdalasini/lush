@@ -1,0 +1,9 @@
+pub const xs = [];
+
+pub fn as_int() -> List(Int) {
+  xs;
+}
+
+pub fn as_string() -> List(String) {
+  xs;
+}

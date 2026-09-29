@@ -1,0 +1,3 @@
+// expect: E1006
+// Cycle detected in check_graph tests; placeholder module:
+pub fn main() -> Nil { Nil; }

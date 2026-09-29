@@ -1,0 +1,3 @@
+// expect: E1001
+import lush/dict;
+pub fn f(d: Dict(Int, Int)) -> Int { 1; }

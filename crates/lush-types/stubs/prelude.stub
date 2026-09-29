@@ -1,0 +1,3 @@
+# Stand-in stubs for lush/prelude until step 10.
+# Builtins Result/Option/True/False/Nil/Ok/Error/Some/None are also installed in code.
+module lush/prelude

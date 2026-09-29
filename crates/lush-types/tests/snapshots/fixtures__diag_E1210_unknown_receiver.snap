@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1210:33..39: cannot access field `name` when the receiver type is not yet known

@@ -1,0 +1,6 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1302:37..49: cannot instantiate rigid type variable: expected `Int`, found `a`
+E1302:41..42: cannot instantiate rigid type variable: expected `a`, found `Int`

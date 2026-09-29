@@ -1,0 +1,5 @@
+// expect: E1105
+pub fn main() -> Nil {
+  let _ = 1 |> 2;
+  Nil;
+}

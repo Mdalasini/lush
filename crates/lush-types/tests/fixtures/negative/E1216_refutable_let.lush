@@ -1,0 +1,5 @@
+// expect: E1216
+pub fn main() -> Nil {
+  let Ok(x) = Ok(1);
+  Nil;
+}

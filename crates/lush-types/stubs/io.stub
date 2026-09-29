@@ -1,0 +1,6 @@
+# Stand-in stubs for lush/io until step 10.
+module lush/io
+
+pub fn print(String) -> Nil
+pub fn println(String) -> Nil
+pub fn eprintln(String) -> Nil

@@ -1,0 +1,11 @@
+# Stand-in stubs for lush/list until step 10.
+module lush/list
+
+pub fn map(List(a), fn(a) -> b) -> List(b)
+pub fn each(List(a), fn(a) -> Nil) -> Nil
+pub fn range(Int, Int) -> List(Int)
+pub fn length(List(a)) -> Int
+pub fn append(List(a), List(a)) -> List(a)
+pub fn reverse(List(a)) -> List(a)
+pub fn filter(List(a), fn(a) -> Bool) -> List(a)
+pub fn fold(List(a), b, fn(a, b) -> b) -> b

@@ -1,0 +1,3 @@
+// expect: E1403
+const a = b + 0;
+const b = a + 0;

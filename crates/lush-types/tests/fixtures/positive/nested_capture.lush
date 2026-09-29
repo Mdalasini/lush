@@ -1,0 +1,6 @@
+fn add(a: Int, b: Int) -> Int { a + b; }
+pub fn f(xs: List(Int)) -> List(Int) {
+  // uses list.map from prelude? use manual
+  let g = add(5, _);
+  [g(1)];
+}

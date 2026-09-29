@@ -1,0 +1,4 @@
+// expect: E1201
+pub type Box {
+  Box(a)
+}

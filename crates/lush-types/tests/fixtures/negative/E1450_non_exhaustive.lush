@@ -1,0 +1,7 @@
+// expect: E1450
+pub type T { A B }
+pub fn f(t: T) -> Int {
+  case t {
+    A -> 1;
+  };
+}

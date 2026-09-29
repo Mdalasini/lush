@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1350:79..85: type `fn(Int) -> Int` does not support equality

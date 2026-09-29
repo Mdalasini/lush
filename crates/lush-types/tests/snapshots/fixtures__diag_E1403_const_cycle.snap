@@ -1,0 +1,6 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1402:44..45: `a` is not a constant expression
+E1403:44..45: constant cycle involving `a`

@@ -1,0 +1,13 @@
+# Stand-in stubs for lush/task until step 10.
+module lush/task
+
+opaque Task(a)
+
+type TaskError {
+  Timeout
+  Down(process.ExitReason)
+}
+
+pub fn async(fn() -> a) -> Task(a)
+pub fn await(Task(a), within: Int) -> Result(a, TaskError)
+pub fn parallel_map(List(a), fn(a) -> b) -> Result(List(b), TaskError)

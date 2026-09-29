@@ -19,6 +19,15 @@ pub enum Severity {
 pub enum DiagnosticKind {
     Lexer,
     Parser,
+    /// Name resolution, inference, exhaustiveness, and related type-stage checks.
+    Type,
+}
+
+/// A labelled span attached to a diagnostic (primary or secondary).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagnosticLabel {
+    pub span: Span,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +38,9 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub hint: Option<String>,
     pub kind: DiagnosticKind,
+    /// Secondary labels (e.g. where an expected type originated). The primary
+    /// label always uses [`Self::span`] and [`Self::message`].
+    pub secondary: Vec<DiagnosticLabel>,
 }
 
 /// Collects diagnostics with a shared error cap for lexer and parser.
@@ -67,6 +79,7 @@ impl DiagnosticSink {
                 severity: Severity::Error,
                 hint: Some("fix earlier errors first".into()),
                 kind: d.kind,
+                secondary: Vec::new(),
             });
             return;
         }
@@ -112,7 +125,34 @@ impl Diagnostic {
             severity: Severity::Error,
             hint,
             kind,
+            secondary: Vec::new(),
         }
+    }
+
+    pub fn warning(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        span: Span,
+        hint: Option<String>,
+        kind: DiagnosticKind,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            span,
+            severity: Severity::Warning,
+            hint,
+            kind,
+            secondary: Vec::new(),
+        }
+    }
+
+    pub fn with_secondary(mut self, span: Span, message: impl Into<String>) -> Self {
+        self.secondary.push(DiagnosticLabel {
+            span,
+            message: message.into(),
+        });
+        self
     }
 
     /// Render with ariadne into a string.
@@ -143,6 +183,13 @@ impl Diagnostic {
                     .with_message(&self.message)
                     .with_color(label_color),
             );
+        for sec in &self.secondary {
+            report = report.with_label(
+                Label::new((filename, sec.span.range()))
+                    .with_message(&sec.message)
+                    .with_color(Color::Blue),
+            );
+        }
         if let Some(hint) = &self.hint {
             report = report.with_help(hint);
         }

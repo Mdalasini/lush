@@ -1,0 +1,2 @@
+pub type P(a) = #(a, a)
+pub fn f(x: P(Int)) -> #(Int, Int) { x; }

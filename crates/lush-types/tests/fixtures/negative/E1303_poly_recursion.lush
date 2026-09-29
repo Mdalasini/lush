@@ -1,0 +1,6 @@
+// expect: E1303
+pub fn weird(x) {
+  let _ = weird(1);
+  let _ = weird(True);
+  x;
+}

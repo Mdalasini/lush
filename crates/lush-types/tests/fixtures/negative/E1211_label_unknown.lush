@@ -1,0 +1,6 @@
+// expect: E1211
+pub fn replace(in s: String, each p: String) -> String { s; }
+pub fn main() -> Nil {
+  let _ = replace(in: "a", bad: "b");
+  Nil;
+}

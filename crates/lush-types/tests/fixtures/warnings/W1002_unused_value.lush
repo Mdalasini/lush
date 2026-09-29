@@ -1,0 +1,5 @@
+// expect: W1002
+pub fn main() -> Nil {
+  1 + 2;
+  Nil;
+}

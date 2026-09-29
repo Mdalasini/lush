@@ -730,6 +730,7 @@ impl<'a> Lexer<'a> {
                 severity: Severity::Warning,
                 hint: Some("rename to snake_case, or keep the name and silence unused warnings with a `_` prefix".into()),
                 kind: DiagnosticKind::Lexer,
+                secondary: Vec::new(),
             });
         }
     }
@@ -746,6 +747,7 @@ impl<'a> Lexer<'a> {
                 severity: Severity::Warning,
                 hint: Some("rename to PascalCase without underscores".into()),
                 kind: DiagnosticKind::Lexer,
+                secondary: Vec::new(),
             });
         }
     }

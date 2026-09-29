@@ -1,0 +1,6 @@
+// expect: E1103
+import lush/result;
+pub fn main() -> Nil {
+  use Ok(x) <- result.try(Error(Nil));
+  Nil;
+}

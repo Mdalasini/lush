@@ -1,0 +1,6 @@
+pub type User {
+  User(name: String, age: Int)
+}
+pub fn bump(u: User) -> User {
+  User(..u, age: 31);
+}

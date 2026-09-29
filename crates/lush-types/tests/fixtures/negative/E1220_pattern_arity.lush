@@ -1,0 +1,7 @@
+// expect: E1220
+pub fn f(r: Result(Int, Nil)) -> Int {
+  case r {
+    Ok(a, b) -> a;
+    Error(_) -> 0;
+  };
+}

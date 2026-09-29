@@ -1,0 +1,3 @@
+// expect: E1000
+import lush/list;
+pub fn f() -> Int { length([1, 2]); }

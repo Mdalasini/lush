@@ -1,0 +1,3 @@
+// expect: E1002
+import does/not/exist;
+pub fn main() -> Nil { Nil; }

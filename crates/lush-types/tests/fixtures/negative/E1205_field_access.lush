@@ -1,0 +1,8 @@
+// expect: E1205
+pub type Shape {
+  Circle(radius: Float)
+  Point
+}
+pub fn f(s: Shape) -> Float {
+  s.radius;
+}

@@ -1,0 +1,17 @@
+# Stand-in stubs for lush/dict until step 10.
+module lush/dict
+
+opaque Dict(k, v)
+
+@eq(k)
+pub fn new() -> Dict(k, v)
+@eq(k)
+pub fn from_list(List(#(k, v))) -> Dict(k, v)
+@eq(k)
+pub fn insert(Dict(k, v), k, v) -> Dict(k, v)
+@eq(k)
+pub fn get(Dict(k, v), k) -> Result(v, Nil)
+@eq(k)
+pub fn delete(Dict(k, v), k) -> Dict(k, v)
+pub fn to_list(Dict(k, v)) -> List(#(k, v))
+pub fn size(Dict(k, v)) -> Int

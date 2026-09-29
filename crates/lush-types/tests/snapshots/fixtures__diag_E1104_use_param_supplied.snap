@@ -1,0 +1,7 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1300:58..116: type mismatch: expected `Result(Int, a)`, found `Nil`
+E1214:62..106: function expects 2 argument(s), got more
+E1104:89..105: the final parameter of this `use` call is already supplied

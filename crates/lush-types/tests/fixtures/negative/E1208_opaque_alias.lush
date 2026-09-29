@@ -1,0 +1,2 @@
+// expect: E1208
+pub opaque type X = Int

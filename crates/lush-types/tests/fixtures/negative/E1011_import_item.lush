@@ -1,0 +1,3 @@
+// expect: E1011
+import lush/io.{no_such_thing};
+pub fn main() -> Nil { Nil; }

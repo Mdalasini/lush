@@ -1,0 +1,27 @@
+# Stand-in stubs for lush/supervisor until step 10.
+module lush/supervisor
+
+type Strategy {
+  OneForOne
+  OneForAll
+  RestForOne
+}
+type Restart {
+  Permanent
+  Transient
+  Temporary
+}
+type ChildStartError {
+  ChildSpawnFailed
+  Failed(String)
+}
+type ChildSpec {
+  ChildSpec(start: fn() -> Result(Pid, ChildStartError), restart: Restart, shutdown_ms: Int)
+}
+type StartError {
+  SpawnFailed
+  ChildStartFailed(index: Int, error: ChildStartError)
+}
+
+pub fn worker(start: fn() -> Result(Pid, ChildStartError)) -> ChildSpec
+pub fn start(strategy: Strategy, children: List(ChildSpec), max_restarts: Int, within: Int) -> Result(Pid, StartError)

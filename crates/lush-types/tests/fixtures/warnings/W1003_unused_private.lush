@@ -1,0 +1,3 @@
+// expect: W1003
+fn unused_helper() -> Nil { Nil; }
+pub fn main() -> Nil { Nil; }

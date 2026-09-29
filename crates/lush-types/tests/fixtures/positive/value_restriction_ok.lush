@@ -1,0 +1,9 @@
+import lush/process;
+pub fn main() -> Nil {
+  let mk = fn() { process.new_subject(); };
+  let s1: process.Subject(Int) = mk();
+  let s2: process.Subject(String) = mk();
+  process.send(s1, 1);
+  process.send(s2, "a");
+  Nil;
+}

@@ -1,0 +1,8 @@
+// expect: E1101
+// Outer call has `_` and a nested hole: `f(_, g(_))` is rejected.
+pub fn g(x: Int) -> Int { x; }
+pub fn f(a: Int, b: Int) -> Int { a + b; }
+pub fn main() -> Nil {
+  let _ = f(_, g(_));
+  Nil;
+}

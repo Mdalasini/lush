@@ -1,0 +1,5 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1011:33..46: module `lush/io` has no value `no_such_thing`

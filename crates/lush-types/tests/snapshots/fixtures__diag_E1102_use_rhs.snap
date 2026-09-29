@@ -1,0 +1,6 @@
+---
+source: crates/lush-types/tests/fixtures.rs
+expression: rendered
+---
+E1214:42..52: expected a function, found `Int`
+E1102:51..52: `use` right-hand side must be a call or function reference

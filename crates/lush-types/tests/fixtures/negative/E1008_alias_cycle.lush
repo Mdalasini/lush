@@ -1,0 +1,3 @@
+// expect: E1008
+pub type A = B
+pub type B = A

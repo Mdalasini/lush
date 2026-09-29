@@ -1,0 +1,6 @@
+// expect: E1100
+pub fn add(a: Int, b: Int) -> Int { a + b; }
+pub fn main() -> Nil {
+  let _ = add(_, _);
+  Nil;
+}
