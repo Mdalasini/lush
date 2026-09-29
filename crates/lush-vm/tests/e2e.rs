@@ -238,6 +238,16 @@ fn use_callback_e2e() {
 }
 
 #[test]
+fn record_update_e2e() {
+    common::assert_case("record_update");
+}
+
+#[test]
+fn float_basic_e2e() {
+    common::assert_case("float_basic");
+}
+
+#[test]
 fn numeric_imm_boundary_e2e() {
     common::assert_case("numeric_imm");
 }

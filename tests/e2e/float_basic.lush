@@ -1,0 +1,18 @@
+import lush/io;
+import lush/int;
+
+pub fn main() -> Nil {
+  // 1.5 +. 2.5 == 4.0; -0.0 == 0.0 (numeric Float equality)
+  io.println(int.to_string(case 1.5 +. 2.5 == 4.0 {
+    True -> 1;
+    False -> 0;
+  }));
+  io.println(int.to_string(case -0.0 == 0.0 {
+    True -> 1;
+    False -> 0;
+  }));
+  io.println(int.to_string(case 1.0 *. 2.0 -. 0.5 == 1.5 {
+    True -> 1;
+    False -> 0;
+  }));
+}

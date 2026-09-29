@@ -1,0 +1,14 @@
+import lush/io;
+import lush/int;
+
+pub type User {
+  User(name: String, age: Int)
+}
+
+pub fn main() -> Nil {
+  let u = User("a", 30);
+  let v = User(..u, age: 31);
+  case v {
+    User(_, a) -> io.println(int.to_string(a));
+  };
+}

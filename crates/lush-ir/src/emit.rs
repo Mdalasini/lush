@@ -764,17 +764,95 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             }
             ExprKind::Fn { params, body, .. } => self.emit_anon_fn(params, body, expr.span),
             ExprKind::BitArray(segs) => self.emit_bit_array_expr(expr, segs),
+            ExprKind::RecordUpdate {
+                constructor,
+                base,
+                fields,
+            } => self.emit_record_update(constructor, base, fields, expr.span),
             other => {
                 let msg = match other {
                     ExprKind::Pipe { .. } => "pipe expressions should have been desugared",
-                    ExprKind::RecordUpdate { .. } => "record updates are not yet lowered",
-                    ExprKind::Float(_) => "Float values are not yet fully lowered",
                     _ => "this expression form is not yet lowered",
                 };
                 self.error(codes::E2011_LOWER, msg, expr.span);
                 None
             }
         }
+    }
+
+    fn emit_record_update(
+        &mut self,
+        constructor: &ConstructorRef,
+        base: &Expr,
+        fields: &[(Name, Expr)],
+        span: Span,
+    ) -> Option<Reg> {
+        let base_r = self.emit_expr(base, false)?;
+        let (variant, labels) =
+            self.constructor_layout(&constructor.name.text, constructor.span)?;
+        let mut replacements: HashMap<String, Reg> = HashMap::new();
+        for (name, e) in fields {
+            let r = self.emit_expr(e, false)?;
+            replacements.insert(name.text.clone(), r);
+        }
+        let mut field_regs = Vec::with_capacity(labels.len());
+        let mut copied = Vec::new();
+        for (i, label) in labels.iter().enumerate() {
+            if let Some(lab) = label {
+                if let Some(&r) = replacements.get(lab) {
+                    field_regs.push(r);
+                    continue;
+                }
+            }
+            let r = self.fresh()?;
+            self.emit(
+                Op::GetField {
+                    dst: r,
+                    base: base_r,
+                    index: i as u16,
+                },
+                span,
+            );
+            field_regs.push(r);
+            copied.push(r);
+        }
+        let dst = self.fresh()?;
+        self.emit(
+            Op::MakeAdt {
+                dst,
+                type_tag: 0,
+                variant,
+                fields: field_regs.clone(),
+            },
+            span,
+        );
+        self.recycle(base_r);
+        self.recycle_regs(&copied);
+        for r in replacements.into_values() {
+            self.recycle(r);
+        }
+        Some(dst)
+    }
+
+    /// Variant tag and ordered field labels for a constructor name.
+    fn constructor_layout(&mut self, name: &str, span: Span) -> Option<(u16, Vec<Option<String>>)> {
+        for def in self.m.typed.store.defs.values() {
+            if let Some((i, v)) = def
+                .variants
+                .iter()
+                .enumerate()
+                .find(|(_, v)| v.name == name)
+            {
+                let labs: Vec<_> = v.fields.iter().map(|f| f.label.clone()).collect();
+                return Some((i as u16, labs));
+            }
+        }
+        self.error(
+            codes::E2011_LOWER,
+            format!("unknown constructor `{name}` in record update"),
+            span,
+        );
+        None
     }
 
     fn emit_bit_array_expr(&mut self, expr: &Expr, segs: &[BitSegment]) -> Option<Reg> {
