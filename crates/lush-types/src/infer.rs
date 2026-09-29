@@ -1813,8 +1813,9 @@ fn infer_expr_shared(ctx: &mut InferCtx<'_>, expr: &Expr) -> Rc<Type> {
         ExprKind::Paren(inner) => infer_expr_shared(ctx, inner),
         _ => Rc::new(infer_expr_inner(ctx, expr)),
     };
-    let zonked = ctx.store.zonk(&ty);
-    ctx.typed.finish_expr(id, zonked);
+    // Defer zonk/rigidify to the shared handoff pass so Mairson-sized shared
+    // DAGs are not re-walked once per expression node.
+    ctx.typed.finish_expr(id, (*ty).clone());
     ty
 }
 
