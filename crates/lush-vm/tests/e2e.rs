@@ -130,3 +130,23 @@ fn registry_codes_defined() {
     assert!(lush_ir::codes::all_codes().contains(&"E2000"));
     assert!(lush_ir::codes::all_codes().len() >= 12);
 }
+
+#[test]
+fn panic_overflow_e2e() {
+    let (src, _, _, expect_status) = common::read_case("panic_overflow");
+    let exit = common::run_source("main", &src, OptLevel::default());
+    assert_eq!(exit.status, expect_status);
+    let err = String::from_utf8_lossy(&exit.stderr);
+    assert!(err.contains("integer overflow"), "{err}");
+    assert!(err.starts_with("panic:"), "{err}");
+}
+
+#[test]
+fn panic_assert_e2e() {
+    let (src, _, _, expect_status) = common::read_case("panic_assert");
+    let exit = common::run_source("main", &src, OptLevel::default());
+    assert_eq!(exit.status, expect_status);
+    let err = String::from_utf8_lossy(&exit.stderr);
+    assert!(err.contains("nope"), "{err}");
+    assert!(err.starts_with("panic:"), "{err}");
+}

@@ -1,0 +1,4 @@
+pub fn main() {
+  assert False as "nope";
+  Nil;
+}
