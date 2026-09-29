@@ -7,15 +7,6 @@ use crate::codes;
 use crate::diag::TypeSink;
 use crate::limits::MAX_CHAIN;
 
-/// Marker stored on desugared call args for the implicit `use` callback.
-#[derive(Clone, Debug)]
-pub struct DesugarMeta {
-    /// True when this call originated from `use` and the last arg is an implicit callback.
-    pub use_callback: bool,
-    /// True when the call is in tail position.
-    pub tail: bool,
-}
-
 /// Desugar a module in place. Returns capture gensym names used.
 pub fn desugar_module(module: &mut Module, sink: &mut TypeSink) -> Vec<String> {
     let mut used_names = collect_all_names(module);
@@ -285,6 +276,7 @@ fn desugar_use(
                 label: None,
                 value: ArgValue::Expr(callback),
                 span,
+                implicit_use_callback: true,
             });
             rhs
         }
@@ -297,6 +289,7 @@ fn desugar_use(
                         label: None,
                         value: ArgValue::Expr(callback),
                         span,
+                        implicit_use_callback: true,
                     }],
                 },
                 span,
@@ -316,6 +309,7 @@ fn desugar_use(
                         label: None,
                         value: ArgValue::Expr(callback),
                         span,
+                        implicit_use_callback: true,
                     }],
                 },
                 span,
@@ -435,6 +429,7 @@ fn desugar_expr(
                                     span: a.span,
                                 }),
                                 span: a.span,
+                                implicit_use_callback: a.implicit_use_callback,
                             });
                         }
                         ArgValue::Expr(mut e) => {
@@ -443,6 +438,7 @@ fn desugar_expr(
                                 label: a.label,
                                 value: ArgValue::Expr(e),
                                 span: a.span,
+                                implicit_use_callback: a.implicit_use_callback,
                             });
                         }
                     }
@@ -604,6 +600,7 @@ fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
                         label: None,
                         value: ArgValue::Expr(value),
                         span: value_span,
+                        implicit_use_callback: false,
                     },
                 );
             }
@@ -622,6 +619,7 @@ fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
                     label: None,
                     value: ArgValue::Expr(value),
                     span: value_span,
+                    implicit_use_callback: false,
                 }],
             },
             span,
@@ -640,6 +638,7 @@ fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
                         label: None,
                         value: ArgValue::Expr(value),
                         span: value_span,
+                        implicit_use_callback: false,
                     }],
                 },
                 span,

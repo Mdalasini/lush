@@ -35,6 +35,33 @@ fn positive_fixtures_typecheck() {
             "positive fixture `{name}` failed:\n{}",
             errors.join("\n")
         );
+        assert!(
+            result.typed.expressions.values().all(|entry| {
+                entry.module_qualifier
+                    || (entry.ty.as_ref().is_some_and(|ty| !contains_type_var(ty))
+                        && entry
+                            .receiver_ty
+                            .as_ref()
+                            .is_none_or(|ty| !contains_type_var(ty)))
+            }),
+            "positive fixture `{name}` has untyped or unresolved expressions: {:?}",
+            result
+                .typed
+                .expressions
+                .iter()
+                .filter_map(|(id, entry)| {
+                    (entry.ty.is_none() && !entry.module_qualifier).then_some((*id, entry.span))
+                })
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            result
+                .typed
+                .patterns
+                .values()
+                .all(|entry| { entry.ty.as_ref().is_some_and(|ty| !contains_type_var(ty)) }),
+            "positive fixture `{name}` has an untyped or unresolved pattern"
+        );
     }
 }
 
@@ -196,6 +223,58 @@ fn import_cycle_rejected() {
 }
 
 #[test]
+fn selectively_aliased_constructor_keeps_its_canonical_target() {
+    use lush_syntax::ast::{ExprKind, ModuleItem, PatternKind, Statement};
+
+    let library = parse_module("pub type Choice { First(value: Int) Second(value: Int) }\n")
+        .module
+        .unwrap();
+    let app = parse_module(
+        "import lib.{ type Choice, First as Initial, Second };\npub fn value(choice: Choice) -> Int { case choice { Initial(n) -> n; Second(n) -> n; }; }\n",
+    )
+    .module
+    .unwrap();
+    let (results, _) = check_graph(
+        &[("lib".into(), library), ("app".into(), app)],
+        &[],
+        vec![],
+        &[],
+    );
+    let result = results.get("app").unwrap();
+    assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
+
+    let function = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "value" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let Statement::Expr(case) = &function.body.statements[0] else {
+        panic!("expected case expression")
+    };
+    let ExprKind::Case { clauses, .. } = &case.kind else {
+        panic!("expected case")
+    };
+    let alias = &clauses[0].patterns[0].patterns[0];
+    assert!(matches!(alias.kind, PatternKind::Constructor { .. }));
+    let alias_id = result.typed.pattern_id(alias).unwrap();
+    assert!(matches!(
+        &result.typed.pattern(alias_id).unwrap().resolved_reference,
+        Some(lush_types::typed::ResolvedReference::Imported {
+            module,
+            name,
+            kind: lush_types::typed::ResolvedValueKind::Constructor {
+                variant_tag: Some(0),
+                ..
+            },
+        }) if module == "lib" && name == "First"
+    ));
+}
+
+#[test]
 fn private_access_across_modules() {
     let lib = parse_module("fn secret() -> Nil { Nil; }\n")
         .module
@@ -319,6 +398,15 @@ pub fn main() -> Nil {
 "#;
     let result = check_source("cap", src, true);
     assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
+    assert!(result.typed.generated_names.contains("__lush_cap_1"));
+    let generated = result
+        .typed
+        .bindings
+        .values()
+        .find(|binding| binding.name == "__lush_cap_1")
+        .expect("capture parameter binding is recorded");
+    assert!(generated.compiler_generated);
+    assert_eq!(generated.user_visible_name(), None);
 }
 
 #[test]
@@ -839,6 +927,8 @@ fn dedicated_warning_cap() {
 
 #[test]
 fn check_graph_topo_and_attribution() {
+    use lush_syntax::ast::{ExprKind, ModuleItem, Statement};
+
     // Importer listed before dependency must still resolve.
     let a = parse_module("import b;\npub fn f() -> Int { b.g(); }\n")
         .module
@@ -851,6 +941,37 @@ fn check_graph_topo_and_attribution() {
         "importer-before-dep failed: {:?}",
         ar.diagnostics
     );
+    let function = ar
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "f" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let Statement::Expr(call) = &function.body.statements[0] else {
+        panic!("expected qualified function call")
+    };
+    let ExprKind::Call { callee, .. } = &call.kind else {
+        panic!("expected call")
+    };
+    let callee_id = ar.typed.expr_id(callee).unwrap();
+    assert!(matches!(
+        &ar.typed.expression(callee_id).unwrap().resolved_reference,
+        Some(lush_types::typed::ResolvedReference::Imported { module, name, .. })
+            if module == "b" && name == "g"
+    ));
+    let ExprKind::Field { base, .. } = &callee.kind else {
+        panic!("expected module-qualified field")
+    };
+    let base_id = ar.typed.expr_id(base).unwrap();
+    let base_annotation = ar.typed.expression(base_id).unwrap();
+    assert!(base_annotation.module_qualifier);
+    assert!(matches!(
+        &base_annotation.resolved_reference,
+        Some(lush_types::typed::ResolvedReference::ModuleAlias { module }) if module == "b"
+    ));
     // Two modules each with errors — both returned and attributed.
     let b2 = parse_module("pub fn f() -> Int { \"x\"; }\n")
         .module
@@ -1129,5 +1250,460 @@ fn def_limit_on_huge_module() {
     use lush_types::limits::MAX_DEFS_PER_MODULE;
     const {
         assert!(MAX_DEFS_PER_MODULE >= 1000);
+    }
+}
+
+#[test]
+fn typed_annotations_cover_nodes_and_tail_positions() {
+    use lush_syntax::ast::{Expr, ExprKind, ModuleItem, Statement};
+
+    let src = "fn leaf() -> Bool { True; }\npub fn choose(x: Bool) -> Bool {\n  case x {\n    True -> { leaf(); leaf(); };\n    False if True -> leaf();\n    _ -> True && leaf();\n  };\n}\npub fn main() -> Nil {\n  let _unused = leaf();\n  Nil;\n}\n";
+    let result = check_source("typed", src, true);
+    assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
+
+    let choose = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "choose" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let main = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "main" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let let_call = match &main.body.statements[0] {
+        Statement::Let(binding) => &binding.value,
+        _ => panic!("expected let statement"),
+    };
+    let Statement::Expr(case_expr) = &choose.body.statements[0] else {
+        panic!("expected case expression")
+    };
+    let ExprKind::Case { clauses, .. } = &case_expr.kind else {
+        panic!("expected case")
+    };
+    let ExprKind::Block(first_arm) = &clauses[0].body.kind else {
+        panic!("expected block arm")
+    };
+    let Statement::Expr(first_call) = &first_arm.statements[0] else {
+        panic!("expected non-final arm expression")
+    };
+    let Statement::Expr(last_call) = &first_arm.statements[1] else {
+        panic!("expected final arm expression")
+    };
+    let guard = clauses[1].guard.as_ref().unwrap();
+    let ExprKind::Binary { right, .. } = &clauses[2].body.kind else {
+        panic!("expected logical expression")
+    };
+
+    let tail = |expr: &Expr| {
+        let id = result
+            .typed
+            .expr_id(expr)
+            .expect("expression has a stable ID");
+        result.typed.expression(id).unwrap().tail_position
+    };
+    assert!(!tail(let_call));
+    assert!(!tail(first_call));
+    assert!(tail(last_call));
+    assert!(!tail(guard));
+    assert!(tail(right));
+    assert!(tail(case_expr));
+
+    assert!(
+        result
+            .typed
+            .expressions
+            .values()
+            .all(|entry| entry.ty.is_some()),
+        "missing expression types: {:?}",
+        result
+            .typed
+            .expressions
+            .iter()
+            .filter_map(|(id, entry)| entry.ty.is_none().then_some((*id, entry.span)))
+            .collect::<Vec<_>>()
+    );
+    assert!(result
+        .typed
+        .patterns
+        .values()
+        .all(|entry| entry.ty.is_some()));
+    assert!(result
+        .typed
+        .expressions
+        .values()
+        .all(|entry| { entry.ty.as_ref().is_some_and(|ty| !contains_type_var(ty)) }));
+
+    let second = check_source("typed", src, true);
+    let ids = |module: &lush_types::typed::TypedModule| {
+        module
+            .expressions
+            .iter()
+            .map(|(id, annotation)| (*id, annotation.tail_position))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&result.typed), ids(&second.typed));
+}
+
+#[test]
+fn typed_builtin_constructors_have_constructor_metadata() {
+    use lush_syntax::ast::{ExprKind, ModuleItem, Statement};
+
+    let result = check_source(
+        "typed_builtins",
+        "pub fn truth() -> Bool { True; }\n",
+        false,
+    );
+    assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
+    let function = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "truth" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let Statement::Expr(expr) = &function.body.statements[0] else {
+        panic!("expected constructor value")
+    };
+    assert!(matches!(expr.kind, ExprKind::Constructor(_)));
+    let id = result.typed.expr_id(expr).unwrap();
+    assert!(matches!(
+        &result.typed.expression(id).unwrap().resolved_reference,
+        Some(lush_types::typed::ResolvedReference::Imported {
+            module,
+            name,
+            kind: lush_types::typed::ResolvedValueKind::Constructor {
+                variant_tag: Some(0),
+                arity: 0,
+                ..
+            },
+        }) if module == "prelude" && name == "True"
+    ));
+}
+
+#[test]
+fn typed_calls_keep_source_order_parameter_mappings() {
+    use lush_syntax::ast::{ModuleItem, Statement};
+
+    let src = "pub fn target(with a: Int, in b: Int, each c: Int) -> Int { a + b + c; }\nfn value() -> Int { 1; }\npub fn main() -> Nil { let _ = target(each: value(), with: value(), in: value()); Nil; }\n";
+    let result = check_source("call_map", src, true);
+    assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
+
+    let main = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "main" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let Statement::Let(binding) = &main.body.statements[0] else {
+        panic!("expected call binding")
+    };
+    let call_id = result.typed.expr_id(&binding.value).unwrap();
+    assert_eq!(
+        result
+            .typed
+            .expression(call_id)
+            .unwrap()
+            .argument_to_parameter,
+        Some(vec![Some(2), Some(0), Some(1)])
+    );
+}
+
+#[test]
+fn typed_metadata_resolves_constructor_patterns_and_variant_field_positions() {
+    use lush_syntax::ast::{ExprKind, ModuleItem, PatternKind};
+
+    let src = "pub type Item { First(id: Int, tag: String) Second(tag: String, id: Int) }\npub type Record { Record(label: String, id: Int) }\npub fn tag(item: Item) -> String { item.tag; }\npub fn set_label(item: Record) -> Record { Record(..item, label: \"changed\"); }\npub fn classify(item: Item) -> String { case item { First(_, _) -> \"first\"; Second(_, _) -> \"second\"; }; }\n";
+    let result = check_source("typed_fields", src, false);
+    assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
+
+    let tag_function = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "tag" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let lush_syntax::ast::Statement::Expr(field) = &tag_function.body.statements[0] else {
+        panic!("expected field access")
+    };
+    let ExprKind::Field { base, .. } = &field.kind else {
+        panic!("expected field access")
+    };
+    let base_id = result.typed.expr_id(base).unwrap();
+    assert!(matches!(
+        &result.typed.expression(base_id).unwrap().resolved_reference,
+        Some(lush_types::typed::ResolvedReference::LocalBinding(_))
+    ));
+    let field_id = result.typed.expr_id(field).unwrap();
+    let field_annotation = result.typed.expression(field_id).unwrap();
+    assert!(matches!(
+        &field_annotation.receiver_ty,
+        Some(lush_types::ty::Type::App { .. })
+    ));
+    assert_eq!(
+        field_annotation.field_positions,
+        Some(vec![
+            lush_types::typed::VariantFieldPosition {
+                variant_tag: 0,
+                field_index: 1,
+            },
+            lush_types::typed::VariantFieldPosition {
+                variant_tag: 1,
+                field_index: 0,
+            },
+        ])
+    );
+
+    let update_function = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "set_label" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let lush_syntax::ast::Statement::Expr(update) = &update_function.body.statements[0] else {
+        panic!("expected record update")
+    };
+    let update_id = result.typed.expr_id(update).unwrap();
+    let update_annotation = result.typed.expression(update_id).unwrap();
+    assert!(matches!(
+        &update_annotation.receiver_ty,
+        Some(lush_types::ty::Type::App { .. })
+    ));
+    assert!(matches!(
+        &update_annotation.resolved_reference,
+        Some(lush_types::typed::ResolvedReference::TopLevel {
+            name,
+            kind: lush_types::typed::ResolvedValueKind::Constructor {
+                variant_tag: Some(0),
+                ..
+            },
+            ..
+        }) if name == "Record"
+    ));
+    assert_eq!(
+        update_annotation.field_positions,
+        Some(vec![lush_types::typed::VariantFieldPosition {
+            variant_tag: 0,
+            field_index: 0,
+        }])
+    );
+
+    let classify = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "classify" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let lush_syntax::ast::Statement::Expr(case) = &classify.body.statements[0] else {
+        panic!("expected case expression")
+    };
+    let ExprKind::Case { clauses, .. } = &case.kind else {
+        panic!("expected case")
+    };
+    for (clause, (expected_name, expected_tag)) in clauses.iter().zip([("First", 0), ("Second", 1)])
+    {
+        let pattern = &clause.patterns[0].patterns[0];
+        assert!(matches!(pattern.kind, PatternKind::Constructor { .. }));
+        let pattern_id = result.typed.pattern_id(pattern).unwrap();
+        assert!(matches!(
+            &result.typed.pattern(pattern_id).unwrap().resolved_reference,
+            Some(lush_types::typed::ResolvedReference::TopLevel {
+                name,
+                kind: lush_types::typed::ResolvedValueKind::Constructor {
+                    variant_tag: Some(tag),
+                    ..
+                },
+                ..
+            }) if name == expected_name && *tag == expected_tag
+        ));
+    }
+}
+
+#[test]
+fn typed_constants_preserve_sharing_and_scale_linearly() {
+    use lush_types::const_eval::{eval_const_expr, ConstEnv, ConstValue};
+
+    let checked = check_source(
+        "constant_sharing",
+        "pub const a = #(1, 2);\npub const b = #(a, a);\n",
+        false,
+    );
+    assert!(ok(&checked.diagnostics), "{:?}", checked.diagnostics);
+    let ConstValue::Tuple(b) = checked.typed.constants.get("b").unwrap() else {
+        panic!("expected tuple constant")
+    };
+    let (ConstValue::Tuple(left), ConstValue::Tuple(right)) = (&b[0], &b[1]) else {
+        panic!("expected shared nested tuple values")
+    };
+    assert!(std::rc::Rc::ptr_eq(left, right));
+    assert_eq!(checked.typed.constant_node_count(), 2);
+
+    let count = 4096usize;
+    let mut source = String::new();
+    source.push_str("const c0 = 1;\n");
+    for index in 1..count {
+        source.push_str(&format!(
+            "const c{index} = #(c{}, c{});\n",
+            index - 1,
+            index - 1
+        ));
+    }
+    let parsed = parse_module(&source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let module = parsed.module.unwrap();
+    let mut env = ConstEnv::new();
+    let mut sink = lush_types::diag::TypeSink::new(0);
+    for item in &module.items {
+        let lush_syntax::ast::ModuleItem::Const(constant) = item else {
+            continue;
+        };
+        let value = eval_const_expr(&constant.value, &mut env, &mut sink)
+            .expect("doubling-chain constant should evaluate");
+        env.values.insert(constant.name.text.clone(), value);
+    }
+    assert!(sink.into_diagnostics().is_empty());
+    let mut typed = lush_types::typed::TypedModule::default();
+    typed.constants = env.values.into_iter().collect();
+    assert_eq!(typed.constant_node_count(), count - 1);
+}
+
+#[test]
+fn typed_bit_array_patterns_record_resolved_segment_kinds() {
+    use lush_syntax::ast::{ExprKind, ModuleItem, PatternKind, Statement};
+
+    let src = "pub fn f(x: BitArray) -> Int { case x { <<0x1, n:size(8)-signed-little, rest:bytes>> -> n; _ -> 0; }; }\n";
+    let result = check_source("typed_bits", src, false);
+    assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
+    let function = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "f" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let Statement::Expr(case) = &function.body.statements[0] else {
+        panic!("expected case expression")
+    };
+    let ExprKind::Case { clauses, .. } = &case.kind else {
+        panic!("expected case")
+    };
+    let pattern = &clauses[0].patterns[0].patterns[0];
+    assert!(matches!(pattern.kind, PatternKind::BitArray(_)));
+    let pattern_id = result.typed.pattern_id(pattern).unwrap();
+    assert_eq!(
+        result.typed.pattern(pattern_id).unwrap().bit_segments,
+        Some(vec![
+            lush_types::typed::BitSegmentAnnotation {
+                kind: lush_types::typed::BitSegmentKind::Integer,
+                size: Some(8),
+                size_expr: None,
+                signed: Some(false),
+                little_endian: false,
+            },
+            lush_types::typed::BitSegmentAnnotation {
+                kind: lush_types::typed::BitSegmentKind::Integer,
+                size: Some(8),
+                size_expr: None,
+                signed: Some(true),
+                little_endian: true,
+            },
+            lush_types::typed::BitSegmentAnnotation {
+                kind: lush_types::typed::BitSegmentKind::Bytes,
+                size: None,
+                size_expr: None,
+                signed: None,
+                little_endian: false,
+            },
+        ])
+    );
+}
+
+#[test]
+fn typed_use_marks_implicit_callback() {
+    use lush_syntax::ast::{ExprKind, ModuleItem, Statement};
+
+    let src = "fn use_it(with value: Int, callback: fn(Int) -> Nil) -> Nil { callback(value); }\npub fn main() -> Nil { use value <- use_it(with: 1); let _ = value; Nil; }\n";
+    let result = check_source("typed_use", src, true);
+    assert!(ok(&result.diagnostics), "{:?}", result.diagnostics);
+
+    let main = result
+        .module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ModuleItem::Fn(function) if function.name.text == "main" => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    let Statement::Expr(call) = &main.body.statements[0] else {
+        panic!("use should desugar to a call expression")
+    };
+    let id = result.typed.expr_id(call).unwrap();
+    let annotation = result.typed.expression(id).unwrap();
+    assert_eq!(annotation.implicit_use_callback_argument, Some(1));
+    assert_eq!(
+        annotation.argument_to_parameter,
+        Some(vec![Some(0), Some(1)])
+    );
+    let ExprKind::Call { args, .. } = &call.kind else {
+        panic!("expected desugared call")
+    };
+    let lush_syntax::ast::ArgValue::Expr(callback) = &args[1].value else {
+        panic!("expected callback expression")
+    };
+    let callback_id = result.typed.expr_id(callback).unwrap();
+    assert!(!result.typed.expression(callback_id).unwrap().tail_position);
+    let ExprKind::Fn { body, .. } = &callback.kind else {
+        panic!("expected callback function")
+    };
+    let Statement::Expr(callback_final) = body.statements.last().unwrap() else {
+        panic!("expected callback final expression")
+    };
+    let final_id = result.typed.expr_id(callback_final).unwrap();
+    assert!(result.typed.expression(final_id).unwrap().tail_position);
+}
+
+fn contains_type_var(ty: &lush_types::ty::Type) -> bool {
+    use lush_types::ty::Type;
+    match ty {
+        Type::Var(_) => true,
+        Type::List(inner) => contains_type_var(inner),
+        Type::Tuple(items) => items.iter().any(|item| contains_type_var(item)),
+        Type::Fun { params, ret } => {
+            params.iter().any(|param| contains_type_var(param)) || contains_type_var(ret)
+        }
+        Type::App { args, .. } => args.iter().any(|arg| contains_type_var(arg)),
+        Type::Error
+        | Type::Rigid(_)
+        | Type::Int
+        | Type::Float
+        | Type::String
+        | Type::Bool
+        | Type::Nil
+        | Type::BitArray => false,
     }
 }

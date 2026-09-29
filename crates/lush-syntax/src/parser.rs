@@ -1141,6 +1141,7 @@ impl<'a> Parser<'a> {
                 label: Some(label),
                 value,
                 span: start.merge(end),
+                implicit_use_callback: false,
             };
         }
         let value = if matches!(self.kind(), TokenKind::Discard) {
@@ -1159,6 +1160,7 @@ impl<'a> Parser<'a> {
             label: None,
             value,
             span: start.merge(end),
+            implicit_use_callback: false,
         }
     }
 
