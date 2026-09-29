@@ -277,6 +277,11 @@ fn alias_pattern_e2e() {
     common::assert_case("alias_pattern");
 }
 
+#[test]
+fn nested_patterns_e2e() {
+    common::assert_case("nested_patterns");
+}
+
 /// #24 §5: a long chain of small `case` statements must not trip E2001.
 #[test]
 fn case_statements_reuse_registers() {

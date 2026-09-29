@@ -1,0 +1,32 @@
+import lush/io;
+import lush/int;
+
+pub type Box {
+  Box(Pair)
+}
+
+pub type Pair {
+  Pair(x: Int, y: Int)
+}
+
+pub fn main() -> Nil {
+  case Ok(#(3, 4)) {
+    Ok(#(x, y)) -> io.println(int.to_string(x * 10 + y));
+    Error(_) -> io.println("e");
+  };
+  case #(1, #(2, 3)) {
+    #(a, #(b, c)) -> io.println(int.to_string(a + b + c));
+  };
+  case Ok(Box(Pair(x: 5, y: 6))) {
+    Ok(Box(Pair(x, y))) -> io.println(int.to_string(x * 10 + y));
+    Error(_) -> io.println("e");
+  };
+  case [Ok(1), Ok(2)] {
+    [Ok(a), Ok(b)] -> io.println(int.to_string(a + b));
+    _ -> io.println("no");
+  };
+  case #(Ok(7), Error(8)) {
+    #(Ok(a), Error(b)) -> io.println(int.to_string(a + b));
+    _ -> io.println("no");
+  };
+}

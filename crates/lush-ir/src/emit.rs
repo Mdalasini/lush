@@ -1545,399 +1545,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             }
             let mut fail_jumps = Vec::new();
             for (pat, scrut) in row.patterns.iter().zip(scruts.iter()) {
-                // Unwrap `inner as name` layers; bind aliases to the scrutinee
-                // after the inner pattern has matched.
-                let mut alias_binds: Vec<(String, Span)> = Vec::new();
-                let mut pat = pat;
-                while let PatternKind::Alias { pattern, name } = &pat.kind {
-                    alias_binds.push((name.text.clone(), pat.span));
-                    pat = pattern.as_ref();
-                }
-                match &pat.kind {
-                    PatternKind::Int(lit) => {
-                        let base = match lit.base {
-                            IntBase::Decimal => 10,
-                            IntBase::Hex => 16,
-                            IntBase::Octal => 8,
-                            IntBase::Binary => 2,
-                        };
-                        let v = numeric::int_literal_value(&lit.digits, base).ok()?;
-                        let ok = self.fresh()?;
-                        self.emit(
-                            Op::IsInt {
-                                dst: ok,
-                                src: *scrut,
-                                value: v,
-                            },
-                            pat.span,
-                        );
-                        let jmp = self.code.len();
-                        self.emit(
-                            Op::JumpIfFalse {
-                                cond: ok,
-                                target: 0,
-                            },
-                            pat.span,
-                        );
-                        fail_jumps.push(jmp);
-                        self.recycle(ok);
-                    }
-                    PatternKind::Var(n) => {
-                        let r = self.fresh()?;
-                        self.emit(
-                            Op::Move {
-                                dst: r,
-                                src: *scrut,
-                            },
-                            pat.span,
-                        );
-                        self.define(n.text.clone(), r);
-                    }
-                    PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
-                    PatternKind::Constructor { constructor: c, .. }
-                        if c.name.text == "True" || c.name.text == "False" =>
-                    {
-                        let want = c.name.text == "True";
-                        let b = self.fresh()?;
-                        self.emit(
-                            Op::LoadBool {
-                                dst: b,
-                                value: want,
-                            },
-                            pat.span,
-                        );
-                        let ok = self.fresh()?;
-                        self.emit(
-                            Op::Eq {
-                                dst: ok,
-                                a: *scrut,
-                                b,
-                            },
-                            pat.span,
-                        );
-                        let jmp = self.code.len();
-                        self.emit(
-                            Op::JumpIfFalse {
-                                cond: ok,
-                                target: 0,
-                            },
-                            pat.span,
-                        );
-                        fail_jumps.push(jmp);
-                        self.recycle(b);
-                        self.recycle(ok);
-                    }
-                    PatternKind::Constructor {
-                        constructor: c,
-                        args,
-                    } if !matches!(c.name.text.as_str(), "True" | "False") => {
-                        let tag: u16 = self.constructor_tag(&c.name.text).unwrap_or(0);
-                        let switch_idx = self.code.len();
-                        self.emit(
-                            Op::SwitchTag {
-                                scrutinee: *scrut,
-                                arms: vec![(tag, 0)],
-                                default: 0,
-                            },
-                            pat.span,
-                        );
-                        let match_pc = self.code.len() as u32;
-                        if let Op::SwitchTag { arms, .. } = &mut self.code[switch_idx] {
-                            arms[0].1 = match_pc;
-                        }
-                        // Record switch default for fail patching (reuse fail_jumps via sentinel JumpIfFalse).
-                        // Emit a nop JumpIfFalse on True so we can reuse the fail_jumps patcher for the
-                        // SwitchTag default by also storing switch_idx separately.
-                        // Patch default when fail_pc known: push switch_idx into a side list.
-                        // Simpler: after binding fields, we rely on fail_jumps patching below — add
-                        // SwitchTag default patch alongside fail_jumps by pushing switch_idx + FLAG.
-                        // Use: fail_jumps.push(switch_idx | 1<<31) convention — too hacky.
-                        // Instead patch default now to a placeholder and collect switch_idx in fail_jumps
-                        // as a JumpIfFalse we invent:
-                        fail_jumps.push(switch_idx);
-                        if let Some(pargs) = args {
-                            let mut field_i = 0u16;
-                            for pa in pargs {
-                                if pa.spread {
-                                    continue;
-                                }
-                                let Some(inner) = &pa.pattern else {
-                                    continue;
-                                };
-                                let field = self.fresh()?;
-                                self.emit(
-                                    Op::GetField {
-                                        dst: field,
-                                        base: *scrut,
-                                        index: field_i,
-                                    },
-                                    inner.span,
-                                );
-                                field_i += 1;
-                                match &inner.kind {
-                                    PatternKind::Var(n) => self.define(n.text.clone(), field),
-                                    PatternKind::Discard | PatternKind::UnderscoreName(_) => {
-                                        self.recycle(field);
-                                    }
-                                    _ => {
-                                        self.error(
-                                            codes::E2011_LOWER,
-                                            "nested constructor field pattern not supported yet",
-                                            inner.span,
-                                        );
-                                        return None;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    PatternKind::List { items, spread } => {
-                        // Nested list patterns beyond one cons cell are lowered
-                        // by walking items then the optional spread tail.
-                        let mut cur = *scrut;
-                        let mut cur_is_temp = false;
-                        for item in items {
-                            let is_empty = self.fresh()?;
-                            self.emit(
-                                Op::IsEmptyList {
-                                    dst: is_empty,
-                                    src: cur,
-                                },
-                                pat.span,
-                            );
-                            // Fail when empty while expecting a cons cell.
-                            let f = self.fresh()?;
-                            self.emit(
-                                Op::LoadBool {
-                                    dst: f,
-                                    value: false,
-                                },
-                                pat.span,
-                            );
-                            let ok = self.fresh()?;
-                            self.emit(
-                                Op::Eq {
-                                    dst: ok,
-                                    a: is_empty,
-                                    b: f,
-                                },
-                                pat.span,
-                            );
-                            let jmp = self.code.len();
-                            self.emit(
-                                Op::JumpIfFalse {
-                                    cond: ok,
-                                    target: 0,
-                                },
-                                pat.span,
-                            );
-                            fail_jumps.push(jmp);
-                            self.recycle(is_empty);
-                            self.recycle(f);
-                            self.recycle(ok);
-                            let head = self.fresh()?;
-                            self.emit(
-                                Op::GetField {
-                                    dst: head,
-                                    base: cur,
-                                    index: 0,
-                                },
-                                pat.span,
-                            );
-                            let tail = self.fresh()?;
-                            self.emit(
-                                Op::GetField {
-                                    dst: tail,
-                                    base: cur,
-                                    index: 1,
-                                },
-                                pat.span,
-                            );
-                            // Bind item pattern against head (var / discard only for now).
-                            match &item.kind {
-                                PatternKind::Var(n) => {
-                                    self.define(n.text.clone(), head);
-                                }
-                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {
-                                    self.recycle(head);
-                                }
-                                PatternKind::Int(lit) => {
-                                    let base = match lit.base {
-                                        IntBase::Decimal => 10,
-                                        IntBase::Hex => 16,
-                                        IntBase::Octal => 8,
-                                        IntBase::Binary => 2,
-                                    };
-                                    let v = numeric::int_literal_value(&lit.digits, base).ok()?;
-                                    let ok = self.fresh()?;
-                                    self.emit(
-                                        Op::IsInt {
-                                            dst: ok,
-                                            src: head,
-                                            value: v,
-                                        },
-                                        item.span,
-                                    );
-                                    let jmp = self.code.len();
-                                    self.emit(
-                                        Op::JumpIfFalse {
-                                            cond: ok,
-                                            target: 0,
-                                        },
-                                        item.span,
-                                    );
-                                    fail_jumps.push(jmp);
-                                    self.recycle(ok);
-                                    self.recycle(head);
-                                }
-                                _ => {
-                                    self.error(
-                                        codes::E2011_LOWER,
-                                        "nested list item pattern not supported yet",
-                                        item.span,
-                                    );
-                                    return None;
-                                }
-                            }
-                            if cur_is_temp {
-                                self.recycle(cur);
-                            }
-                            cur = tail;
-                            cur_is_temp = true;
-                        }
-                        match spread {
-                            None => {
-                                let is_empty = self.fresh()?;
-                                self.emit(
-                                    Op::IsEmptyList {
-                                        dst: is_empty,
-                                        src: cur,
-                                    },
-                                    pat.span,
-                                );
-                                let jmp = self.code.len();
-                                self.emit(
-                                    Op::JumpIfFalse {
-                                        cond: is_empty,
-                                        target: 0,
-                                    },
-                                    pat.span,
-                                );
-                                fail_jumps.push(jmp);
-                                self.recycle(is_empty);
-                                if cur_is_temp {
-                                    self.recycle(cur);
-                                }
-                            }
-                            Some(sp) => match &sp.kind {
-                                PatternKind::Var(n) => self.define(n.text.clone(), cur),
-                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {
-                                    if cur_is_temp {
-                                        self.recycle(cur);
-                                    }
-                                }
-                                _ => {
-                                    self.error(
-                                        codes::E2011_LOWER,
-                                        "complex list spread pattern not supported yet",
-                                        sp.span,
-                                    );
-                                    return None;
-                                }
-                            },
-                        }
-                    }
-                    PatternKind::Tuple(elems) => {
-                        for (i, ep) in elems.iter().enumerate() {
-                            let field = self.fresh()?;
-                            self.emit(
-                                Op::GetField {
-                                    dst: field,
-                                    base: *scrut,
-                                    index: i as u16,
-                                },
-                                ep.span,
-                            );
-                            match &ep.kind {
-                                PatternKind::Var(n) => self.define(n.text.clone(), field),
-                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {
-                                    self.recycle(field);
-                                }
-                                _ => {
-                                    self.error(
-                                        codes::E2011_LOWER,
-                                        "nested tuple pattern not supported yet",
-                                        ep.span,
-                                    );
-                                    return None;
-                                }
-                            }
-                        }
-                    }
-                    PatternKind::BitArray(segs) => {
-                        self.emit_bit_array_pattern(pat, segs, *scrut, &mut fail_jumps)?;
-                    }
-                    PatternKind::StringPrefix { prefix, rest } => {
-                        let expected = self.fresh()?;
-                        let idx = self.intern_string(prefix.value.clone());
-                        self.emit(Op::LoadConst { dst: expected, idx }, pat.span);
-                        let ok = self.fresh()?;
-                        let rest_r = self.fresh()?;
-                        self.emit(
-                            Op::StringTakePrefix {
-                                ok,
-                                rest: rest_r,
-                                src: *scrut,
-                                expected,
-                            },
-                            pat.span,
-                        );
-                        let jmp = self.code.len();
-                        self.emit(
-                            Op::JumpIfFalse {
-                                cond: ok,
-                                target: 0,
-                            },
-                            pat.span,
-                        );
-                        fail_jumps.push(jmp);
-                        self.recycle(expected);
-                        self.recycle(ok);
-                        match &rest.kind {
-                            PatternKind::Var(n) => self.define(n.text.clone(), rest_r),
-                            PatternKind::Discard | PatternKind::UnderscoreName(_) => {
-                                self.recycle(rest_r);
-                            }
-                            _ => {
-                                self.error(
-                                    codes::E2011_LOWER,
-                                    "nested string-prefix rest pattern not supported yet",
-                                    rest.span,
-                                );
-                                return None;
-                            }
-                        }
-                    }
-                    other => {
-                        let msg = match other {
-                            PatternKind::Alias { .. } => "alias patterns are not yet lowered",
-                            _ => "this pattern form is not yet lowered",
-                        };
-                        self.error(codes::E2011_LOWER, msg, pat.span);
-                        return None;
-                    }
-                }
-                for (name, span) in alias_binds {
-                    let r = self.fresh()?;
-                    self.emit(
-                        Op::Move {
-                            dst: r,
-                            src: *scrut,
-                        },
-                        span,
-                    );
-                    self.define(name, r);
-                }
+                self.emit_pattern(pat, *scrut, &mut fail_jumps)?;
             }
             if let Some(g) = &clause.guard {
                 let gv = self.emit_expr(g, false)?;
@@ -1997,6 +1605,308 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             self.emit(Op::Move { dst, src: dst }, span);
         }
         Some(dst)
+    }
+
+    /// Lower one pattern against `scrut`, pushing failure jumps into `fail_jumps`.
+    /// Nested constructor/tuple/list patterns recurse here.
+    fn emit_pattern(
+        &mut self,
+        pat: &Pattern,
+        scrut: Reg,
+        fail_jumps: &mut Vec<usize>,
+    ) -> Option<()> {
+        // Unwrap `inner as name` layers; bind aliases to the scrutinee
+        // after the inner pattern has matched.
+        let mut alias_binds: Vec<(String, Span)> = Vec::new();
+        let mut pat = pat;
+        while let PatternKind::Alias { pattern, name } = &pat.kind {
+            alias_binds.push((name.text.clone(), pat.span));
+            pat = pattern.as_ref();
+        }
+        match &pat.kind {
+            PatternKind::Int(lit) => {
+                let base = match lit.base {
+                    IntBase::Decimal => 10,
+                    IntBase::Hex => 16,
+                    IntBase::Octal => 8,
+                    IntBase::Binary => 2,
+                };
+                let v = numeric::int_literal_value(&lit.digits, base).ok()?;
+                let ok = self.fresh()?;
+                self.emit(
+                    Op::IsInt {
+                        dst: ok,
+                        src: scrut,
+                        value: v,
+                    },
+                    pat.span,
+                );
+                let jmp = self.code.len();
+                self.emit(
+                    Op::JumpIfFalse {
+                        cond: ok,
+                        target: 0,
+                    },
+                    pat.span,
+                );
+                fail_jumps.push(jmp);
+                self.recycle(ok);
+            }
+            PatternKind::Var(n) => {
+                let r = self.fresh()?;
+                self.emit(Op::Move { dst: r, src: scrut }, pat.span);
+                self.define(n.text.clone(), r);
+            }
+            PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
+            PatternKind::Constructor { constructor: c, .. }
+                if c.name.text == "True" || c.name.text == "False" =>
+            {
+                let want = c.name.text == "True";
+                let b = self.fresh()?;
+                self.emit(
+                    Op::LoadBool {
+                        dst: b,
+                        value: want,
+                    },
+                    pat.span,
+                );
+                let ok = self.fresh()?;
+                self.emit(
+                    Op::Eq {
+                        dst: ok,
+                        a: scrut,
+                        b,
+                    },
+                    pat.span,
+                );
+                let jmp = self.code.len();
+                self.emit(
+                    Op::JumpIfFalse {
+                        cond: ok,
+                        target: 0,
+                    },
+                    pat.span,
+                );
+                fail_jumps.push(jmp);
+                self.recycle(b);
+                self.recycle(ok);
+            }
+            PatternKind::Constructor {
+                constructor: c,
+                args,
+            } if !matches!(c.name.text.as_str(), "True" | "False") => {
+                let tag: u16 = self.constructor_tag(&c.name.text).unwrap_or(0);
+                let switch_idx = self.code.len();
+                self.emit(
+                    Op::SwitchTag {
+                        scrutinee: scrut,
+                        arms: vec![(tag, 0)],
+                        default: 0,
+                    },
+                    pat.span,
+                );
+                let match_pc = self.code.len() as u32;
+                if let Op::SwitchTag { arms, .. } = &mut self.code[switch_idx] {
+                    arms[0].1 = match_pc;
+                }
+                // Record switch default for fail patching (reuse fail_jumps via sentinel JumpIfFalse).
+                // Emit a nop JumpIfFalse on True so we can reuse the fail_jumps patcher for the
+                // SwitchTag default by also storing switch_idx separately.
+                // Patch default when fail_pc known: push switch_idx into a side list.
+                // Simpler: after binding fields, we rely on fail_jumps patching below — add
+                // SwitchTag default patch alongside fail_jumps by pushing switch_idx + FLAG.
+                // Use: fail_jumps.push(switch_idx | 1<<31) convention — too hacky.
+                // Instead patch default now to a placeholder and collect switch_idx in fail_jumps
+                // as a JumpIfFalse we invent:
+                fail_jumps.push(switch_idx);
+                if let Some(pargs) = args {
+                    let mut field_i = 0u16;
+                    for pa in pargs {
+                        if pa.spread {
+                            continue;
+                        }
+                        let Some(inner) = &pa.pattern else {
+                            continue;
+                        };
+                        let field = self.fresh()?;
+                        self.emit(
+                            Op::GetField {
+                                dst: field,
+                                base: scrut,
+                                index: field_i,
+                            },
+                            inner.span,
+                        );
+                        field_i += 1;
+                        self.emit_pattern(inner, field, fail_jumps)?;
+                        self.recycle(field);
+                    }
+                }
+            }
+            PatternKind::List { items, spread } => {
+                // Nested list patterns beyond one cons cell are lowered
+                // by walking items then the optional spread tail.
+                let mut cur = scrut;
+                let mut cur_is_temp = false;
+                for item in items {
+                    let is_empty = self.fresh()?;
+                    self.emit(
+                        Op::IsEmptyList {
+                            dst: is_empty,
+                            src: cur,
+                        },
+                        pat.span,
+                    );
+                    // Fail when empty while expecting a cons cell.
+                    let f = self.fresh()?;
+                    self.emit(
+                        Op::LoadBool {
+                            dst: f,
+                            value: false,
+                        },
+                        pat.span,
+                    );
+                    let ok = self.fresh()?;
+                    self.emit(
+                        Op::Eq {
+                            dst: ok,
+                            a: is_empty,
+                            b: f,
+                        },
+                        pat.span,
+                    );
+                    let jmp = self.code.len();
+                    self.emit(
+                        Op::JumpIfFalse {
+                            cond: ok,
+                            target: 0,
+                        },
+                        pat.span,
+                    );
+                    fail_jumps.push(jmp);
+                    self.recycle(is_empty);
+                    self.recycle(f);
+                    self.recycle(ok);
+                    let head = self.fresh()?;
+                    self.emit(
+                        Op::GetField {
+                            dst: head,
+                            base: cur,
+                            index: 0,
+                        },
+                        pat.span,
+                    );
+                    let tail = self.fresh()?;
+                    self.emit(
+                        Op::GetField {
+                            dst: tail,
+                            base: cur,
+                            index: 1,
+                        },
+                        pat.span,
+                    );
+                    self.emit_pattern(item, head, fail_jumps)?;
+                    self.recycle(head);
+                    if cur_is_temp {
+                        self.recycle(cur);
+                    }
+                    cur = tail;
+                    cur_is_temp = true;
+                }
+                match spread {
+                    None => {
+                        let is_empty = self.fresh()?;
+                        self.emit(
+                            Op::IsEmptyList {
+                                dst: is_empty,
+                                src: cur,
+                            },
+                            pat.span,
+                        );
+                        let jmp = self.code.len();
+                        self.emit(
+                            Op::JumpIfFalse {
+                                cond: is_empty,
+                                target: 0,
+                            },
+                            pat.span,
+                        );
+                        fail_jumps.push(jmp);
+                        self.recycle(is_empty);
+                        if cur_is_temp {
+                            self.recycle(cur);
+                        }
+                    }
+                    Some(sp) => {
+                        self.emit_pattern(sp, cur, fail_jumps)?;
+                        if cur_is_temp {
+                            self.recycle(cur);
+                        }
+                    }
+                }
+            }
+            PatternKind::Tuple(elems) => {
+                for (i, ep) in elems.iter().enumerate() {
+                    let field = self.fresh()?;
+                    self.emit(
+                        Op::GetField {
+                            dst: field,
+                            base: scrut,
+                            index: i as u16,
+                        },
+                        ep.span,
+                    );
+                    self.emit_pattern(ep, field, fail_jumps)?;
+                    self.recycle(field);
+                }
+            }
+            PatternKind::BitArray(segs) => {
+                self.emit_bit_array_pattern(pat, segs, scrut, fail_jumps)?;
+            }
+            PatternKind::StringPrefix { prefix, rest } => {
+                let expected = self.fresh()?;
+                let idx = self.intern_string(prefix.value.clone());
+                self.emit(Op::LoadConst { dst: expected, idx }, pat.span);
+                let ok = self.fresh()?;
+                let rest_r = self.fresh()?;
+                self.emit(
+                    Op::StringTakePrefix {
+                        ok,
+                        rest: rest_r,
+                        src: scrut,
+                        expected,
+                    },
+                    pat.span,
+                );
+                let jmp = self.code.len();
+                self.emit(
+                    Op::JumpIfFalse {
+                        cond: ok,
+                        target: 0,
+                    },
+                    pat.span,
+                );
+                fail_jumps.push(jmp);
+                self.recycle(expected);
+                self.recycle(ok);
+                self.emit_pattern(rest, rest_r, fail_jumps)?;
+                self.recycle(rest_r);
+            }
+            other => {
+                let msg = match other {
+                    PatternKind::Alias { .. } => "alias patterns are not yet lowered",
+                    _ => "this pattern form is not yet lowered",
+                };
+                self.error(codes::E2011_LOWER, msg, pat.span);
+                return None;
+            }
+        }
+        for (name, span) in alias_binds {
+            let r = self.fresh()?;
+            self.emit(Op::Move { dst: r, src: scrut }, span);
+            self.define(name, r);
+        }
+        Some(())
     }
 
     /// Lower a bit-array pattern: walk segments with Take* ops, then require empty
