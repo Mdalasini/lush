@@ -563,6 +563,22 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             ExprKind::Paren(e) => self.emit_expr(e, tail),
             ExprKind::Block(b) => self.emit_block(b, tail),
             ExprKind::Unary { op, expr: inner } => {
+                // Direct `-9223372036854775808` is `MIN_INT` (spec §5.7); it must
+                // load as an immediate, not go through `Op::Neg` (which panics).
+                if matches!(op, UnaryOp::Neg) {
+                    if let ExprKind::Int(lit) = &inner.kind {
+                        let base = match lit.base {
+                            IntBase::Decimal => 10,
+                            IntBase::Hex => 16,
+                            IntBase::Octal => 8,
+                            IntBase::Binary => 2,
+                        };
+                        let v = numeric::negated_int_literal_value(&lit.digits, base).ok()?;
+                        let dst = self.fresh()?;
+                        self.emit(Op::LoadInt { dst, value: v }, expr.span);
+                        return Some(dst);
+                    }
+                }
                 let src = self.emit_expr(inner, false)?;
                 let dst = self.fresh()?;
                 match op {
