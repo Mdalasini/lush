@@ -17,7 +17,7 @@ use lush_syntax::ast::Module;
 use lush_syntax::diagnostic::{Diagnostic, Severity};
 use lush_types::{check_graph, ok};
 
-pub use bytecode::{Builtin, Constant, FuncId, Function, Op, Program, Reg};
+pub use bytecode::{BitSegEnc, Builtin, Constant, FuncId, Function, Op, Program, Reg};
 pub use dump::dump_program;
 pub use lushc::{decode as decode_lushc, encode as encode_lushc};
 pub use opt::OptLevel;

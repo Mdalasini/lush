@@ -35,7 +35,6 @@ enum Object {
         arity: u8,
         captures: Vec<Value>,
     },
-    #[allow(dead_code)]
     BitArray {
         bits: Vec<u8>,
         bit_len: u64,
@@ -200,6 +199,22 @@ impl Heap {
         match self.get(p) {
             Object::Closure { captures, .. } => captures,
             _ => &[],
+        }
+    }
+    pub fn alloc_bit_array(&mut self, bits: Vec<u8>, bit_len: u64) -> HeapPtr {
+        let words = 2 + (bits.len() as u64).div_ceil(8);
+        self.push(Object::BitArray { bits, bit_len }, words)
+    }
+    pub fn bit_array_bits(&self, p: HeapPtr) -> &[u8] {
+        match self.get(p) {
+            Object::BitArray { bits, .. } => bits,
+            _ => &[],
+        }
+    }
+    pub fn bit_array_len(&self, p: HeapPtr) -> u64 {
+        match self.get(p) {
+            Object::BitArray { bit_len, .. } => *bit_len,
+            _ => 0,
         }
     }
 }

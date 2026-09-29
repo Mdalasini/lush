@@ -11,7 +11,7 @@
 //!
 //! Strings are `u32` length + UTF-8 bytes. Ops are tagged with a `u16` discriminant.
 
-use crate::bytecode::{Builtin, Constant, Function, Op, Program};
+use crate::bytecode::{BitSegEnc, Builtin, Constant, Function, Op, Program};
 
 pub const MAGIC: &[u8; 4] = b"LUSH";
 pub const VERSION: u32 = 2;
@@ -478,6 +478,136 @@ fn encode_op(w: &mut Writer, op: &Op) {
             w.u8(*dst);
             w.u8(*src);
         }
+        Op::MakeBitArray { dst, values, specs } => {
+            w.u16(60);
+            w.u8(*dst);
+            encode_regs(w, values);
+            w.u16(specs.len() as u16);
+            for s in specs {
+                encode_bit_seg(w, s);
+            }
+        }
+        Op::BitArrayTakeInt {
+            ok,
+            value,
+            rest,
+            src,
+            size,
+            signed,
+            little,
+        } => {
+            w.u16(61);
+            w.u8(*ok);
+            w.u8(*value);
+            w.u8(*rest);
+            w.u8(*src);
+            w.u8(*size);
+            let mut flags = 0u8;
+            if *signed {
+                flags |= 1;
+            }
+            if *little {
+                flags |= 2;
+            }
+            w.u8(flags);
+        }
+        Op::BitArrayTakeUtf8 {
+            ok,
+            rest,
+            src,
+            expected,
+        } => {
+            w.u16(62);
+            w.u8(*ok);
+            w.u8(*rest);
+            w.u8(*src);
+            w.u8(*expected);
+        }
+        Op::BitArrayTakeRest {
+            ok,
+            value,
+            src,
+            require_byte_aligned,
+        } => {
+            w.u16(63);
+            w.u8(*ok);
+            w.u8(*value);
+            w.u8(*src);
+            w.u8(u8::from(*require_byte_aligned));
+        }
+        Op::BitArrayIsEmpty { dst, src } => {
+            w.u16(64);
+            w.u8(*dst);
+            w.u8(*src);
+        }
+    }
+}
+
+fn encode_bit_seg(w: &mut Writer, s: &BitSegEnc) {
+    match s {
+        BitSegEnc::Int {
+            size,
+            signed,
+            little,
+        } => {
+            w.u8(0);
+            w.u8(*size);
+            let mut flags = 0u8;
+            if *signed {
+                flags |= 1;
+            }
+            if *little {
+                flags |= 2;
+            }
+            w.u8(flags);
+        }
+        BitSegEnc::Utf8 => w.u8(1),
+        BitSegEnc::Bits { size_bits } => {
+            w.u8(2);
+            match size_bits {
+                Some(n) => {
+                    w.u8(1);
+                    w.u32(*n);
+                }
+                None => w.u8(0),
+            }
+        }
+        BitSegEnc::Bytes { size_bytes } => {
+            w.u8(3);
+            match size_bytes {
+                Some(n) => {
+                    w.u8(1);
+                    w.u32(*n);
+                }
+                None => w.u8(0),
+            }
+        }
+    }
+}
+
+fn decode_bit_seg(r: &mut Reader<'_>) -> Result<BitSegEnc, String> {
+    match r.u8()? {
+        0 => {
+            let size = r.u8()?;
+            let flags = r.u8()?;
+            Ok(BitSegEnc::Int {
+                size,
+                signed: flags & 1 != 0,
+                little: flags & 2 != 0,
+            })
+        }
+        1 => Ok(BitSegEnc::Utf8),
+        2 => {
+            let has = r.u8()?;
+            let size_bits = if has != 0 { Some(r.u32()?) } else { None };
+            Ok(BitSegEnc::Bits { size_bits })
+        }
+        3 => {
+            let has = r.u8()?;
+            let size_bytes = if has != 0 { Some(r.u32()?) } else { None };
+            Ok(BitSegEnc::Bytes { size_bytes })
+        }
+        t => Err(format!("unknown bit-seg tag {t}")),
     }
 }
 
@@ -643,6 +773,49 @@ fn decode_op(r: &mut Reader<'_>) -> Result<Op, String> {
             src: r.u8()?,
         }),
         58 => Ok(Op::Echo {
+            dst: r.u8()?,
+            src: r.u8()?,
+        }),
+        60 => {
+            let dst = r.u8()?;
+            let values = decode_regs(r)?;
+            let n = r.u16()? as usize;
+            let mut specs = Vec::with_capacity(n);
+            for _ in 0..n {
+                specs.push(decode_bit_seg(r)?);
+            }
+            Ok(Op::MakeBitArray { dst, values, specs })
+        }
+        61 => {
+            let ok = r.u8()?;
+            let value = r.u8()?;
+            let rest = r.u8()?;
+            let src = r.u8()?;
+            let size = r.u8()?;
+            let flags = r.u8()?;
+            Ok(Op::BitArrayTakeInt {
+                ok,
+                value,
+                rest,
+                src,
+                size,
+                signed: flags & 1 != 0,
+                little: flags & 2 != 0,
+            })
+        }
+        62 => Ok(Op::BitArrayTakeUtf8 {
+            ok: r.u8()?,
+            rest: r.u8()?,
+            src: r.u8()?,
+            expected: r.u8()?,
+        }),
+        63 => Ok(Op::BitArrayTakeRest {
+            ok: r.u8()?,
+            value: r.u8()?,
+            src: r.u8()?,
+            require_byte_aligned: r.u8()? != 0,
+        }),
+        64 => Ok(Op::BitArrayIsEmpty {
             dst: r.u8()?,
             src: r.u8()?,
         }),

@@ -1,5 +1,6 @@
 //! Iterative `inspect` rendering for `echo` (issue #24 / spec pin-down 4).
 
+use crate::bitarray;
 use crate::heap::{Heap, ObjectKind};
 use crate::value::Value;
 
@@ -121,6 +122,10 @@ fn inspect_into(heap: &Heap, v: Value, out: &mut String, depth: usize) {
         ObjectKind::Closure => {
             out.push_str(&format!("//fn({})", heap.closure_arity(p)));
         }
-        ObjectKind::BitArray => out.push_str("<<…>>"),
+        ObjectKind::BitArray => {
+            let rendered =
+                bitarray::inspect_bit_array(heap.bit_array_bits(p), heap.bit_array_len(p));
+            out.push_str(&rendered);
+        }
     }
 }

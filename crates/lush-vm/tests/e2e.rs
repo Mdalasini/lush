@@ -43,6 +43,30 @@ fn lists_e2e() {
 }
 
 #[test]
+fn bitarray_construct_e2e() {
+    common::assert_case("bitarray_construct");
+}
+
+#[test]
+fn bitarray_match_e2e() {
+    common::assert_case("bitarray_match");
+}
+
+#[test]
+fn bitarray_eq_e2e() {
+    common::assert_case("bitarray_eq");
+}
+
+#[test]
+fn panic_bitarray_range_e2e() {
+    let (src, _, expect_err, expect_status) = common::read_case("panic_bitarray_range");
+    let exit = common::run_source("main", &src, OptLevel::default());
+    assert_eq!(exit.status, expect_status);
+    assert!(exit.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&exit.stderr), expect_err);
+}
+
+#[test]
 fn result_case_e2e() {
     common::assert_case("result_case");
 }

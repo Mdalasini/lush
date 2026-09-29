@@ -18,7 +18,7 @@ use crate::ty::{
     ConstraintSet, FieldInfo, Scheme, Type, TypeDefId, TypeDefInfo, TypeDefKind, TypeStore,
     VariantInfo,
 };
-use crate::typed::TypedBuilder;
+use crate::typed::{BitSegmentKind, TypedBuilder};
 use crate::unify::{self, Origin, Unifier};
 
 pub struct InferCtx<'a> {
@@ -1508,7 +1508,10 @@ fn infer_pattern(ctx: &mut InferCtx<'_>, pat: &Pattern, expected: &Type, expansi
         PatternKind::BitArray(segs) => {
             let mut u = Unifier::new(ctx.store, ctx.sink);
             u.unify(expected, &Type::BitArray, pat.span, None);
-            check_bit_array_pattern(ctx, segs, expansive);
+            let kinds = check_bit_array_pattern(ctx, segs, expansive);
+            if !pat_id.is_none() {
+                ctx.typed.set_pattern_bit_segments(pat_id, kinds);
+            }
         }
     }
 }
@@ -1705,11 +1708,19 @@ fn infer_ctor_pattern(
     }
 }
 
-fn check_bit_array_pattern(ctx: &mut InferCtx<'_>, segs: &[BitSegmentPat], expansive: bool) {
+fn check_bit_array_pattern(
+    ctx: &mut InferCtx<'_>,
+    segs: &[BitSegmentPat],
+    expansive: bool,
+) -> Vec<BitSegmentKind> {
+    let mut kinds = Vec::with_capacity(segs.len());
     for (i, seg) in segs.iter().enumerate() {
         let mut is_utf8 = false;
         let mut is_bytes = false;
         let mut is_bits = false;
+        let mut signed = false;
+        let mut little = false;
+        let mut width: Option<i64> = None;
         let mut sized = false;
         for opt in &seg.options {
             match opt {
@@ -1717,7 +1728,10 @@ fn check_bit_array_pattern(ctx: &mut InferCtx<'_>, segs: &[BitSegmentPat], expan
                     "utf8" => is_utf8 = true,
                     "bytes" => is_bytes = true,
                     "bits" => is_bits = true,
-                    "little" | "big" | "signed" | "unsigned" => {}
+                    "signed" => signed = true,
+                    "unsigned" => signed = false,
+                    "little" => little = true,
+                    "big" => little = false,
                     other => {
                         ctx.sink.error(
                             codes::E1217_BIT_SPEC,
@@ -1730,7 +1744,11 @@ fn check_bit_array_pattern(ctx: &mut InferCtx<'_>, segs: &[BitSegmentPat], expan
                 BitOption::Size(e) => {
                     sized = true;
                     match &e.kind {
-                        ExprKind::Int(_) => {}
+                        ExprKind::Int(lit) => {
+                            if let Ok(v) = crate::numeric::int_literal_value(&lit.digits, 10) {
+                                width = Some(v);
+                            }
+                        }
                         ExprKind::Var(n) => {
                             // Must be previously bound.
                             if ctx.lookup_value(&n.text).is_none() {
@@ -1776,13 +1794,51 @@ fn check_bit_array_pattern(ctx: &mut InferCtx<'_>, segs: &[BitSegmentPat], expan
                 );
             }
             infer_pattern(ctx, &seg.pattern, &Type::String, expansive);
-        } else if is_bytes || is_bits {
+            kinds.push(BitSegmentKind::Utf8);
+        } else if is_bytes {
             infer_pattern(ctx, &seg.pattern, &Type::BitArray, expansive);
+            kinds.push(BitSegmentKind::Bytes {
+                size: width.map(|w| w as u32),
+            });
+        } else if is_bits {
+            infer_pattern(ctx, &seg.pattern, &Type::BitArray, expansive);
+            kinds.push(BitSegmentKind::Bits {
+                size: width.map(|w| w as u32),
+            });
         } else {
             // Default: Int segment (or bind variable as Int)
             infer_pattern(ctx, &seg.pattern, &Type::Int, expansive);
+            let size = match width {
+                Some(w) if (1..=64).contains(&w) => w as u8,
+                Some(_) => 8,
+                None => 8,
+            };
+            if let Some(w) = width {
+                if !(1..=64).contains(&w) {
+                    ctx.sink.error(
+                        codes::E1217_BIT_SPEC,
+                        format!("bit-array segment width {w} is not in 1..=64"),
+                        seg.span,
+                        None,
+                    );
+                }
+                if little && w % 8 != 0 {
+                    ctx.sink.error(
+                        codes::E1217_BIT_SPEC,
+                        "little-endian bit-array widths must be a multiple of 8",
+                        seg.span,
+                        None,
+                    );
+                }
+            }
+            kinds.push(BitSegmentKind::Int {
+                size,
+                signed,
+                little,
+            });
         }
     }
+    kinds
 }
 
 fn subst_params_store(store: &TypeStore, ty: &Type, params: &[String], args: &[Type]) -> Type {
@@ -2065,7 +2121,8 @@ fn infer_expr_inner(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
             Type::Error
         }
         ExprKind::BitArray(segs) => {
-            check_bit_array(ctx, segs);
+            let kinds = check_bit_array(ctx, segs);
+            ctx.typed.set_bit_segments(expr.id, kinds);
             Type::BitArray
         }
     }
@@ -3021,13 +3078,15 @@ fn infer_case(ctx: &mut InferCtx<'_>, subjects: &[Expr], clauses: &[Clause], spa
     result
 }
 
-fn check_bit_array(ctx: &mut InferCtx<'_>, segs: &[BitSegment]) {
-    for (i, seg) in segs.iter().enumerate() {
+fn check_bit_array(ctx: &mut InferCtx<'_>, segs: &[BitSegment]) -> Vec<BitSegmentKind> {
+    let mut kinds = Vec::with_capacity(segs.len());
+    for seg in segs.iter() {
         let mut is_utf8 = false;
         let mut is_bytes = false;
         let mut is_bits = false;
         let mut width: Option<i64> = None;
         let mut little = false;
+        let mut signed = false;
         for opt in &seg.options {
             match opt {
                 BitOption::Named(n) => match n.as_str() {
@@ -3035,7 +3094,9 @@ fn check_bit_array(ctx: &mut InferCtx<'_>, segs: &[BitSegment]) {
                     "bytes" => is_bytes = true,
                     "bits" => is_bits = true,
                     "little" => little = true,
-                    "big" | "signed" | "unsigned" => {}
+                    "big" => little = false,
+                    "signed" => signed = true,
+                    "unsigned" => signed = false,
                     other => {
                         ctx.sink.error(
                             codes::E1217_BIT_SPEC,
@@ -3065,12 +3126,19 @@ fn check_bit_array(ctx: &mut InferCtx<'_>, segs: &[BitSegment]) {
         if is_utf8 {
             let mut u = Unifier::new(ctx.store, ctx.sink);
             u.unify(&vt, &Type::String, seg.value.span, None);
-        } else if is_bytes || is_bits {
+            kinds.push(BitSegmentKind::Utf8);
+        } else if is_bytes {
             let mut u = Unifier::new(ctx.store, ctx.sink);
             u.unify(&vt, &Type::BitArray, seg.value.span, None);
-            if width.is_none() && i + 1 != segs.len() {
-                // unsized only as final — for patterns; for construction ok?
-            }
+            kinds.push(BitSegmentKind::Bytes {
+                size: width.map(|w| w as u32),
+            });
+        } else if is_bits {
+            let mut u = Unifier::new(ctx.store, ctx.sink);
+            u.unify(&vt, &Type::BitArray, seg.value.span, None);
+            kinds.push(BitSegmentKind::Bits {
+                size: width.map(|w| w as u32),
+            });
         } else {
             let mut u = Unifier::new(ctx.store, ctx.sink);
             u.unify(&vt, &Type::Int, seg.value.span, None);
@@ -3092,8 +3160,18 @@ fn check_bit_array(ctx: &mut InferCtx<'_>, segs: &[BitSegment]) {
                     );
                 }
             }
+            let size = match width {
+                Some(w) if (1..=64).contains(&w) => w as u8,
+                _ => 8,
+            };
+            kinds.push(BitSegmentKind::Int {
+                size,
+                signed,
+                little,
+            });
         }
     }
+    kinds
 }
 
 fn mark_const_refs_used(ctx: &mut InferCtx<'_>, e: &Expr) {

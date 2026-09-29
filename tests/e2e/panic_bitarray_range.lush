@@ -1,0 +1,4 @@
+pub fn main() {
+  let _x = <<256>>;
+  Nil;
+}

@@ -1,0 +1,3 @@
+panic: bit array integer segment out of range for size(8)
+at src/main.lush:2:12
+  in main.main (src/main.lush:2:12)

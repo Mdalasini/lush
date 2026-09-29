@@ -1,0 +1,16 @@
+import lush/io;
+
+pub fn main() {
+  let a = <<1:size(3)>>;
+  let b = <<1:size(3)>>;
+  let c = <<1:size(4)>>;
+  case a == b {
+    True -> io.println("eq");
+    False -> io.println("ne");
+  };
+  case a == c {
+    True -> io.println("bad");
+    False -> io.println("diff");
+  };
+  Nil;
+}

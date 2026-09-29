@@ -1,0 +1,9 @@
+import lush/io;
+
+pub fn main() {
+  echo <<1, 2, 3>>;
+  echo <<7:size(4)>>;
+  echo <<"hi":utf8>>;
+  echo <<-1:size(8)-signed>>;
+  Nil;
+}

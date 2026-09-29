@@ -1,0 +1,32 @@
+import lush/io;
+import lush/int;
+
+pub fn pick(bits) {
+  case bits {
+    <<1, 2, x>> -> x;
+    <<_, rest:bytes>> -> 0;
+    _ -> -1;
+  };
+}
+
+pub fn signed_byte(bits) {
+  case bits {
+    <<n:size(8)-signed>> -> n;
+    _ -> 0;
+  };
+}
+
+pub fn short(bits) {
+  case bits {
+    <<a, b, c>> -> a + b + c;
+    _ -> 0;
+  };
+}
+
+pub fn main() {
+  io.println(int.to_string(pick(<<1, 2, 9>>)));
+  io.println(int.to_string(signed_byte(<<255>>)));
+  io.println(int.to_string(short(<<1>>)));
+  io.println(int.to_string(pick(<<9, 1, 2>>)));
+  Nil;
+}

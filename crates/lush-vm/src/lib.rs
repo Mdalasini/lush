@@ -1,5 +1,6 @@
 //! Single-process bytecode interpreter for Lush (build step 3).
 
+pub mod bitarray;
 pub mod builtin;
 pub mod heap;
 pub mod inspect;

@@ -22,6 +22,25 @@ pub enum Builtin {
     IntToString,
 }
 
+/// How to encode one segment when building a bit array (`MakeBitArray`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BitSegEnc {
+    Int {
+        size: u8,
+        signed: bool,
+        little: bool,
+    },
+    Utf8,
+    /// Append a `BitArray`; `size_bits = None` means the whole value.
+    Bits {
+        size_bits: Option<u32>,
+    },
+    /// Append a byte-aligned `BitArray`; `size_bytes = None` means the whole value.
+    Bytes {
+        size_bytes: Option<u32>,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     Move {
@@ -189,6 +208,42 @@ pub enum Op {
     },
     /// Write location + inspect(src) to stderr; result is src.
     Echo {
+        dst: Reg,
+        src: Reg,
+    },
+    /// Build a bit array: `values[i]` encoded per `specs[i]`. Panics on range/size errors.
+    MakeBitArray {
+        dst: Reg,
+        values: Vec<Reg>,
+        specs: Vec<BitSegEnc>,
+    },
+    /// Read an integer segment; on success write `value` and `rest`, set `ok` true.
+    /// Insufficient input or an out-of-range unsigned-64 decode sets `ok` false (no panic).
+    BitArrayTakeInt {
+        ok: Reg,
+        value: Reg,
+        rest: Reg,
+        src: Reg,
+        size: u8,
+        signed: bool,
+        little: bool,
+    },
+    /// Match a literal UTF-8 prefix (compare against `expected` String); write `rest`.
+    BitArrayTakeUtf8 {
+        ok: Reg,
+        rest: Reg,
+        src: Reg,
+        expected: Reg,
+    },
+    /// Bind the remainder as a bit array. When `require_byte_aligned`, fail if not aligned.
+    BitArrayTakeRest {
+        ok: Reg,
+        value: Reg,
+        src: Reg,
+        require_byte_aligned: bool,
+    },
+    /// `dst = true` when `src` has zero remaining bits.
+    BitArrayIsEmpty {
         dst: Reg,
         src: Reg,
     },
@@ -409,6 +464,49 @@ fn verify_op(prog: &Program, f: &Function, fi: usize, pi: usize, op: &Op) -> Res
             for (_, t) in arms {
                 jump_ok(*t)?;
             }
+        }
+        Op::MakeBitArray { dst, values, specs } => {
+            reg_ok(f, *dst)?;
+            if values.len() != specs.len() {
+                return Err(format!(
+                    "MakeBitArray value/spec length mismatch in {fi}:{pi}"
+                ));
+            }
+            for a in values {
+                reg_ok(f, *a)?;
+            }
+        }
+        Op::BitArrayTakeInt {
+            ok,
+            value,
+            rest,
+            src,
+            ..
+        } => {
+            reg_ok(f, *ok)?;
+            reg_ok(f, *value)?;
+            reg_ok(f, *rest)?;
+            reg_ok(f, *src)?;
+        }
+        Op::BitArrayTakeUtf8 {
+            ok,
+            rest,
+            src,
+            expected,
+        } => {
+            reg_ok(f, *ok)?;
+            reg_ok(f, *rest)?;
+            reg_ok(f, *src)?;
+            reg_ok(f, *expected)?;
+        }
+        Op::BitArrayTakeRest { ok, value, src, .. } => {
+            reg_ok(f, *ok)?;
+            reg_ok(f, *value)?;
+            reg_ok(f, *src)?;
+        }
+        Op::BitArrayIsEmpty { dst, src } => {
+            reg_ok(f, *dst)?;
+            reg_ok(f, *src)?;
         }
     }
     Ok(())

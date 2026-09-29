@@ -1,0 +1,4 @@
+src/main.lush:4:3 <<1, 2, 3>>
+src/main.lush:5:3 <<7:size(4)>>
+src/main.lush:6:3 <<104, 105>>
+src/main.lush:7:3 <<255>>

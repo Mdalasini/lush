@@ -3,6 +3,7 @@
 use lush_ir::bytecode::{Constant, Op, Program};
 use lush_types::numeric;
 
+use crate::bitarray::{self, BitBuf};
 use crate::builtin;
 use crate::heap::{Heap, ObjectKind};
 use crate::inspect;
@@ -392,6 +393,96 @@ impl Vm {
                 }
                 self.frames[fi].pc = target as usize;
             }
+            Op::MakeBitArray { dst, values, specs } => {
+                let mut buf = BitBuf::new();
+                for (reg, spec) in values.iter().zip(specs.iter()) {
+                    let v = self.reg(fi, *reg);
+                    bitarray::append_segment(&mut buf, &self.heap, v, spec)?;
+                }
+                charge += buf.bytes.len() as u64 / 8 + 1;
+                let p = self.heap.alloc_bit_array(buf.bytes, buf.bit_len);
+                self.set_reg(fi, dst, Value::from_ptr(p));
+            }
+            Op::BitArrayTakeInt {
+                ok,
+                value,
+                rest,
+                src,
+                size,
+                signed,
+                little,
+            } => {
+                let taken = bitarray::cursor_from_value(&self.heap, self.reg(fi, src)).and_then(
+                    |mut cur| {
+                        let n = cur.take_int(size, signed, little)?;
+                        let rest_buf = cur.take_rest(false)?;
+                        Some((n, rest_buf))
+                    },
+                );
+                if let Some((n, rest_buf)) = taken {
+                    charge += (size as u64).div_ceil(8);
+                    let iv = Value::int(&mut self.heap, n);
+                    let p = self.heap.alloc_bit_array(rest_buf.bytes, rest_buf.bit_len);
+                    self.set_reg(fi, value, iv);
+                    self.set_reg(fi, rest, Value::from_ptr(p));
+                    self.set_reg(fi, ok, Value::from_bool(true));
+                } else {
+                    self.set_reg(fi, ok, Value::from_bool(false));
+                }
+            }
+            Op::BitArrayTakeUtf8 {
+                ok,
+                rest,
+                src,
+                expected,
+            } => {
+                let want = match self.reg(fi, expected).as_ptr() {
+                    Some(p) if self.heap.kind(p) == ObjectKind::String => {
+                        Some(self.heap.string_bytes(p).to_vec())
+                    }
+                    _ => None,
+                };
+                let taken = want.and_then(|want| {
+                    let mut cur = bitarray::cursor_from_value(&self.heap, self.reg(fi, src))?;
+                    if !cur.take_bytes_prefix(&want) {
+                        return None;
+                    }
+                    let rest_buf = cur.take_rest(false)?;
+                    Some((want.len(), rest_buf))
+                });
+                if let Some((n_bytes, rest_buf)) = taken {
+                    charge += (n_bytes as u64).div_ceil(8);
+                    let p = self.heap.alloc_bit_array(rest_buf.bytes, rest_buf.bit_len);
+                    self.set_reg(fi, rest, Value::from_ptr(p));
+                    self.set_reg(fi, ok, Value::from_bool(true));
+                } else {
+                    self.set_reg(fi, ok, Value::from_bool(false));
+                }
+            }
+            Op::BitArrayTakeRest {
+                ok,
+                value,
+                src,
+                require_byte_aligned,
+            } => {
+                let taken = bitarray::cursor_from_value(&self.heap, self.reg(fi, src))
+                    .and_then(|cur| cur.take_rest(require_byte_aligned));
+                if let Some(buf) = taken {
+                    charge += buf.bytes.len() as u64 / 8 + 1;
+                    let p = self.heap.alloc_bit_array(buf.bytes, buf.bit_len);
+                    self.set_reg(fi, value, Value::from_ptr(p));
+                    self.set_reg(fi, ok, Value::from_bool(true));
+                } else {
+                    self.set_reg(fi, ok, Value::from_bool(false));
+                }
+            }
+            Op::BitArrayIsEmpty { dst, src } => {
+                let empty = match bitarray::cursor_from_value(&self.heap, self.reg(fi, src)) {
+                    Some(c) => c.is_empty(),
+                    None => false,
+                };
+                self.set_reg(fi, dst, Value::from_bool(empty));
+            }
         }
 
         self.reductions += charge;
@@ -638,6 +729,9 @@ impl Vm {
                         return Ok(false);
                     }
                     return Ok(true);
+                }
+                ObjectKind::BitArray => {
+                    return Ok(bitarray::eq_bit_arrays(&self.heap, a, b, charge));
                 }
                 _ => {}
             }

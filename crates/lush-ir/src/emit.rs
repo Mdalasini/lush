@@ -7,9 +7,9 @@ use lush_syntax::diagnostic::{Diagnostic, DiagnosticKind};
 use lush_syntax::span::Span;
 use lush_syntax::token::IntBase;
 use lush_types::numeric;
-use lush_types::typed::TypedModule;
+use lush_types::typed::{BitSegmentKind, TypedModule};
 
-use crate::bytecode::{Builtin, ConstId, Constant, FuncId, Function, Op, Program, Reg};
+use crate::bytecode::{BitSegEnc, Builtin, ConstId, Constant, FuncId, Function, Op, Program, Reg};
 use crate::codes;
 use crate::limits::{MAX_INSTRUCTIONS_PER_FUNCTION, MAX_REGISTERS};
 
@@ -763,11 +763,11 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 Some(dst)
             }
             ExprKind::Fn { params, body, .. } => self.emit_anon_fn(params, body, expr.span),
+            ExprKind::BitArray(segs) => self.emit_bit_array_expr(expr, segs),
             other => {
                 let msg = match other {
                     ExprKind::Pipe { .. } => "pipe expressions should have been desugared",
                     ExprKind::RecordUpdate { .. } => "record updates are not yet lowered",
-                    ExprKind::BitArray(_) => "bit arrays are not yet lowered",
                     ExprKind::Float(_) => "Float values are not yet fully lowered",
                     _ => "this expression form is not yet lowered",
                 };
@@ -775,6 +775,54 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 None
             }
         }
+    }
+
+    fn emit_bit_array_expr(&mut self, expr: &Expr, segs: &[BitSegment]) -> Option<Reg> {
+        let kinds = self
+            .m
+            .typed
+            .expr(expr.id)
+            .and_then(|i| i.bit_segments.clone())
+            .unwrap_or_else(|| segs.iter().map(|s| fallback_bit_kind(&s.options)).collect());
+        if kinds.len() != segs.len() {
+            self.error(
+                codes::E2011_LOWER,
+                "bit-array segment kind count mismatch",
+                expr.span,
+            );
+            return None;
+        }
+        let mut values = Vec::new();
+        let mut specs = Vec::new();
+        for (seg, kind) in segs.iter().zip(kinds.iter()) {
+            // Reject dynamic sizes in construction (typed already requires literals).
+            for opt in &seg.options {
+                if let BitOption::Size(e) = opt {
+                    if !matches!(e.kind, ExprKind::Int(_)) {
+                        self.error(
+                            codes::E2011_LOWER,
+                            "bit-array construction size must be a literal",
+                            e.span,
+                        );
+                        return None;
+                    }
+                }
+            }
+            let v = self.emit_expr(&seg.value, false)?;
+            values.push(v);
+            specs.push(bit_kind_to_enc(kind));
+        }
+        let dst = self.fresh()?;
+        self.emit(
+            Op::MakeBitArray {
+                dst,
+                values: values.clone(),
+                specs,
+            },
+            expr.span,
+        );
+        self.recycle_regs(&values);
+        Some(dst)
     }
 
     fn emit_binary_op(&mut self, op: BinOp, left: &Expr, right: &Expr, span: Span) -> Option<Reg> {
@@ -1688,6 +1736,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                             }
                         }
                     }
+                    PatternKind::BitArray(segs) => {
+                        self.emit_bit_array_pattern(pat, segs, *scrut, &mut fail_jumps)?;
+                    }
                     _ => {}
                 }
             }
@@ -1739,6 +1790,261 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         }
         Some(dst)
     }
+
+    /// Lower a bit-array pattern: walk segments with Take* ops, then require empty
+    /// unless the final segment was an unsized `:bytes` / `:bits` remainder.
+    fn emit_bit_array_pattern(
+        &mut self,
+        pat: &Pattern,
+        segs: &[BitSegmentPat],
+        scrut: Reg,
+        fail_jumps: &mut Vec<usize>,
+    ) -> Option<()> {
+        let kinds = self
+            .m
+            .typed
+            .pattern(pat.id)
+            .and_then(|i| i.bit_segments.clone())
+            .unwrap_or_else(|| segs.iter().map(|s| fallback_bit_kind(&s.options)).collect());
+        if kinds.len() != segs.len() {
+            self.error(
+                codes::E2011_LOWER,
+                "bit-array pattern kind count mismatch",
+                pat.span,
+            );
+            return None;
+        }
+        // Reject dynamic sizes for this slice.
+        for seg in segs {
+            for opt in &seg.options {
+                if let BitOption::Size(e) = opt {
+                    if !matches!(e.kind, ExprKind::Int(_)) {
+                        self.error(
+                            codes::E2011_LOWER,
+                            "dynamic bit-array pattern sizes are not yet lowered",
+                            e.span,
+                        );
+                        return None;
+                    }
+                }
+            }
+        }
+
+        let mut cur = scrut;
+        let mut consumed_all = false;
+        for (i, (seg, kind)) in segs.iter().zip(kinds.iter()).enumerate() {
+            let is_last = i + 1 == segs.len();
+            match kind {
+                BitSegmentKind::Int {
+                    size,
+                    signed,
+                    little,
+                } => {
+                    let ok = self.fresh()?;
+                    let value = self.fresh()?;
+                    let rest = self.fresh()?;
+                    self.emit(
+                        Op::BitArrayTakeInt {
+                            ok,
+                            value,
+                            rest,
+                            src: cur,
+                            size: *size,
+                            signed: *signed,
+                            little: *little,
+                        },
+                        seg.span,
+                    );
+                    let jmp = self.code.len();
+                    self.emit(
+                        Op::JumpIfFalse {
+                            cond: ok,
+                            target: 0,
+                        },
+                        seg.span,
+                    );
+                    fail_jumps.push(jmp);
+                    self.bind_bit_int_pattern(&seg.pattern, value, fail_jumps)?;
+                    if cur != scrut {
+                        self.recycle(cur);
+                    }
+                    cur = rest;
+                }
+                BitSegmentKind::Utf8 => {
+                    let PatternKind::String(lit) = &seg.pattern.kind else {
+                        self.error(
+                            codes::E2011_LOWER,
+                            "utf8 bit-array pattern requires a string literal",
+                            seg.span,
+                        );
+                        return None;
+                    };
+                    let idx = self.intern_string(lit.value.clone());
+                    let expected = self.fresh()?;
+                    self.emit(Op::LoadConst { dst: expected, idx }, seg.span);
+                    let ok = self.fresh()?;
+                    let rest = self.fresh()?;
+                    self.emit(
+                        Op::BitArrayTakeUtf8 {
+                            ok,
+                            rest,
+                            src: cur,
+                            expected,
+                        },
+                        seg.span,
+                    );
+                    let jmp = self.code.len();
+                    self.emit(
+                        Op::JumpIfFalse {
+                            cond: ok,
+                            target: 0,
+                        },
+                        seg.span,
+                    );
+                    fail_jumps.push(jmp);
+                    self.recycle(expected);
+                    if cur != scrut {
+                        self.recycle(cur);
+                    }
+                    cur = rest;
+                }
+                BitSegmentKind::Bytes { size } | BitSegmentKind::Bits { size } => {
+                    let require_aligned = matches!(kind, BitSegmentKind::Bytes { .. });
+                    if size.is_some() {
+                        self.error(
+                            codes::E2011_LOWER,
+                            "sized bytes/bits bit-array patterns are not yet lowered",
+                            seg.span,
+                        );
+                        return None;
+                    }
+                    if !is_last {
+                        self.error(
+                            codes::E2011_LOWER,
+                            "unsized bytes/bits must be the final bit-array pattern segment",
+                            seg.span,
+                        );
+                        return None;
+                    }
+                    let ok = self.fresh()?;
+                    let value = self.fresh()?;
+                    self.emit(
+                        Op::BitArrayTakeRest {
+                            ok,
+                            value,
+                            src: cur,
+                            require_byte_aligned: require_aligned,
+                        },
+                        seg.span,
+                    );
+                    let jmp = self.code.len();
+                    self.emit(
+                        Op::JumpIfFalse {
+                            cond: ok,
+                            target: 0,
+                        },
+                        seg.span,
+                    );
+                    fail_jumps.push(jmp);
+                    match &seg.pattern.kind {
+                        PatternKind::Var(n) => self.define(n.text.clone(), value),
+                        PatternKind::Discard | PatternKind::UnderscoreName(_) => {
+                            self.recycle(value);
+                        }
+                        _ => {
+                            self.error(
+                                codes::E2011_LOWER,
+                                "bytes/bits remainder must bind a variable or `_`",
+                                seg.pattern.span,
+                            );
+                            return None;
+                        }
+                    }
+                    if cur != scrut {
+                        self.recycle(cur);
+                    }
+                    consumed_all = true;
+                }
+            }
+        }
+        if !consumed_all {
+            let empty = self.fresh()?;
+            self.emit(
+                Op::BitArrayIsEmpty {
+                    dst: empty,
+                    src: cur,
+                },
+                pat.span,
+            );
+            let jmp = self.code.len();
+            self.emit(
+                Op::JumpIfFalse {
+                    cond: empty,
+                    target: 0,
+                },
+                pat.span,
+            );
+            fail_jumps.push(jmp);
+            if cur != scrut {
+                self.recycle(cur);
+            }
+        }
+        Some(())
+    }
+
+    fn bind_bit_int_pattern(
+        &mut self,
+        pattern: &Pattern,
+        value: Reg,
+        fail_jumps: &mut Vec<usize>,
+    ) -> Option<()> {
+        match &pattern.kind {
+            PatternKind::Var(n) => {
+                self.define(n.text.clone(), value);
+            }
+            PatternKind::Discard | PatternKind::UnderscoreName(_) => {
+                self.recycle(value);
+            }
+            PatternKind::Int(lit) => {
+                let base = match lit.base {
+                    IntBase::Decimal => 10,
+                    IntBase::Hex => 16,
+                    IntBase::Octal => 8,
+                    IntBase::Binary => 2,
+                };
+                let v = numeric::int_literal_value(&lit.digits, base).ok()?;
+                let ok = self.fresh()?;
+                self.emit(
+                    Op::IsInt {
+                        dst: ok,
+                        src: value,
+                        value: v,
+                    },
+                    pattern.span,
+                );
+                let jmp = self.code.len();
+                self.emit(
+                    Op::JumpIfFalse {
+                        cond: ok,
+                        target: 0,
+                    },
+                    pattern.span,
+                );
+                fail_jumps.push(jmp);
+                self.recycle(value);
+            }
+            _ => {
+                self.error(
+                    codes::E2011_LOWER,
+                    "unsupported bit-array integer segment pattern",
+                    pattern.span,
+                );
+                return None;
+            }
+        }
+        Some(())
+    }
+
     fn field_index(&self, _base: &Expr, name: &str) -> Option<u16> {
         for info in self.m.typed.exprs.values() {
             if let Some(site) = &info.field {
@@ -1762,6 +2068,67 @@ fn field_name(f: &FieldName) -> String {
     match f {
         FieldName::Name(n) => n.text.clone(),
         FieldName::UName(n) => n.text.clone(),
+    }
+}
+
+fn bit_kind_to_enc(kind: &BitSegmentKind) -> BitSegEnc {
+    match kind {
+        BitSegmentKind::Int {
+            size,
+            signed,
+            little,
+        } => BitSegEnc::Int {
+            size: *size,
+            signed: *signed,
+            little: *little,
+        },
+        BitSegmentKind::Utf8 => BitSegEnc::Utf8,
+        BitSegmentKind::Bytes { size } => BitSegEnc::Bytes { size_bytes: *size },
+        BitSegmentKind::Bits { size } => BitSegEnc::Bits { size_bits: *size },
+    }
+}
+
+/// Best-effort kind recovery when typed tables lack `bit_segments`.
+fn fallback_bit_kind(options: &[BitOption]) -> BitSegmentKind {
+    let mut is_utf8 = false;
+    let mut is_bytes = false;
+    let mut is_bits = false;
+    let mut signed = false;
+    let mut little = false;
+    let mut width: Option<u32> = None;
+    for opt in options {
+        match opt {
+            BitOption::Named(n) => match n.as_str() {
+                "utf8" => is_utf8 = true,
+                "bytes" => is_bytes = true,
+                "bits" => is_bits = true,
+                "signed" => signed = true,
+                "unsigned" => signed = false,
+                "little" => little = true,
+                "big" => little = false,
+                _ => {}
+            },
+            BitOption::Size(e) => {
+                if let ExprKind::Int(lit) = &e.kind {
+                    if let Ok(v) = numeric::int_literal_value(&lit.digits, 10) {
+                        width = Some(v as u32);
+                    }
+                }
+            }
+        }
+    }
+    if is_utf8 {
+        BitSegmentKind::Utf8
+    } else if is_bytes {
+        BitSegmentKind::Bytes { size: width }
+    } else if is_bits {
+        BitSegmentKind::Bits { size: width }
+    } else {
+        BitSegmentKind::Int {
+            size: width.unwrap_or(8).clamp(1, 64) as u8,
+            signed,
+            little,
+        }
     }
 }
 
