@@ -173,3 +173,8 @@ fn echo_e2e() {
     );
     assert!(err.contains("src/main.lush:"), "{err}");
 }
+
+#[test]
+fn user_adt_e2e() {
+    common::assert_case("user_adt");
+}

@@ -1,0 +1,12 @@
+import lush/io;
+import lush/int;
+
+type Point {
+  Point(x: Int, y: Int)
+}
+
+pub fn main() {
+  let p = Point(x: 3, y: 4);
+  io.println(int.to_string(p.x));
+  io.println(int.to_string(p.y));
+}

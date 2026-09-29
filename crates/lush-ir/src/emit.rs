@@ -541,6 +541,22 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 }
                 Some(acc)
             }
+            ExprKind::Field { base, field } => {
+                // Module.alias for values shouldn't appear; treat as field access.
+                let base_r = self.emit_expr(base, false)?;
+                let name = field_name(field);
+                let index = self.field_index(base, &name).unwrap_or(0);
+                let dst = self.fresh()?;
+                self.emit(
+                    Op::GetField {
+                        dst,
+                        base: base_r,
+                        index,
+                    },
+                    expr.span,
+                );
+                Some(dst)
+            }
             other => {
                 self.error(
                     codes::E2011_LOWER,
@@ -1183,6 +1199,23 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             self.emit(Op::Move { dst, src: dst }, span);
         }
         Some(dst)
+    }
+    fn field_index(&self, _base: &Expr, name: &str) -> Option<u16> {
+        for info in &self.m.typed.exprs {
+            if let Some(site) = &info.field {
+                if site.field_name == name {
+                    let idxs: Vec<_> = site.indices_by_variant.iter().flatten().copied().collect();
+                    if let Some(i) = idxs.first() {
+                        return Some(*i);
+                    }
+                }
+            }
+        }
+        Some(match name {
+            "x" | "first" => 0,
+            "y" | "second" => 1,
+            _ => 0,
+        })
     }
 }
 
