@@ -6,4 +6,4 @@ license.workspace = true
 description = "Integer and control-flow bytecode interpreter foundation for Lush"
 
 [dependencies]
-lush-ir = { path = "../lush-ir" }
+lush-ir = { workspace = true }

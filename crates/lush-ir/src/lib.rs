@@ -305,22 +305,184 @@ mod tests {
             .any(|e| matches!(e.kind, VerifyErrorKind::RegisterOutOfRange { .. })));
     }
 
-    #[test]
-    fn verifier_caps_errors_with_marker() {
-        let code = (0..MAX_ERRORS + 100)
-            .map(|_| Instruction::Move {
+    fn invalid_loads(count: usize) -> Program {
+        let code = (0..count)
+            .map(|_| Instruction::LoadInt {
                 dst: u8::MAX,
-                src: u8::MAX,
+                value: 0,
             })
-            .chain([Instruction::Return { src: u8::MAX }])
+            .chain([Instruction::Return { src: 0 }])
             .collect();
-        let p = Program {
+        Program {
             functions: vec![func(code, 2)],
             entry: 0,
+        }
+    }
+
+    #[test]
+    fn verifier_error_limit_boundary_is_exact() {
+        let at_limit = verify(&invalid_loads(MAX_ERRORS)).unwrap_err();
+        assert_eq!(at_limit.len(), MAX_ERRORS);
+        assert!(at_limit
+            .iter()
+            .all(|error| error.kind != VerifyErrorKind::TooManyErrors));
+
+        let over_limit = verify(&invalid_loads(MAX_ERRORS + 1)).unwrap_err();
+        assert_eq!(over_limit.len(), MAX_ERRORS + 1);
+        assert_eq!(
+            over_limit.last().unwrap().kind,
+            VerifyErrorKind::TooManyErrors
+        );
+    }
+
+    #[test]
+    fn verifier_rejection_paths_report_exact_error_locations_and_roles() {
+        let mut over_limit = func(vec![Instruction::Return { src: 0 }], MAX_REGISTERS + 1);
+        let register_limit = Program {
+            functions: vec![over_limit.clone()],
+            entry: 0,
         };
-        let errors = verify(&p).unwrap_err();
-        assert_eq!(errors.len(), MAX_ERRORS + 1);
-        assert_eq!(errors.last().unwrap().kind, VerifyErrorKind::TooManyErrors);
+        let mut expected_register_limit = VerifyError {
+            function: Some(0),
+            instruction: None,
+            kind: VerifyErrorKind::RegisterLimit,
+        };
+        assert_eq!(
+            verify(&register_limit).unwrap_err(),
+            vec![expected_register_limit]
+        );
+
+        over_limit.register_count = 1;
+        over_limit.arity = 2;
+        let arity = Program {
+            functions: vec![over_limit],
+            entry: 0,
+        };
+        expected_register_limit.kind = VerifyErrorKind::ArityExceedsRegisters;
+        assert_eq!(verify(&arity).unwrap_err(), vec![expected_register_limit]);
+
+        let empty = Program {
+            functions: vec![func(vec![], 2)],
+            entry: 0,
+        };
+        assert_eq!(
+            verify(&empty).unwrap_err(),
+            vec![VerifyError {
+                function: Some(0),
+                instruction: None,
+                kind: VerifyErrorKind::EmptyFunction,
+            }]
+        );
+
+        let mut no_debug = func(vec![Instruction::Return { src: 0 }], 2);
+        no_debug.locations.clear();
+        let mismatch = Program {
+            functions: vec![no_debug],
+            entry: 0,
+        };
+        assert_eq!(
+            verify(&mismatch).unwrap_err(),
+            vec![VerifyError {
+                function: Some(0),
+                instruction: None,
+                kind: VerifyErrorKind::DebugInfoMismatch,
+            }]
+        );
+
+        let unterminated = Program {
+            functions: vec![func(
+                vec![Instruction::LoadBool {
+                    dst: 0,
+                    value: true,
+                }],
+                2,
+            )],
+            entry: 0,
+        };
+        assert_eq!(
+            verify(&unterminated).unwrap_err(),
+            vec![VerifyError {
+                function: Some(0),
+                instruction: Some(0),
+                kind: VerifyErrorKind::MissingTerminator,
+            }]
+        );
+
+        let bad_if = Program {
+            functions: vec![func(
+                vec![
+                    Instruction::JumpIfFalse {
+                        condition: 9,
+                        target: 99,
+                    },
+                    Instruction::Return { src: 0 },
+                ],
+                2,
+            )],
+            entry: 0,
+        };
+        assert_eq!(
+            verify(&bad_if).unwrap_err(),
+            vec![
+                VerifyError {
+                    function: Some(0),
+                    instruction: Some(0),
+                    kind: VerifyErrorKind::JumpTargetOutOfRange
+                },
+                VerifyError {
+                    function: Some(0),
+                    instruction: Some(0),
+                    kind: VerifyErrorKind::RegisterOutOfRange {
+                        role: RegisterRole::Condition,
+                        register: 9
+                    }
+                },
+            ]
+        );
+
+        let bad_operands = Program {
+            functions: vec![func(
+                vec![
+                    Instruction::AddInt {
+                        dst: 9,
+                        lhs: 8,
+                        rhs: 7,
+                    },
+                    Instruction::Return { src: 0 },
+                ],
+                2,
+            )],
+            entry: 0,
+        };
+        assert_eq!(
+            verify(&bad_operands).unwrap_err(),
+            vec![
+                VerifyError {
+                    function: Some(0),
+                    instruction: Some(0),
+                    kind: VerifyErrorKind::RegisterOutOfRange {
+                        role: RegisterRole::Destination,
+                        register: 9
+                    }
+                },
+                VerifyError {
+                    function: Some(0),
+                    instruction: Some(0),
+                    kind: VerifyErrorKind::RegisterOutOfRange {
+                        role: RegisterRole::LeftOperand,
+                        register: 8
+                    }
+                },
+                VerifyError {
+                    function: Some(0),
+                    instruction: Some(0),
+                    kind: VerifyErrorKind::RegisterOutOfRange {
+                        role: RegisterRole::RightOperand,
+                        register: 7
+                    }
+                },
+            ]
+        );
     }
 
     #[test]

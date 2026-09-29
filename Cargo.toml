@@ -18,4 +18,5 @@ repository = "https://github.com/Mdalasini/lush"
 ariadne = "0.5"
 insta = "1.42"
 lush-syntax = { path = "crates/lush-syntax" }
+lush-ir = { path = "crates/lush-ir" }
 lush-test-support = { path = "crates/lush-test-support" }

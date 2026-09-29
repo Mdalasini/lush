@@ -1,5 +1,7 @@
 //! Resumable single-process interpreter for verified Lush bytecode.
 
+use std::fmt;
+
 use lush_ir::{verify, Instruction, Program, SourceLoc, VerifyError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,10 +30,15 @@ impl PanicKind {
     }
 }
 
+impl fmt::Display for PanicKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Panic {
     pub kind: PanicKind,
-    pub message: String,
     pub location: SourceLoc,
     pub function: String,
 }
@@ -126,31 +133,39 @@ impl Vm {
                 Instruction::LoadBool { dst, value } => {
                     self.registers[dst as usize] = Value::Bool(value);
                 }
-                Instruction::AddInt { dst, lhs, rhs }
-                | Instruction::SubInt { dst, lhs, rhs }
-                | Instruction::MulInt { dst, lhs, rhs }
-                | Instruction::DivInt { dst, lhs, rhs }
-                | Instruction::RemInt { dst, lhs, rhs } => {
-                    let result = self.read_int(lhs).and_then(|a| {
-                        self.read_int(rhs)
-                            .and_then(|b| checked_binary(instruction, a, b))
-                    });
-                    match result {
-                        Ok(value) => self.registers[dst as usize] = Value::Int(value),
-                        Err(message) => return self.fail(pc, message),
+                Instruction::AddInt { dst, lhs, rhs } => {
+                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Add) {
+                        return self.fail(pc, kind);
                     }
                 }
-                Instruction::EqInt { dst, lhs, rhs } | Instruction::LtInt { dst, lhs, rhs } => {
-                    let result = self.read_int(lhs).and_then(|a| {
-                        self.read_int(rhs).map(|b| match instruction {
-                            Instruction::EqInt { .. } => a == b,
-                            Instruction::LtInt { .. } => a < b,
-                            _ => unreachable!(),
-                        })
-                    });
-                    match result {
-                        Ok(value) => self.registers[dst as usize] = Value::Bool(value),
-                        Err(message) => return self.fail(pc, message),
+                Instruction::SubInt { dst, lhs, rhs } => {
+                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Sub) {
+                        return self.fail(pc, kind);
+                    }
+                }
+                Instruction::MulInt { dst, lhs, rhs } => {
+                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Mul) {
+                        return self.fail(pc, kind);
+                    }
+                }
+                Instruction::DivInt { dst, lhs, rhs } => {
+                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Div) {
+                        return self.fail(pc, kind);
+                    }
+                }
+                Instruction::RemInt { dst, lhs, rhs } => {
+                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Rem) {
+                        return self.fail(pc, kind);
+                    }
+                }
+                Instruction::EqInt { dst, lhs, rhs } => {
+                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Eq) {
+                        return self.fail(pc, kind);
+                    }
+                }
+                Instruction::LtInt { dst, lhs, rhs } => {
+                    if let Err(kind) = self.apply_int_op(dst, lhs, rhs, IntOp::Lt) {
+                        return self.fail(pc, kind);
                     }
                 }
                 Instruction::Jump { target } => self.pc = target as usize,
@@ -177,6 +192,13 @@ impl Vm {
         }
     }
 
+    fn apply_int_op(&mut self, dst: u8, lhs: u8, rhs: u8, op: IntOp) -> Result<(), PanicKind> {
+        let left = self.read_int(lhs)?;
+        let right = self.read_int(rhs)?;
+        self.registers[dst as usize] = apply_int_op(op, left, right)?;
+        Ok(())
+    }
+
     fn read_int(&self, register: u8) -> Result<i64, PanicKind> {
         match &self.registers[register as usize] {
             Value::Int(n) => Ok(*n),
@@ -188,7 +210,6 @@ impl Vm {
         let function = &self.program.functions[self.function];
         let panic = Panic {
             kind,
-            message: kind.message().into(),
             location: function.locations[pc],
             function: function.name.clone(),
         };
@@ -201,24 +222,39 @@ impl Vm {
     }
 }
 
-fn checked_binary(instruction: Instruction, lhs: i64, rhs: i64) -> Result<i64, PanicKind> {
-    match instruction {
-        Instruction::AddInt { .. } => lhs.checked_add(rhs).ok_or(PanicKind::IntegerOverflow),
-        Instruction::SubInt { .. } => lhs.checked_sub(rhs).ok_or(PanicKind::IntegerOverflow),
-        Instruction::MulInt { .. } => lhs.checked_mul(rhs).ok_or(PanicKind::IntegerOverflow),
-        Instruction::DivInt { .. } | Instruction::RemInt { .. } => {
+#[derive(Clone, Copy)]
+enum IntOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Lt,
+}
+
+fn apply_int_op(op: IntOp, lhs: i64, rhs: i64) -> Result<Value, PanicKind> {
+    let value = match op {
+        IntOp::Add => Value::Int(lhs.checked_add(rhs).ok_or(PanicKind::IntegerOverflow)?),
+        IntOp::Sub => Value::Int(lhs.checked_sub(rhs).ok_or(PanicKind::IntegerOverflow)?),
+        IntOp::Mul => Value::Int(lhs.checked_mul(rhs).ok_or(PanicKind::IntegerOverflow)?),
+        IntOp::Div | IntOp::Rem => {
             if rhs == 0 {
-                Err(PanicKind::DivisionByZero)
-            } else if lhs == i64::MIN && rhs == -1 {
-                Err(PanicKind::IntegerOverflow)
-            } else if matches!(instruction, Instruction::DivInt { .. }) {
-                Ok(lhs / rhs)
-            } else {
-                Ok(lhs % rhs)
+                return Err(PanicKind::DivisionByZero);
             }
+            if lhs == i64::MIN && rhs == -1 {
+                return Err(PanicKind::IntegerOverflow);
+            }
+            Value::Int(if matches!(op, IntOp::Div) {
+                lhs / rhs
+            } else {
+                lhs % rhs
+            })
         }
-        _ => unreachable!("checked_binary is only called for integer arithmetic"),
-    }
+        IntOp::Eq => Value::Bool(lhs == rhs),
+        IntOp::Lt => Value::Bool(lhs < rhs),
+    };
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -362,7 +398,7 @@ mod tests {
                 },
                 i64::MIN,
                 1,
-                Exit::Panicked(panic_value("integer overflow")),
+                Exit::Panicked(panic_value(PanicKind::IntegerOverflow)),
             ),
             (
                 Instruction::MulInt {
@@ -372,7 +408,7 @@ mod tests {
                 },
                 i64::MIN,
                 -1,
-                Exit::Panicked(panic_value("integer overflow")),
+                Exit::Panicked(panic_value(PanicKind::IntegerOverflow)),
             ),
             (
                 Instruction::DivInt {
@@ -382,7 +418,7 @@ mod tests {
                 },
                 7,
                 0,
-                Exit::Panicked(panic_value("division by zero")),
+                Exit::Panicked(panic_value(PanicKind::DivisionByZero)),
             ),
             (
                 Instruction::DivInt {
@@ -392,7 +428,7 @@ mod tests {
                 },
                 i64::MIN,
                 -1,
-                Exit::Panicked(panic_value("integer overflow")),
+                Exit::Panicked(panic_value(PanicKind::IntegerOverflow)),
             ),
             (
                 Instruction::RemInt {
@@ -402,28 +438,17 @@ mod tests {
                 },
                 i64::MIN,
                 -1,
-                Exit::Panicked(panic_value("integer overflow")),
+                Exit::Panicked(panic_value(PanicKind::IntegerOverflow)),
             ),
         ];
         for (instruction, lhs, rhs, expected) in cases {
-            let actual = run_binary(instruction, lhs, rhs);
-            match (actual, expected) {
-                (Exit::Panicked(actual), Exit::Panicked(expected)) => {
-                    assert_eq!(actual.message, expected.message)
-                }
-                (actual, expected) => assert_eq!(actual, expected),
-            }
+            assert_eq!(run_binary(instruction, lhs, rhs), expected);
         }
     }
 
-    fn panic_value(message: &str) -> Panic {
-        let kind = match message {
-            "division by zero" => PanicKind::DivisionByZero,
-            _ => PanicKind::IntegerOverflow,
-        };
+    fn panic_value(kind: PanicKind) -> Panic {
         Panic {
             kind,
-            message: message.into(),
             location: SourceLoc { line: 1, column: 3 },
             function: "main".into(),
         }
@@ -474,6 +499,23 @@ mod tests {
             Vm::new(compare, &[]).unwrap().run_to_completion(),
             Exit::Returned(Value::Bool(true))
         );
+        let compare_false = program(
+            vec![
+                Instruction::LoadInt { dst: 0, value: 3 },
+                Instruction::LoadInt { dst: 1, value: 2 },
+                Instruction::LtInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Instruction::Return { src: 2 },
+            ],
+            0,
+        );
+        assert_eq!(
+            Vm::new(compare_false, &[]).unwrap().run_to_completion(),
+            Exit::Returned(Value::Bool(false))
+        );
         let equal = program(
             vec![
                 Instruction::LoadInt { dst: 0, value: 3 },
@@ -490,6 +532,23 @@ mod tests {
         assert_eq!(
             Vm::new(equal, &[]).unwrap().run_to_completion(),
             Exit::Returned(Value::Bool(true))
+        );
+        let not_equal = program(
+            vec![
+                Instruction::LoadInt { dst: 0, value: 3 },
+                Instruction::LoadInt { dst: 1, value: 2 },
+                Instruction::EqInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Instruction::Return { src: 2 },
+            ],
+            0,
+        );
+        assert_eq!(
+            Vm::new(not_equal, &[]).unwrap().run_to_completion(),
+            Exit::Returned(Value::Bool(false))
         );
     }
 
@@ -561,8 +620,107 @@ mod tests {
         let Exit::Panicked(panic) = Vm::new(p, &[]).unwrap().run_to_completion() else {
             panic!("expected panic")
         };
-        assert_eq!(panic.kind, PanicKind::IntegerOverflow);
-        assert_eq!(panic.message, "integer overflow");
-        assert_eq!(panic.location, SourceLoc { line: 1, column: 3 });
+        assert_eq!(
+            panic,
+            Panic {
+                kind: PanicKind::IntegerOverflow,
+                location: SourceLoc { line: 1, column: 3 },
+                function: "main".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_bool_condition_reports_expected_bool_at_instruction() {
+        let p = program(
+            vec![
+                Instruction::LoadInt { dst: 0, value: 1 },
+                Instruction::JumpIfFalse {
+                    condition: 0,
+                    target: 2,
+                },
+                Instruction::Return { src: 0 },
+            ],
+            0,
+        );
+        let Exit::Panicked(panic) = Vm::new(p, &[]).unwrap().run_to_completion() else {
+            panic!("expected panic")
+        };
+        assert_eq!(panic.kind, PanicKind::ExpectedBool);
+        assert_eq!(panic.location, SourceLoc { line: 1, column: 2 });
+    }
+
+    #[test]
+    fn non_integer_arithmetic_reports_expected_int() {
+        let p = program(
+            vec![
+                Instruction::AddInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Instruction::Return { src: 2 },
+            ],
+            0,
+        );
+        let Exit::Panicked(panic) = Vm::new(p, &[]).unwrap().run_to_completion() else {
+            panic!("expected panic")
+        };
+        assert_eq!(panic.kind, PanicKind::ExpectedInt);
+        assert_eq!(panic.location, SourceLoc { line: 1, column: 1 });
+
+        let comparison = program(
+            vec![
+                Instruction::LtInt {
+                    dst: 1,
+                    lhs: 0,
+                    rhs: 0,
+                },
+                Instruction::Return { src: 1 },
+            ],
+            1,
+        );
+        let Exit::Panicked(panic) = Vm::new(comparison, &[Value::Bool(true)])
+            .unwrap()
+            .run_to_completion()
+        else {
+            panic!("expected panic")
+        };
+        assert_eq!(panic.kind, PanicKind::ExpectedInt);
+    }
+
+    #[test]
+    fn vm_checks_argument_count_and_exposes_verified_program_errors() {
+        let arity_one = program(vec![Instruction::Return { src: 0 }], 1);
+        assert!(matches!(
+            Vm::new(arity_one, &[]),
+            Err(VmError::InvalidArgumentCount {
+                expected: 1,
+                actual: 0
+            })
+        ));
+
+        let invalid = program(vec![Instruction::Return { src: 9 }], 0);
+        assert!(matches!(
+            Vm::new(invalid, &[]),
+            Err(VmError::InvalidProgram(_))
+        ));
+    }
+
+    #[test]
+    fn zero_quantum_and_resume_after_done_are_stable() {
+        let p = program(
+            vec![
+                Instruction::LoadInt { dst: 0, value: 8 },
+                Instruction::Return { src: 0 },
+            ],
+            0,
+        );
+        let mut vm = Vm::new(p, &[]).unwrap();
+        assert_eq!(vm.run_slice(0), SliceResult::Yielded);
+        assert_eq!(vm.counters().reductions, 0);
+        let done = vm.run_to_completion();
+        assert_eq!(done, Exit::Returned(Value::Int(8)));
+        assert_eq!(vm.run_slice(1), SliceResult::Done(done));
     }
 }
