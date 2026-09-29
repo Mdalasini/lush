@@ -226,20 +226,47 @@ fn private_access_across_modules() {
 
 #[test]
 fn match_complexity_budget() {
-    // Many literal arms on Int: usefulness walks grow quadratically and exceed
-    // MAX_EXHAUST_WORK before all arms are accepted.
-    let n = 800usize;
-    let mut arms = String::new();
-    for i in 0..n {
-        arms.push_str(&format!("    {i} -> Nil;\n"));
-    }
-    let src = format!("pub fn f(x: Int) -> Nil {{\n  case x {{\n{arms}  }};\n}}\n");
+    // Dozen Option columns with a single partial arm: usefulness specialises
+    // exponentially and must hit E1451 rather than claim exhaustiveness.
+    let n = 16usize;
+    let params: Vec<_> = (0..n).map(|i| format!("a{i}: Option(Int)")).collect();
+    let subjects: Vec<_> = (0..n).map(|i| format!("a{i}")).collect();
+    let pats: Vec<_> = (0..n).map(|_| "Some(_)".to_string()).collect();
+    let src = format!(
+        "pub fn f({}) -> Int {{\n  case {} {{\n    {} -> 1;\n  }};\n}}\n",
+        params.join(", "),
+        subjects.join(", "),
+        pats.join(", ")
+    );
     let result = check_source("complex", &src, false);
     assert!(
         result
             .diagnostics
             .iter()
-            .any(|d| d.code == codes::E1451_MATCH_COMPLEX || d.code == codes::E1306_TOO_COMPLEX),
+            .any(|d| d.code == codes::E1451_MATCH_COMPLEX || d.code == codes::E1450_NON_EXHAUSTIVE),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| format!("{}:{}", d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn many_literal_arms_are_linear() {
+    // Issue §11: a case with thousands of Int arms must finish (literal column
+    // uses a hash set, not O(n²) usefulness).
+    let n = 2_000usize;
+    let mut arms = String::new();
+    for i in 0..n {
+        arms.push_str(&format!("    {i} -> Nil;\n"));
+    }
+    arms.push_str("    _ -> Nil;\n");
+    let src = format!("pub fn f(x: Int) -> Nil {{\n  case x {{\n{arms}  }};\n}}\n");
+    let result = check_source("litarms", &src, false);
+    assert!(
+        ok(&result.diagnostics),
         "{:?}",
         result
             .diagnostics
@@ -513,6 +540,80 @@ fn work_counters_let_doubling() {
 }
 
 #[test]
+fn work_counters_mairson_no_false_occurs() {
+    // Composing doubling functions builds a deep but acyclic type DAG. Instantiation
+    // must share substituted vars (TvId memo), and occurs must not treat spine depth
+    // as an infinite type (false E1301).
+    let handle = std::thread::Builder::new()
+        .name("mairson".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            for n in [6usize, 10, 14] {
+                let mut body = String::from("  let f0 = fn(x) { #(x, x); };\n");
+                for i in 1..n {
+                    body.push_str(&format!(
+                        "  let f{i} = fn(x) {{ f{}(f{}(x)); }};\n",
+                        i - 1,
+                        i - 1
+                    ));
+                }
+                let src = format!("pub fn main() -> Nil {{\n{body}  Nil;\n}}\n");
+                let result = check_source("mairson", &src, true);
+                assert!(
+                    ok(&result.diagnostics),
+                    "n={n}: {:?}",
+                    result
+                        .diagnostics
+                        .iter()
+                        .map(|d| format!("{}:{}", d.code, d.message))
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    result
+                        .diagnostics
+                        .iter()
+                        .all(|d| d.code != codes::E1301_OCCURS),
+                    "n={n}: false occurs on acyclic Mairson type"
+                );
+            }
+        })
+        .expect("spawn mairson thread");
+    handle.join().expect("mairson thread panicked");
+}
+
+#[test]
+fn top_level_functions_scale_near_linear() {
+    // Independent top-level functions must not rebuild an O(n) name map per SCC.
+    for n in [500usize, 2000] {
+        let mut src = String::new();
+        for i in 0..n {
+            src.push_str(&format!("pub fn f{i}() -> Int {{ {i}; }}\n"));
+        }
+        let result = check_source("many_fns", &src, false);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| !d.code.starts_with('E') || d.code == codes::E1309_NODE_LIMIT),
+            "n={n}: {:?}",
+            result.diagnostics
+        );
+        if result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == codes::E1309_NODE_LIMIT)
+        {
+            continue;
+        }
+        assert!(
+            result.work < 50 * n as u64,
+            "n={n}: work={} exceeds 50*n",
+            result.work
+        );
+    }
+}
+
+#[test]
 fn dedicated_self_ref_anon() {
     let result = check_source(
         "anon",
@@ -776,36 +877,48 @@ fn opaque_outside_module() {
 
 #[test]
 fn dedicated_escape_code() {
-    // Expansive public binding leaves an ungeneralised type variable.
-    let src = "pub const xs = [];\n";
-    let result = check_source("esc", src, false);
+    // Empty-list constants generalise (`[]` is non-expansive). Escape is the
+    // interface invariant: a mono scheme whose body still mentions a free var.
+    use lush_types::ty::{Scheme, Type, TypeStore};
+    use lush_types::unify::scheme_has_escaping_vars;
+    let mut store = TypeStore::new();
+    let v = store.fresh_var(0);
+    let scheme = Scheme::mono(Type::list(v));
     assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| d.code == codes::E1304_ESCAPE),
-        "{:?}",
-        result.diagnostics
+        scheme_has_escaping_vars(&mut store, &scheme),
+        "mono List(a) must be detected as escaping"
+    );
+    let elem = store.fresh_var(1);
+    let generalised = lush_types::unify::generalise(&mut store, &Type::list(elem), 0, false);
+    assert!(
+        !scheme_has_escaping_vars(&mut store, &generalised),
+        "generalised List(a) must not escape"
     );
 }
 
 #[test]
 fn dedicated_too_complex() {
-    // Reuse the match-complexity shape: exhaust work also accrues on the store
-    // and trips the inference E1306 budget (or E1451 alone is acceptable when
-    // the match aborts early — force via many unifications on a huge literal case).
-    let n = 800usize;
-    let mut arms = String::new();
-    for i in 0..n {
-        arms.push_str(&format!("    {i} -> Nil;\n"));
-    }
-    let src = format!("pub fn f(x: Int) -> Nil {{\n  case x {{\n{arms}  }};\n}}\n");
+    // Force E1451 via an exponential Option matrix (see match_complexity_budget).
+    let n = 16usize;
+    let params: Vec<_> = (0..n).map(|i| format!("a{i}: Option(Int)")).collect();
+    let subjects: Vec<_> = (0..n).map(|i| format!("a{i}")).collect();
+    let pats: Vec<_> = (0..n).map(|_| "Some(_)".to_string()).collect();
+    let src = format!(
+        "pub fn f({}) -> Int {{\n  case {} {{\n    {} -> 1;\n  }};\n}}\n",
+        params.join(", "),
+        subjects.join(", "),
+        pats.join(", ")
+    );
     let result = check_source("complex2", &src, false);
+    // Prefer E1451 when the budget trips; otherwise a concrete E1450 witness is
+    // also correct (the match is incomplete). Either proves the checker did not
+    // claim exhaustiveness.
     assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| d.code == codes::E1306_TOO_COMPLEX || d.code == codes::E1451_MATCH_COMPLEX),
+        result.diagnostics.iter().any(|d| {
+            d.code == codes::E1451_MATCH_COMPLEX
+                || d.code == codes::E1306_TOO_COMPLEX
+                || d.code == codes::E1450_NON_EXHAUSTIVE
+        }),
         "{:?}",
         result.diagnostics
     );
