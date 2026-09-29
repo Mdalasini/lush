@@ -18,6 +18,7 @@ use crate::ty::{
     ConstraintSet, FieldInfo, Scheme, Type, TypeDefId, TypeDefInfo, TypeDefKind, TypeStore,
     VariantInfo,
 };
+use crate::typed::TypedBuilder;
 use crate::unify::{self, Origin, Unifier};
 
 pub struct InferCtx<'a> {
@@ -45,6 +46,8 @@ pub struct InferCtx<'a> {
     pub scc_rec_call: bool,
     /// Names currently being bound by a `let` (for E1012 anon self-ref).
     pub binding_names: HashSet<String>,
+    /// Typed-AST side tables for step-3 lowering.
+    pub typed: TypedBuilder,
 }
 
 impl<'a> InferCtx<'a> {
@@ -119,7 +122,7 @@ pub fn infer_module(
     sink: &mut TypeSink,
     deps: &BTreeMap<String, ModuleInterface>,
     entry: bool,
-) -> ModuleInterface {
+) -> (ModuleInterface, TypedBuilder) {
     // Elaborate type definitions
     elaborate_types(path, module, resolved, store, sink, deps);
 
@@ -141,6 +144,7 @@ pub fn infer_module(
         deps,
         scc_rec_call: false,
         binding_names: HashSet::new(),
+        typed: TypedBuilder::new(),
     };
     for (name, t) in ctx.resolved.types.clone() {
         if t.from_module == path {
@@ -293,7 +297,10 @@ pub fn infer_module(
         );
     }
 
-    build_interface(path, &mut ctx)
+    ctx.typed.const_values = ctx.const_env.values.clone();
+    let typed = std::mem::take(&mut ctx.typed);
+    let iface = build_interface(path, &mut ctx);
+    (iface, typed)
 }
 
 fn types_compat(store: &mut TypeStore, a: &Type, b: &Type) -> bool {
@@ -1771,23 +1778,31 @@ pub fn infer_expr(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
 /// Infer an expression, returning a shared type node when the expression is a
 /// monomorphic local variable (enables DAG sharing for `#(x, x)`).
 fn infer_expr_shared(ctx: &mut InferCtx<'_>, expr: &Expr) -> Rc<Type> {
-    match &expr.kind {
+    let id = ctx.typed.begin_expr(expr.span);
+    let ty = match &expr.kind {
         ExprKind::Var(n) => {
             // Mark used / emit errors via the normal path, but reuse the shared node
             // for monomorphic locals so `#(x, x)` is a true DAG.
             if let Some(shared) = ctx.lookup_shared(&n.text) {
                 if let Some((scheme, _, _)) = ctx.lookup_value(&n.text) {
                     if scheme.vars.is_empty() && !ctx.scc.contains(&n.text) {
-                        return shared;
+                        shared
+                    } else {
+                        Rc::new(unify::instantiate(ctx.store, &scheme, ctx.level))
                     }
-                    return Rc::new(unify::instantiate(ctx.store, &scheme, ctx.level));
+                } else {
+                    Rc::new(infer_expr_inner(ctx, expr))
                 }
+            } else {
+                Rc::new(infer_expr_inner(ctx, expr))
             }
-            Rc::new(infer_expr_inner(ctx, expr))
         }
         ExprKind::Paren(inner) => infer_expr_shared(ctx, inner),
         _ => Rc::new(infer_expr_inner(ctx, expr)),
-    }
+    };
+    let zonked = ctx.store.zonk(&ty);
+    ctx.typed.finish_expr(id, zonked);
+    ty
 }
 
 fn infer_expr_inner(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {

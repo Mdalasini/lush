@@ -241,8 +241,9 @@ fn desugar_use(
         .collect();
     let mut body = callback_body;
     if body.statements.is_empty() {
-        body.statements.push(Statement::Expr(Expr {
-            kind: ExprKind::Constructor(ConstructorRef {
+        body.statements.push(Statement::Expr(Expr::new(
+            span,
+            ExprKind::Constructor(ConstructorRef {
                 module: None,
                 name: UName {
                     text: "Nil".into(),
@@ -250,18 +251,17 @@ fn desugar_use(
                 },
                 span,
             }),
-            span,
-        }));
+        )));
     }
     desugar_block(&mut body, sink, used, gensyms, true);
-    let callback = Expr {
-        kind: ExprKind::Fn {
+    let callback = Expr::new(
+        span,
+        ExprKind::Fn {
             params,
             return_type: None,
             body,
         },
-        span,
-    };
+    );
     // RHS must be call or function reference
     let mut rhs = use_stmt.value;
     desugar_expr(&mut rhs, sink, used, gensyms);
@@ -290,8 +290,9 @@ fn desugar_use(
         }
         ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Constructor(_) => {
             // Treat as call with no explicit args
-            Expr {
-                kind: ExprKind::Call {
+            Expr::new(
+                span,
+                ExprKind::Call {
                     callee: Box::new(rhs),
                     args: vec![Arg {
                         label: None,
@@ -299,8 +300,7 @@ fn desugar_use(
                         span,
                     }],
                 },
-                span,
-            }
+            )
         }
         _ => {
             sink.error(
@@ -309,8 +309,9 @@ fn desugar_use(
                 rhs.span,
                 Some("write `use x <- f(args);` or `use x <- f;`".into()),
             );
-            Expr {
-                kind: ExprKind::Call {
+            Expr::new(
+                span,
+                ExprKind::Call {
                     callee: Box::new(rhs),
                     args: vec![Arg {
                         label: None,
@@ -318,8 +319,7 @@ fn desugar_use(
                         span,
                     }],
                 },
-                span,
-            }
+            )
         }
     }
 }
@@ -352,13 +352,13 @@ fn desugar_expr(
             let mut stages: Vec<Expr> = Vec::new();
             let mut cur = std::mem::replace(
                 expr,
-                Expr {
-                    kind: ExprKind::Var(Name {
+                Expr::new(
+                    Span::default(),
+                    ExprKind::Var(Name {
                         text: "_".into(),
                         span: Span::default(),
                     }),
-                    span: Span::default(),
-                },
+                ),
             );
             while let ExprKind::Pipe { left, right } = cur.kind {
                 stages.push(*right);
@@ -427,13 +427,13 @@ fn desugar_expr(
                         ArgValue::Hole => {
                             new_args.push(Arg {
                                 label: a.label,
-                                value: ArgValue::Expr(Expr {
-                                    kind: ExprKind::Var(Name {
+                                value: ArgValue::Expr(Expr::new(
+                                    a.span,
+                                    ExprKind::Var(Name {
                                         text: name.clone(),
                                         span: a.span,
                                     }),
-                                    span: a.span,
-                                }),
+                                )),
                                 span: a.span,
                             });
                         }
@@ -449,23 +449,24 @@ fn desugar_expr(
                 }
                 let callee = std::mem::replace(
                     callee.as_mut(),
-                    Expr {
-                        kind: ExprKind::Var(Name {
+                    Expr::new(
+                        Span::default(),
+                        ExprKind::Var(Name {
                             text: "_".into(),
                             span: Span::default(),
                         }),
-                        span: Span::default(),
-                    },
+                    ),
                 );
-                let call = Expr {
-                    kind: ExprKind::Call {
+                let call = Expr::new(
+                    expr.span,
+                    ExprKind::Call {
                         callee: Box::new(callee),
                         args: new_args,
                     },
-                    span: expr.span,
-                };
-                *expr = Expr {
-                    kind: ExprKind::Fn {
+                );
+                *expr = Expr::new(
+                    expr.span,
+                    ExprKind::Fn {
                         params: vec![Param {
                             label: None,
                             name: Name {
@@ -481,8 +482,7 @@ fn desugar_expr(
                             span: expr.span,
                         },
                     },
-                    span: expr.span,
-                };
+                );
             } else if hole_count == 0 && !nested {
                 for a in args.iter_mut() {
                     if let ArgValue::Expr(e) = &mut a.value {
@@ -607,16 +607,14 @@ fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
                     },
                 );
             }
-            Expr {
-                kind: ExprKind::Call { callee, args },
-                span,
-            }
+            Expr::new(span, ExprKind::Call { callee, args })
         }
         ExprKind::Var(_)
         | ExprKind::Field { .. }
         | ExprKind::Constructor(_)
-        | ExprKind::Fn { .. } => Expr {
-            kind: ExprKind::Call {
+        | ExprKind::Fn { .. } => Expr::new(
+            span,
+            ExprKind::Call {
                 callee: Box::new(right),
                 args: vec![Arg {
                     label: None,
@@ -624,8 +622,7 @@ fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
                     span: value_span,
                 }],
             },
-            span,
-        },
+        ),
         _ => {
             sink.error(
                 codes::E1105_BAD_PIPE_RHS,
@@ -633,8 +630,9 @@ fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
                 right.span,
                 None,
             );
-            Expr {
-                kind: ExprKind::Call {
+            Expr::new(
+                span,
+                ExprKind::Call {
                     callee: Box::new(right),
                     args: vec![Arg {
                         label: None,
@@ -642,8 +640,7 @@ fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
                         span: value_span,
                     }],
                 },
-                span,
-            }
+            )
         }
     }
 }
@@ -667,22 +664,22 @@ fn desugar_pipe_chain(
     for stage in stages {
         let bind_name = fresh_capture_name(used, gensyms);
         let current_span = current.span;
-        let value_var = Expr {
-            kind: ExprKind::Var(Name {
+        let value_var = Expr::new(
+            current_span,
+            ExprKind::Var(Name {
                 text: bind_name.clone(),
                 span: current_span,
             }),
-            span: current_span,
-        };
+        );
         statements.push(Statement::Let(Box::new(LetStmt {
             assert: false,
-            pattern: Pattern {
-                kind: PatternKind::Var(Name {
+            pattern: Pattern::new(
+                current_span,
+                PatternKind::Var(Name {
                     text: bind_name,
                     span: current_span,
                 }),
-                span: current_span,
-            },
+            ),
             ty: None,
             value: current,
             message: None,
@@ -691,10 +688,7 @@ fn desugar_pipe_chain(
         current = pipe_apply(value_var, stage, sink);
     }
     statements.push(Statement::Expr(current));
-    Expr {
-        kind: ExprKind::Block(Block { statements, span }),
-        span,
-    }
+    Expr::new(span, ExprKind::Block(Block { statements, span }))
 }
 
 /// Count pipe/binary chain length for limit tests.

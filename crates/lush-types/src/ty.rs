@@ -102,6 +102,24 @@ pub enum Type {
 }
 
 impl Type {
+    /// True when no unbound unification variable remains (rigids/skolems are allowed).
+    pub fn is_zonked(&self) -> bool {
+        match self {
+            Type::Var(_) => false,
+            Type::List(t) => t.is_zonked(),
+            Type::Tuple(ts) | Type::App { args: ts, .. } => ts.iter().all(|t| t.is_zonked()),
+            Type::Fun { params, ret } => params.iter().all(|t| t.is_zonked()) && ret.is_zonked(),
+            Type::Rigid(_)
+            | Type::Error
+            | Type::Int
+            | Type::Float
+            | Type::String
+            | Type::Bool
+            | Type::Nil
+            | Type::BitArray => true,
+        }
+    }
+
     pub fn unit_fun() -> Type {
         Type::Fun {
             params: vec![],

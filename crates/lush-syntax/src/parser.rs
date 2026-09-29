@@ -126,17 +126,11 @@ impl<'a> Parser<'a> {
     }
 
     fn dummy_expr(&self) -> Expr {
-        Expr {
-            kind: ExprKind::Todo { message: None },
-            span: self.span(),
-        }
+        Expr::new(self.span(), ExprKind::Todo { message: None })
     }
 
     fn dummy_pattern(&self) -> Pattern {
-        Pattern {
-            kind: PatternKind::Discard,
-            span: self.span(),
-        }
+        Pattern::new(self.span(), PatternKind::Discard)
     }
 
     fn dummy_type(&self) -> TypeExpr {
@@ -797,13 +791,13 @@ impl<'a> Parser<'a> {
                 }
                 self.bump();
                 let right = self.parse_expression(2);
-                left = Expr {
-                    span: left.span.merge(right.span),
-                    kind: ExprKind::Pipe {
+                left = Expr::new(
+                    left.span.merge(right.span),
+                    ExprKind::Pipe {
                         left: Box::new(left),
                         right: Box::new(right),
                     },
-                };
+                );
                 continue;
             }
 
@@ -835,14 +829,14 @@ impl<'a> Parser<'a> {
                     Some("add parentheses, for example `(a < b) == True`".into()),
                 );
             }
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::Binary {
+            left = Expr::new(
+                left.span.merge(right.span),
+                ExprKind::Binary {
                     left: Box::new(left),
                     op,
                     right: Box::new(right),
                 },
-            };
+            );
         }
         self.exit_depth();
         left
@@ -868,25 +862,25 @@ impl<'a> Parser<'a> {
                 let start = self.span();
                 self.bump();
                 let expr = self.parse_expression(10); // prefix prec
-                Expr {
-                    span: start.merge(expr.span),
-                    kind: ExprKind::Unary {
+                Expr::new(
+                    start.merge(expr.span),
+                    ExprKind::Unary {
                         op: UnaryOp::Neg,
                         expr: Box::new(expr),
                     },
-                }
+                )
             }
             TokenKind::Bang => {
                 let start = self.span();
                 self.bump();
                 let expr = self.parse_expression(10);
-                Expr {
-                    span: start.merge(expr.span),
-                    kind: ExprKind::Unary {
+                Expr::new(
+                    start.merge(expr.span),
+                    ExprKind::Unary {
                         op: UnaryOp::Not,
                         expr: Box::new(expr),
                     },
-                }
+                )
             }
             _ => self.parse_primary(),
         }
@@ -897,26 +891,17 @@ impl<'a> Parser<'a> {
             TokenKind::Int(lit) => {
                 let span = self.span();
                 self.bump();
-                Expr {
-                    kind: ExprKind::Int(lit),
-                    span,
-                }
+                Expr::new(span, ExprKind::Int(lit))
             }
             TokenKind::Float(lit) => {
                 let span = self.span();
                 self.bump();
-                Expr {
-                    kind: ExprKind::Float(lit),
-                    span,
-                }
+                Expr::new(span, ExprKind::Float(lit))
             }
             TokenKind::String(lit) => {
                 let span = self.span();
                 self.bump();
-                Expr {
-                    kind: ExprKind::String(lit),
-                    span,
-                }
+                Expr::new(span, ExprKind::String(lit))
             }
             TokenKind::Discard => {
                 let span = self.span();
@@ -927,20 +912,14 @@ impl<'a> Parser<'a> {
                     Some("`_` is only valid as a pattern discard or a call capture hole".into()),
                 );
                 self.bump();
-                Expr {
-                    kind: ExprKind::Todo { message: None },
-                    span,
-                }
+                Expr::new(span, ExprKind::Todo { message: None })
             }
             TokenKind::Ident(text) => {
                 let span = self.span();
                 self.bump();
                 // Qualified constructor: module.UIdent — handled via field/call path.
                 // Bare ident.
-                Expr {
-                    kind: ExprKind::Var(Name { text, span }),
-                    span,
-                }
+                Expr::new(span, ExprKind::Var(Name { text, span }))
             }
             TokenKind::UIdent(text) => {
                 let span = self.span();
@@ -957,27 +936,18 @@ impl<'a> Parser<'a> {
                 {
                     return self.parse_record_update(ctor);
                 }
-                Expr {
-                    kind: ExprKind::Constructor(ctor),
-                    span,
-                }
+                Expr::new(span, ExprKind::Constructor(ctor))
             }
             TokenKind::LParen => {
                 let start = self.span();
                 self.bump();
                 let expr = self.parse_expression(0);
                 let end = self.expect(TokenKind::RParen, "close the group with `)`");
-                Expr {
-                    span: start.merge(end),
-                    kind: ExprKind::Paren(Box::new(expr)),
-                }
+                Expr::new(start.merge(end), ExprKind::Paren(Box::new(expr)))
             }
             TokenKind::LBrace => {
                 let block = self.parse_block();
-                Expr {
-                    span: block.span,
-                    kind: ExprKind::Block(block),
-                }
+                Expr::new(block.span, ExprKind::Block(block))
             }
             TokenKind::LBracket => self.parse_list_expr(),
             TokenKind::HashLParen => self.parse_tuple_expr(),
@@ -992,10 +962,7 @@ impl<'a> Parser<'a> {
                     .as_ref()
                     .map(|_| self.tokens[self.pos.saturating_sub(1)].span)
                     .unwrap_or(start);
-                Expr {
-                    kind: ExprKind::Todo { message },
-                    span: start.merge(end),
-                }
+                Expr::new(start.merge(end), ExprKind::Todo { message })
             }
             TokenKind::Panic => {
                 let start = self.span();
@@ -1005,10 +972,7 @@ impl<'a> Parser<'a> {
                     .as_ref()
                     .map(|_| self.tokens[self.pos.saturating_sub(1)].span)
                     .unwrap_or(start);
-                Expr {
-                    kind: ExprKind::Panic { message },
-                    span: start.merge(end),
-                }
+                Expr::new(start.merge(end), ExprKind::Panic { message })
             }
             TokenKind::Assert => {
                 let start = self.span();
@@ -1019,22 +983,19 @@ impl<'a> Parser<'a> {
                     .as_ref()
                     .map(|_| self.tokens[self.pos.saturating_sub(1)].span)
                     .unwrap_or(expr.span);
-                Expr {
-                    span: start.merge(end),
-                    kind: ExprKind::Assert {
+                Expr::new(
+                    start.merge(end),
+                    ExprKind::Assert {
                         expr: Box::new(expr),
                         message,
                     },
-                }
+                )
             }
             TokenKind::Echo => {
                 let start = self.span();
                 self.bump();
                 let expr = self.parse_expression(0);
-                Expr {
-                    span: start.merge(expr.span),
-                    kind: ExprKind::Echo(Box::new(expr)),
-                }
+                Expr::new(start.merge(expr.span), ExprKind::Echo(Box::new(expr)))
             }
             other => {
                 let span = self.span();
@@ -1047,10 +1008,7 @@ impl<'a> Parser<'a> {
                     ),
                 );
                 self.bump();
-                Expr {
-                    kind: ExprKind::Todo { message: None },
-                    span,
-                }
+                Expr::new(span, ExprKind::Todo { message: None })
             }
         }
     }
@@ -1109,13 +1067,13 @@ impl<'a> Parser<'a> {
         // intact so desugar can emit the type-stage diagnostic.
         let _ = hole_count;
         let end = self.expect(TokenKind::RParen, "close the call with `)`");
-        Expr {
-            span: callee.span.merge(end),
-            kind: ExprKind::Call {
+        Expr::new(
+            callee.span.merge(end),
+            ExprKind::Call {
                 callee: Box::new(callee),
                 args,
             },
-        }
+        )
     }
 
     fn parse_arg(&mut self) -> Arg {
@@ -1205,18 +1163,15 @@ impl<'a> Parser<'a> {
             {
                 return self.parse_record_update(ctor);
             }
-            return Expr {
-                span: base.span.merge(end),
-                kind: ExprKind::Constructor(ctor),
-            };
+            return Expr::new(base.span.merge(end), ExprKind::Constructor(ctor));
         }
-        Expr {
-            span: base.span.merge(end),
-            kind: ExprKind::Field {
+        Expr::new(
+            base.span.merge(end),
+            ExprKind::Field {
                 base: Box::new(base),
                 field,
             },
-        }
+        )
     }
 
     fn parse_record_update(&mut self, constructor: ConstructorRef) -> Expr {
@@ -1236,14 +1191,14 @@ impl<'a> Parser<'a> {
             fields.push((name, value));
         }
         let end = self.expect(TokenKind::RParen, "close the record update with `)`");
-        Expr {
-            span: start.merge(end),
-            kind: ExprKind::RecordUpdate {
+        Expr::new(
+            start.merge(end),
+            ExprKind::RecordUpdate {
                 constructor,
                 base: Box::new(base),
                 fields,
             },
-        }
+        )
     }
 
     fn parse_list_expr(&mut self) -> Expr {
@@ -1251,13 +1206,13 @@ impl<'a> Parser<'a> {
         if matches!(self.kind(), TokenKind::RBracket) {
             let end = self.span();
             self.bump();
-            return Expr {
-                span: start.merge(end),
-                kind: ExprKind::List {
+            return Expr::new(
+                start.merge(end),
+                ExprKind::List {
                     items: vec![],
                     spread: None,
                 },
-            };
+            );
         }
         // Spread-only: [..xs] or [..xs,]
         if matches!(self.kind(), TokenKind::DotDot) {
@@ -1280,13 +1235,13 @@ impl<'a> Parser<'a> {
                 }
             }
             let end = self.expect(TokenKind::RBracket, "close the list with `]`");
-            return Expr {
-                span: start.merge(end),
-                kind: ExprKind::List {
+            return Expr::new(
+                start.merge(end),
+                ExprKind::List {
                     items: vec![],
                     spread: Some(Box::new(spread)),
                 },
-            };
+            );
         }
         let mut items = Vec::new();
         let mut spread = None;
@@ -1332,10 +1287,7 @@ impl<'a> Parser<'a> {
             break;
         }
         let end = self.expect(TokenKind::RBracket, "close the list with `]`");
-        Expr {
-            span: start.merge(end),
-            kind: ExprKind::List { items, spread },
-        }
+        Expr::new(start.merge(end), ExprKind::List { items, spread })
     }
 
     fn parse_tuple_expr(&mut self) -> Expr {
@@ -1350,10 +1302,7 @@ impl<'a> Parser<'a> {
                 "tuples need at least two elements",
                 Some("write `#(a, b)`; `#()` is not valid".into()),
             );
-            return Expr {
-                span: start.merge(end),
-                kind: ExprKind::Tuple(vec![]),
-            };
+            return Expr::new(start.merge(end), ExprKind::Tuple(vec![]));
         }
         elems.push(self.parse_expression(0));
         if !matches!(self.kind(), TokenKind::Comma) {
@@ -1365,10 +1314,7 @@ impl<'a> Parser<'a> {
                 "tuples need at least two elements",
                 Some("write `#(a, b)`; `#(a)` is not valid".into()),
             );
-            return Expr {
-                span: start.merge(end),
-                kind: ExprKind::Tuple(elems),
-            };
+            return Expr::new(start.merge(end), ExprKind::Tuple(elems));
         }
         // Require at least one comma-separated element.
         while matches!(self.kind(), TokenKind::Comma) {
@@ -1387,10 +1333,7 @@ impl<'a> Parser<'a> {
                 Some("write `#(a, b)`".into()),
             );
         }
-        Expr {
-            span: start.merge(end),
-            kind: ExprKind::Tuple(elems),
-        }
+        Expr::new(start.merge(end), ExprKind::Tuple(elems))
     }
 
     fn parse_bit_array_expr(&mut self) -> Expr {
@@ -1410,10 +1353,7 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(TokenKind::RShift, "close the bit array with `>>`");
-        Expr {
-            span: start.merge(end),
-            kind: ExprKind::BitArray(segments),
-        }
+        Expr::new(start.merge(end), ExprKind::BitArray(segments))
     }
 
     fn parse_bit_segment(&mut self) -> BitSegment {
@@ -1495,14 +1435,14 @@ impl<'a> Parser<'a> {
             None
         };
         let body = self.parse_block();
-        Expr {
-            span: start.merge(body.span),
-            kind: ExprKind::Fn {
+        Expr::new(
+            start.merge(body.span),
+            ExprKind::Fn {
                 params,
                 return_type,
                 body,
             },
-        }
+        )
     }
 
     fn parse_case_expr(&mut self) -> Expr {
@@ -1521,10 +1461,7 @@ impl<'a> Parser<'a> {
             clauses.push(clause);
         }
         let end = self.expect(TokenKind::RBrace, "close the `case` with `}`");
-        Expr {
-            span: start.merge(end),
-            kind: ExprKind::Case { subjects, clauses },
-        }
+        Expr::new(start.merge(end), ExprKind::Case { subjects, clauses })
     }
 
     fn parse_clause(&mut self, subject_count: usize) -> Clause {
@@ -1604,26 +1541,26 @@ impl<'a> Parser<'a> {
             if let PatternKind::String(prefix) = pat.kind.clone() {
                 self.bump();
                 let rest = self.parse_pattern();
-                pat = Pattern {
-                    span: pat.span.merge(rest.span),
-                    kind: PatternKind::StringPrefix {
+                pat = Pattern::new(
+                    pat.span.merge(rest.span),
+                    PatternKind::StringPrefix {
                         prefix,
                         rest: Box::new(rest),
                     },
-                };
+                );
             }
         }
         // Alias: pattern as name
         if matches!(self.kind(), TokenKind::As) {
             self.bump();
             let name = self.parse_name();
-            pat = Pattern {
-                span: pat.span.merge(name.span),
-                kind: PatternKind::Alias {
+            pat = Pattern::new(
+                pat.span.merge(name.span),
+                PatternKind::Alias {
                     pattern: Box::new(pat),
                     name,
                 },
-            };
+            );
         }
         self.exit_depth();
         pat
@@ -1634,34 +1571,22 @@ impl<'a> Parser<'a> {
             TokenKind::Int(lit) => {
                 let span = self.span();
                 self.bump();
-                Pattern {
-                    kind: PatternKind::Int(lit),
-                    span,
-                }
+                Pattern::new(span, PatternKind::Int(lit))
             }
             TokenKind::Float(lit) => {
                 let span = self.span();
                 self.bump();
-                Pattern {
-                    kind: PatternKind::Float(lit),
-                    span,
-                }
+                Pattern::new(span, PatternKind::Float(lit))
             }
             TokenKind::String(lit) => {
                 let span = self.span();
                 self.bump();
-                Pattern {
-                    kind: PatternKind::String(lit),
-                    span,
-                }
+                Pattern::new(span, PatternKind::String(lit))
             }
             TokenKind::Discard => {
                 let span = self.span();
                 self.bump();
-                Pattern {
-                    kind: PatternKind::Discard,
-                    span,
-                }
+                Pattern::new(span, PatternKind::Discard)
             }
             TokenKind::Ident(text) => {
                 let span = self.span();
@@ -1687,28 +1612,22 @@ impl<'a> Parser<'a> {
                         .as_ref()
                         .and_then(|a| a.last().map(|x| x.span))
                         .unwrap_or(ctor.span);
-                    return Pattern {
-                        span: span.merge(end),
-                        kind: PatternKind::Constructor {
+                    return Pattern::new(
+                        span.merge(end),
+                        PatternKind::Constructor {
                             constructor: ctor,
                             args,
                         },
-                    };
+                    );
                 }
                 let name = Name {
                     text: text.clone(),
                     span,
                 };
                 if text.starts_with('_') {
-                    Pattern {
-                        kind: PatternKind::UnderscoreName(name),
-                        span,
-                    }
+                    Pattern::new(span, PatternKind::UnderscoreName(name))
                 } else {
-                    Pattern {
-                        kind: PatternKind::Var(name),
-                        span,
-                    }
+                    Pattern::new(span, PatternKind::Var(name))
                 }
             }
             TokenKind::UIdent(text) => {
@@ -1728,13 +1647,13 @@ impl<'a> Parser<'a> {
                     .as_ref()
                     .and_then(|a| a.last().map(|x| x.span))
                     .unwrap_or(ctor.span);
-                Pattern {
-                    span: span.merge(end),
-                    kind: PatternKind::Constructor {
+                Pattern::new(
+                    span.merge(end),
+                    PatternKind::Constructor {
                         constructor: ctor,
                         args,
                     },
-                }
+                )
             }
             TokenKind::HashLParen => self.parse_tuple_pattern(),
             TokenKind::LBracket => self.parse_list_pattern(),
@@ -1751,10 +1670,7 @@ impl<'a> Parser<'a> {
                     ),
                 );
                 self.bump();
-                Pattern {
-                    kind: PatternKind::Discard,
-                    span,
-                }
+                Pattern::new(span, PatternKind::Discard)
             }
         }
     }
@@ -1834,10 +1750,7 @@ impl<'a> Parser<'a> {
                 Some("write `#(a, b)`".into()),
             );
         }
-        Pattern {
-            span: start.merge(end),
-            kind: PatternKind::Tuple(elems),
-        }
+        Pattern::new(start.merge(end), PatternKind::Tuple(elems))
     }
 
     fn parse_list_pattern(&mut self) -> Pattern {
@@ -1845,13 +1758,13 @@ impl<'a> Parser<'a> {
         if matches!(self.kind(), TokenKind::RBracket) {
             let end = self.span();
             self.bump();
-            return Pattern {
-                span: start.merge(end),
-                kind: PatternKind::List {
+            return Pattern::new(
+                start.merge(end),
+                PatternKind::List {
                     items: vec![],
                     spread: None,
                 },
-            };
+            );
         }
         if matches!(self.kind(), TokenKind::DotDot) {
             self.bump();
@@ -1868,13 +1781,13 @@ impl<'a> Parser<'a> {
                 }
             }
             let end = self.expect(TokenKind::RBracket, "close the list pattern with `]`");
-            return Pattern {
-                span: start.merge(end),
-                kind: PatternKind::List {
+            return Pattern::new(
+                start.merge(end),
+                PatternKind::List {
                     items: vec![],
                     spread: Some(Box::new(spread)),
                 },
-            };
+            );
         }
         let mut items = Vec::new();
         let mut spread = None;
@@ -1909,10 +1822,7 @@ impl<'a> Parser<'a> {
             break;
         }
         let end = self.expect(TokenKind::RBracket, "close the list pattern with `]`");
-        Pattern {
-            span: start.merge(end),
-            kind: PatternKind::List { items, spread },
-        }
+        Pattern::new(start.merge(end), PatternKind::List { items, spread })
     }
 
     fn parse_bit_array_pattern(&mut self) -> Pattern {
@@ -1957,10 +1867,7 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(TokenKind::RShift, "close the bit-array pattern with `>>`");
-        Pattern {
-            span: start.merge(end),
-            kind: PatternKind::BitArray(segments),
-        }
+        Pattern::new(start.merge(end), PatternKind::BitArray(segments))
     }
 
     // ----- types -----

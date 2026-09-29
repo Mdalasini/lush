@@ -16,6 +16,7 @@ pub mod numeric;
 pub mod resolve;
 pub mod stubs;
 pub mod ty;
+pub mod typed;
 pub mod unify;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -27,13 +28,20 @@ use lush_syntax::span::Span;
 use crate::diag::TypeSink;
 use crate::interface::ModuleInterface;
 use crate::ty::TypeStore;
+use crate::typed::{TypedBuilder, TypedModule};
+
+fn empty_typed(path: &str, module: Module) -> TypedModule {
+    TypedBuilder::new().build(path.to_string(), module, TypeStore::new())
+}
 
 /// Result of checking one module.
-#[derive(Debug)]
 pub struct CheckResult {
     pub interface: ModuleInterface,
     /// Desugared module (captures/pipes/use rewritten).
     pub module: Module,
+    /// Typed-AST handoff for Core IR lowering. Present even when there are
+    /// diagnostics; lowering must not run when any error exists.
+    pub typed: typed::TypedModule,
     pub diagnostics: Vec<Diagnostic>,
     pub work: u64,
 }
@@ -88,9 +96,11 @@ fn check_module_with_budget(
             module.span,
             Some("split the module into smaller files".into()),
         );
+        let module = module.clone();
         return CheckResult {
             interface: ModuleInterface::empty(path),
-            module: module.clone(),
+            typed: empty_typed(path, module.clone()),
+            module,
             diagnostics: sink.into_diagnostics(),
             work: 0,
         };
@@ -109,7 +119,7 @@ fn check_module_with_budget(
     }
 
     let mut module = module.clone();
-    crate::desugar::desugar_module(&mut module, &mut sink);
+    let gensyms = crate::desugar::desugar_module(&mut module, &mut sink);
 
     let mut ctx = resolve::ResolveCtx {
         store: &mut store,
@@ -123,7 +133,7 @@ fn check_module_with_budget(
     // Qualified access is only via the module alias table (no bare enrichment).
     let _ = &mut resolved;
 
-    let interface = infer::infer_module(
+    let (interface, mut typed_builder) = infer::infer_module(
         path,
         &module,
         &mut resolved,
@@ -132,10 +142,13 @@ fn check_module_with_budget(
         deps,
         opts.entry,
     );
+    typed_builder.gensyms = gensyms.into_iter().collect();
 
     let work = store.work;
+    let typed = typed_builder.build(path.to_string(), module.clone(), store);
     CheckResult {
         interface,
+        typed,
         module,
         diagnostics: sink.into_diagnostics(),
         work,
@@ -372,18 +385,20 @@ pub fn check_graph(
         }
         if cycle_members.contains(path) {
             // Skip cycle members — they already have E1006.
+            let module = module_map
+                .get(path.as_str())
+                .cloned()
+                .cloned()
+                .unwrap_or(Module {
+                    items: vec![],
+                    span: Span::default(),
+                });
             results.insert(
                 path.clone(),
                 CheckResult {
                     interface: ModuleInterface::empty(path),
-                    module: module_map
-                        .get(path.as_str())
-                        .cloned()
-                        .cloned()
-                        .unwrap_or(Module {
-                            items: vec![],
-                            span: Span::default(),
-                        }),
+                    typed: empty_typed(path, module.clone()),
+                    module,
                     diagnostics: vec![],
                     work: 0,
                 },
@@ -419,11 +434,13 @@ pub fn check_graph(
                 lush_syntax::diagnostic::DiagnosticKind::Type,
             );
             all_diags.push(diag.clone());
+            let module = (*module).clone();
             results.insert(
                 path.clone(),
                 CheckResult {
                     interface: ModuleInterface::empty(path),
-                    module: (*module).clone(),
+                    typed: empty_typed(path, module.clone()),
+                    module,
                     diagnostics: vec![diag],
                     work: 0,
                 },
@@ -546,12 +563,14 @@ pub fn check_source(path: &str, source: &str, entry: bool) -> CheckResult {
     let prior = parsed.diagnostics;
     // Skip type-checking when parse has errors.
     if prior.iter().any(|d| d.severity == Severity::Error) {
+        let module = parsed.module.unwrap_or(Module {
+            items: vec![],
+            span: Span::default(),
+        });
         return CheckResult {
             interface: ModuleInterface::empty(path),
-            module: parsed.module.unwrap_or(Module {
-                items: vec![],
-                span: Span::default(),
-            }),
+            typed: empty_typed(path, module.clone()),
+            module,
             diagnostics: prior,
             work: 0,
         };
@@ -559,12 +578,14 @@ pub fn check_source(path: &str, source: &str, entry: bool) -> CheckResult {
     let module = match parsed.module {
         Some(m) => m,
         None => {
+            let module = Module {
+                items: vec![],
+                span: Span::default(),
+            };
             return CheckResult {
                 interface: ModuleInterface::empty(path),
-                module: Module {
-                    items: vec![],
-                    span: Span::default(),
-                },
+                typed: empty_typed(path, module.clone()),
+                module,
                 diagnostics: prior,
                 work: 0,
             };

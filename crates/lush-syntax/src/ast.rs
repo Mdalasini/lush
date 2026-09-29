@@ -7,6 +7,16 @@
 use crate::span::Span;
 use crate::token::{FloatLit, IntLit, StringLit};
 
+/// Stable identity for an expression or pattern node, assigned after desugaring
+/// for the typed-AST handoff (§15.3 step 3). Parser-produced nodes use [`NodeId::NONE`].
+/// Excluded from [`PartialEq`] so formatter round-trips stay span/structure based.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeId(pub u32);
+
+impl NodeId {
+    pub const NONE: NodeId = NodeId(0);
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
     pub items: Vec<ModuleItem>,
@@ -150,10 +160,29 @@ pub struct UseStmt {
     pub span: Span,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+    pub id: NodeId,
+}
+
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.span == other.span
+    }
+}
+
+impl Expr {
+    /// Build an expression. `span` is taken first so callers can read spans from
+    /// values that are then moved into `kind`.
+    pub fn new(span: Span, kind: ExprKind) -> Self {
+        Self {
+            kind,
+            span,
+            id: NodeId::NONE,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -297,10 +326,29 @@ pub struct PatternRow {
     pub span: Span,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Pattern {
     pub kind: PatternKind,
     pub span: Span,
+    pub id: NodeId,
+}
+
+impl PartialEq for Pattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.span == other.span
+    }
+}
+
+impl Pattern {
+    /// Build a pattern. `span` is taken first so callers can read spans from
+    /// values that are then moved into `kind`.
+    pub fn new(span: Span, kind: PatternKind) -> Self {
+        Self {
+            kind,
+            span,
+            id: NodeId::NONE,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -609,10 +657,7 @@ pub mod equiv {
         if let ExprKind::Paren(inner) = &e.kind {
             return strip_expr(inner);
         }
-        Expr {
-            kind: strip_expr_kind(&e.kind),
-            span: Span::default(),
-        }
+        Expr::new(Span::default(), strip_expr_kind(&e.kind))
     }
 
     fn strip_expr_kind(kind: &ExprKind) -> ExprKind {
@@ -736,10 +781,7 @@ pub mod equiv {
     }
 
     fn strip_pattern(p: &Pattern) -> Pattern {
-        Pattern {
-            kind: strip_pattern_kind(&p.kind),
-            span: Span::default(),
-        }
+        Pattern::new(Span::default(), strip_pattern_kind(&p.kind))
     }
 
     fn strip_pattern_kind(kind: &PatternKind) -> PatternKind {

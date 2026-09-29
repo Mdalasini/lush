@@ -696,6 +696,7 @@ fn dedicated_node_limit() {
                 raw: "1".into(),
             }),
             span: Span::default(),
+            id: lush_syntax::ast::NodeId::NONE,
         });
     }
     let module = Module {
@@ -712,6 +713,7 @@ fn dedicated_node_limit() {
                     spread: None,
                 },
                 span: Span::default(),
+                id: lush_syntax::ast::NodeId::NONE,
             },
             span: Span::default(),
         })],
@@ -765,6 +767,7 @@ fn dedicated_def_limit() {
                     raw: "0".into(),
                 }),
                 span: Span::default(),
+                id: lush_syntax::ast::NodeId::NONE,
             },
             span: Span::default(),
         }));
@@ -1065,6 +1068,7 @@ fn dedicated_slash_qualified_type() {
                         span: Span::default(),
                     }),
                     span: Span::default(),
+                    id: lush_syntax::ast::NodeId::NONE,
                 })],
                 span: Span::default(),
             },

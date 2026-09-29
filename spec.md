@@ -169,6 +169,7 @@ list.map([1, 2, 3], fn(x) { x * 2; });
 - Functions are first-class closures. Closures capture by value (everything is immutable).
 - Recursion works for top-level and local named functions. Local definitions use `fn name(...) { ... }` without a trailing semicolon. A maximal consecutive group of local function definitions is mutually recursive; its names are in scope in that group and the subsequent block remainder, but not earlier statements. Captures resolve against bindings preceding the group. Top-level functions in a module form mutually visible recursive groups by dependency. Anonymous functions cannot self-reference.
 - **Proper tail calls are MANDATORY.** Any call in tail position MUST NOT grow the stack, including mutual recursion and calls through closures.
+- **Tail positions** are: the final expression of a function body; the final expression of a block that is itself in tail position; every arm body of a `case` in tail position; the right operand of `&&` and `||` in tail position; the outer call produced by `use` and the callback's final expression (§5.5). A call inside `echo`, `assert`, an argument, a `let` right-hand side, a guard, or a non-final statement is not a tail call.
 - Function bodies are blocks. Return is the final expression statement (terminated by `;`); there is no `return` keyword.
 - A single-name parameter has that name as its optional external label; two names specify external label then internal binding. Calls may pass parameters positionally or by their declared labels, each exactly once; positional arguments precede labelled arguments and fill the first unfilled positions. Labels belong to statically resolved named functions/constructors, not structural function types; calls through ordinary function values are positional only. An argument's source order, not parameter order, determines evaluation order.
 
@@ -217,7 +218,7 @@ Desugars to `result.try(fs.read("a.txt"), fn(file) { ... rest of block ... })`. 
 - `todo`, `todo as "msg"`: type-checks as any type, panics when reached. Compiler warns.
 - `panic`, `panic as "msg"`: crashes the current process.
 - `assert expr`, `assert expr as "msg"`: panics if `False`.
-- `echo expr`: debug print, returns the value.
+- `echo expr`: writes `src/<module path>.lush:<line>:<col> <inspect(value)>` and a newline to **stderr**, then yields the value. `inspect` renders `Int` in decimal; `Float` as the shortest decimal that round-trips and always contains `.` or an exponent (`1.0`, `-0.0`, `1e21`); `String` in double quotes with `\n \r \t \\ \"` and `\u{..}` for other control characters; `List` as `[a, b]`; tuples as `#(a, b)`; constructors as `Name(v1, v2)` (positional, no labels; nullary as `Name`); `BitArray` as `<<1, 2, 3>>` (with a `:size(n)` suffix on a trailing partial byte); and closures as `//fn(arity)`. Rendering is iterative (no host-stack recursion) and charges reductions (§7.3 / §7.6).
 
 ### 5.7 Operators (highest to lowest precedence)
 | Prec | Operator | Meaning |
@@ -285,8 +286,8 @@ source → lexer → parser → AST → name resolution → type inference
 1. **Lexer** (`logos`), **parser** (hand-written recursive descent + Pratt for expressions). MUST recover from errors and report multiple.
 2. **Type checker:** Value-restricted HM with unification, level-based generalisation, and sealed `Eq`/`Neg` constraints (§4.3). Errors MUST be precise, with source spans and suggestions (Elm/Rust quality). Use `ariadne` or `miette`.
 3. **Core IR:** A-normal-form, explicit closures, pattern matches compiled to decision trees.
-4. **Optimisations (v1, keep small):** inlining of small functions, constant folding, dead code elimination, known-call resolution, tail-call marking. Case-of-known-constructor. No monomorphisation: values are uniformly represented; sealed equality/hash and negation operations dispatch through runtime tags/type descriptors. Generic execution still incurs this runtime dispatch cost.
-5. **Bytecode generation:** register-based, per-function register frames.
+4. **Optimisations (v1, keep small):** inlining of small functions, constant folding, dead code elimination, known-call resolution, tail-call marking. Case-of-known-constructor. No monomorphisation: values are uniformly represented; sealed equality/hash and negation operations dispatch through runtime tags/type descriptors. Generic execution still incurs this runtime dispatch cost. The optimiser may only change *how fast* a program runs: it must not move, drop, duplicate or fold any operation that can panic (checked arithmetic, division, `assert`, `let assert`, `todo`, `panic`, bit-array construction) or perform output. Constant folding folds an operation only when the shared numeric helpers succeed; on a would-panic it leaves the instruction so the panic occurs at run time at the original location and order (§5.8, §15.4). Optimised and unoptimised code must agree on values, output and panics (differential testing).
+5. **Bytecode generation:** register-based, per-function register frames (maximum 256 registers). Documented compile-time limits each yield a diagnostic (`E2xxx`), never a crash or wrap: `MAX_REGISTERS = 256`, `MAX_CONSTRUCTOR_ARITY = 255`, `MAX_FUNCTIONS_PER_MODULE`, `MAX_CONSTANTS_PER_MODULE`, `MAX_INSTRUCTIONS_PER_FUNCTION`, `MAX_DECISION_NODES` per `case`, `MAX_INLINE_SIZE`, `MAX_INLINE_DEPTH`.
 6. **Incremental compilation:** per-module cache keyed by source content, dependency interface hashes (including sealed constraints), compiler/stdlib versions, target, and compiler flags, stored in `.lush/cache/`.
 
 ---
@@ -295,10 +296,11 @@ source → lexer → parser → AST → name resolution → type inference
 
 ### 7.1 Value representation
 All values are 64-bit tagged words.
-- Low bits tag: immediate small `Int` (62-bit fast path, promoted to boxed 64-bit when needed), `Bool`/`Nil`/nullary constructors, `Pid`, pointer-to-heap-object.
+- Low bits tag: immediate small `Int` (62-bit fast path: signed values in `[-2^62, 2^62)`), `Bool`/`Nil`/nullary constructors, `Pid`, pointer-to-heap-object. An `Int` in the immediate range is always stored immediately (canonical form); `Float` and out-of-immediate-range `Int` are boxed.
 - Heap objects have a one-word header (kind, arity/length, GC bits).
 - Kinds: tuple/constructor (tag + fields), cons cell, boxed `Int`/`Float`, closure (function index + captured values), string/binary (small: inline on heap; large: shared refcounted, see §7.4), Dict/Vector nodes, `Subject`.
 - Strings and bit arrays are byte buffers; strings are validated UTF-8 on creation.
+- Until per-process heap and GC (build step 4), the single-process interpreter allocates from a bump arena behind one allocation interface with **no reclamation**. Constant-pool objects live in an immortal static region separate from that arena.
 
 ### 7.2 Processes
 Each process owns:
@@ -315,6 +317,8 @@ Processes never share mutable memory. No process can read another's heap.
 - `N` scheduler threads (default: number of logical cores; env `LUSH_SCHEDULERS` to override).
 - Each has a local run queue; idle schedulers **steal** from others (`crossbeam-deque`).
 - **Preemption by reduction counting:** the interpreter charges at least one reduction for each bytecode instruction (including jumps, comparisons and tail calls), not just allocations or calls. The default quantum is **4000** reductions; when exhausted, the process yields and is re-queued at the back. Long native/builtin operations and selective mailbox scans charge proportional work and yield/resume at safe points (§7.6, §9.1). This is Lush's explicit fairness contract, inspired by BEAM reductions, not an assertion that absence of source loops guarantees fairness. Each scheduler thread must reach a safe point within a bounded amount of interpreter/builtin work; no time-based hard preemption is promised.
+- Every executed instruction charges exactly 1 reduction. A builtin or structural operation that touches `n` words or entries (structural `==`, `<>`, `inspect`, bit-array construction and matching, `print`) additionally charges `ceil(n / 8)` reductions and does its work in resumable chunks of at most `MAX_STEP_WORDS = 1024`, charging each chunk as it is processed. The interpreter is driven as `run_slice(quantum) -> Yielded | Done(Exit)` and yields only at an instruction or chunk boundary; resuming is indistinguishable from an uninterrupted run.
+- Until multi-process scheduling (build steps 5–6), a single-process interpreter enforces a per-process frame limit `MAX_STACK_FRAMES = 1_000_000` (configurable through the VM API). Runaway non-tail recursion panics with message `stack overflow` and exit status 1. Build step 4 replaces this with the §7.4 byte budget (`HeapLimit`).
 - `receive`/`receive_signal` with no matching item parks the process (not runnable) until a match arrives or a timeout fires; unmatched items do not spuriously complete the wait.
 - Timers use a hierarchical timing wheel owned by the runtime.
 - The program exits when the **main process** returns (exit code 0) or crashes (exit code 1, error printed). Other processes are terminated.
@@ -643,6 +647,8 @@ Cross-target builds are **[v1.1]**, not “trivial cross-compilation”: release
 
 ### 11.6 Diagnostics
 Errors MUST include a code, a source snippet with a label, and a hint where feasible. Runtime panics MUST print: message, source location, and a stack trace (including the process's spawn location). Crash reports MUST include linked-process context.
+
+When `main` panics in the single-process interpreter (build step 3), the report is written to stderr as: a header `panic: <message>`, then `at src/<module path>.lush:<line>:<col>` for the panic site, then one `  in <module>.<function> (src/<module path>.lush:<line>:<col>)` line per live frame, innermost first. Frames replaced by a tail call are not shown, and the report says so with one line, `(tail-called frames are not shown)`, when any tail call occurred. The spawn-location and linked-process lines arrive with build steps 5 and 7. Exit status is 0 when `main` returns and 1 on panic (§7.3). Control characters in the message, function names and paths are escaped (`\u{1b}`), so a user string cannot inject terminal escapes into the report. Message length and printed frame count are capped with elision markers.
 
 ---
 
