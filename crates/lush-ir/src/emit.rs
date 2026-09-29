@@ -1564,6 +1564,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                             pat.span,
                         );
                         fail_jumps.push(jmp);
+                        self.recycle(ok);
                     }
                     PatternKind::Var(n) => {
                         let r = self.fresh()?;
@@ -1607,6 +1608,8 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                             pat.span,
                         );
                         fail_jumps.push(jmp);
+                        self.recycle(b);
+                        self.recycle(ok);
                     }
                     PatternKind::Constructor {
                         constructor: c,
@@ -1657,7 +1660,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                                 field_i += 1;
                                 match &inner.kind {
                                     PatternKind::Var(n) => self.define(n.text.clone(), field),
-                                    PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
+                                    PatternKind::Discard | PatternKind::UnderscoreName(_) => {
+                                        self.recycle(field);
+                                    }
                                     _ => {
                                         self.error(
                                             codes::E2011_LOWER,
@@ -1674,6 +1679,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         // Nested list patterns beyond one cons cell are lowered
                         // by walking items then the optional spread tail.
                         let mut cur = *scrut;
+                        let mut cur_is_temp = false;
                         for item in items {
                             let is_empty = self.fresh()?;
                             self.emit(
@@ -1683,7 +1689,6 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                                 },
                                 pat.span,
                             );
-                            // fail if empty when expecting a cons
                             // Fail when empty while expecting a cons cell.
                             let f = self.fresh()?;
                             self.emit(
@@ -1711,6 +1716,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                                 pat.span,
                             );
                             fail_jumps.push(jmp);
+                            self.recycle(is_empty);
+                            self.recycle(f);
+                            self.recycle(ok);
                             let head = self.fresh()?;
                             self.emit(
                                 Op::GetField {
@@ -1734,7 +1742,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                                 PatternKind::Var(n) => {
                                     self.define(n.text.clone(), head);
                                 }
-                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
+                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {
+                                    self.recycle(head);
+                                }
                                 PatternKind::Int(lit) => {
                                     let base = match lit.base {
                                         IntBase::Decimal => 10,
@@ -1761,6 +1771,8 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                                         item.span,
                                     );
                                     fail_jumps.push(jmp);
+                                    self.recycle(ok);
+                                    self.recycle(head);
                                 }
                                 _ => {
                                     self.error(
@@ -1771,7 +1783,11 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                                     return None;
                                 }
                             }
+                            if cur_is_temp {
+                                self.recycle(cur);
+                            }
                             cur = tail;
+                            cur_is_temp = true;
                         }
                         match spread {
                             None => {
@@ -1792,10 +1808,18 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                                     pat.span,
                                 );
                                 fail_jumps.push(jmp);
+                                self.recycle(is_empty);
+                                if cur_is_temp {
+                                    self.recycle(cur);
+                                }
                             }
                             Some(sp) => match &sp.kind {
                                 PatternKind::Var(n) => self.define(n.text.clone(), cur),
-                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
+                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {
+                                    if cur_is_temp {
+                                        self.recycle(cur);
+                                    }
+                                }
                                 _ => {
                                     self.error(
                                         codes::E2011_LOWER,
@@ -1820,7 +1844,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                             );
                             match &ep.kind {
                                 PatternKind::Var(n) => self.define(n.text.clone(), field),
-                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
+                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {
+                                    self.recycle(field);
+                                }
                                 _ => {
                                     self.error(
                                         codes::E2011_LOWER,
@@ -1890,6 +1916,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     g.span,
                 );
                 fail_jumps.push(jmp);
+                self.recycle(gv);
             }
             // Track whether *this* arm's body emitted a terminating op. Looking at
             // `code.last()` alone is wrong when the body is a bare local (no new
@@ -1904,6 +1931,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 );
             if !body_terminated {
                 self.emit(Op::Move { dst, src: body }, clause.body.span);
+                self.recycle(body);
                 let end_jmp = self.code.len();
                 self.emit(Op::Jump { target: 0 }, span);
                 end_jumps.push(end_jmp);
@@ -1918,6 +1946,8 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             }
             self.pop_scope();
         }
+        // Scrutinees are dead once every arm has been lowered.
+        self.recycle_regs(&scruts);
         // No arm matched — defensive panic
         let idx = self.intern_string("internal error: no arm matched".into());
         self.emit(Op::Panic { msg: idx }, span);
@@ -2008,6 +2038,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         seg.span,
                     );
                     fail_jumps.push(jmp);
+                    self.recycle(ok);
                     self.bind_bit_int_pattern(&seg.pattern, value, fail_jumps)?;
                     if cur != scrut {
                         self.recycle(cur);
@@ -2046,6 +2077,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         seg.span,
                     );
                     fail_jumps.push(jmp);
+                    self.recycle(ok);
                     self.recycle(expected);
                     if cur != scrut {
                         self.recycle(cur);
@@ -2090,6 +2122,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         seg.span,
                     );
                     fail_jumps.push(jmp);
+                    self.recycle(ok);
                     match &seg.pattern.kind {
                         PatternKind::Var(n) => self.define(n.text.clone(), value),
                         PatternKind::Discard | PatternKind::UnderscoreName(_) => {
@@ -2129,6 +2162,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 pat.span,
             );
             fail_jumps.push(jmp);
+            self.recycle(empty);
             if cur != scrut {
                 self.recycle(cur);
             }

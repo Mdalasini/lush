@@ -1,0 +1,68 @@
+import lush/io;
+import lush/int;
+
+// #24 §5: E2001 is for >256 *live* values. A long chain of small `case`
+// statements must reuse pattern/scrutinee temps and stay under the limit.
+pub fn main() -> Nil {
+  case 1 < 2 { True -> io.println("a"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("b"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("c"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("d"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("e"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("f"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("g"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("h"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("i"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("j"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("k"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("l"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("m"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("n"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("o"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("p"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("q"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("r"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("s"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("t"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("u"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("v"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("w"); False -> io.println("x"); };
+  case 1 < 2 { True -> io.println("x"); False -> io.println("z"); };
+  case 1 < 2 { True -> io.println("y"); False -> io.println("z"); };
+  case 1 < 2 { True -> io.println("z"); False -> io.println("!"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case 1.0 <. 2.0 { True -> io.println("F"); False -> io.println("x"); };
+  case Ok(1) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  case Ok(2) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  case Ok(3) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  case Ok(4) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  case Ok(5) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  case Ok(6) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  case Ok(7) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  case Ok(8) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  case Ok(9) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  case Ok(10) { Ok(v) -> io.println(int.to_string(v)); Error(_) -> io.println("e"); };
+  let a = case 0 { 0 -> 1; _ -> 2; };
+  let b = case 0 { 0 -> 1; _ -> 2; };
+  let c = case 0 { 0 -> 1; _ -> 2; };
+  let d = case 0 { 0 -> 1; _ -> 2; };
+  let e = case 0 { 0 -> 1; _ -> 2; };
+  let f = case 0 { 0 -> 1; _ -> 2; };
+  let g = case 0 { 0 -> 1; _ -> 2; };
+  let h = case 0 { 0 -> 1; _ -> 2; };
+  let i = case 0 { 0 -> 1; _ -> 2; };
+  let j = case 0 { 0 -> 1; _ -> 2; };
+  io.println(int.to_string(a + b + c + d + e + f + g + h + i + j));
+}

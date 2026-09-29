@@ -268,6 +268,38 @@ fn bitarray_bytes_align_e2e() {
 }
 
 #[test]
+fn case_reg_reuse_e2e() {
+    common::assert_case("case_reg_reuse");
+}
+
+/// #24 §5: a long chain of small `case` statements must not trip E2001.
+#[test]
+fn case_statements_reuse_registers() {
+    let mut body = String::new();
+    for i in 0..100 {
+        body.push_str(&format!(
+            "  case {i} < {j} {{ True -> Nil; False -> Nil; }};\n",
+            j = i + 1
+        ));
+    }
+    let src = format!("pub fn main() -> Nil {{\n{body}}}\n");
+    let program = compile_sources_with_opt(&[("main".into(), src)], "main", OptLevel::O0)
+        .unwrap_or_else(|d| {
+            panic!(
+                "100 case statements must compile without E2001: {:?}",
+                d.iter()
+                    .map(|x| format!("{}:{}", x.code, x.message))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let regs = program.functions.iter().map(|f| f.regs).max().unwrap_or(0);
+    assert!(
+        regs < 64,
+        "expected modest register use for 100 small cases, got {regs}"
+    );
+}
+
+#[test]
 fn numeric_imm_boundary_e2e() {
     common::assert_case("numeric_imm");
 }
