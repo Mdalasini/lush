@@ -287,6 +287,11 @@ fn bitarray_sized_e2e() {
     common::assert_case("bitarray_sized");
 }
 
+#[test]
+fn alt_patterns_e2e() {
+    common::assert_case("alt_patterns");
+}
+
 /// #24 §5: a long chain of small `case` statements must not trip E2001.
 #[test]
 fn case_statements_reuse_registers() {

@@ -1,0 +1,65 @@
+import lush/io;
+import lush/int;
+
+pub fn ints(n) {
+  case n {
+    1 | 2 | 3 -> 100;
+    _ -> 0;
+  };
+}
+
+pub fn two(n) {
+  case n {
+    1 | 2 -> 100;
+    _ -> 0;
+  };
+}
+
+pub fn multi(n) {
+  case n {
+    5 | 6 -> 1;
+    7 | 8 -> 2;
+    _ -> 3;
+  };
+}
+
+pub fn result_alt(r) {
+  case r {
+    Ok(0) | Error(0) -> 1;
+    Ok(_) -> 2;
+    Error(_) -> 3;
+  };
+}
+
+pub fn tuple_alt(p) {
+  case p {
+    #(0, y) | #(y, 0) -> y;
+    #(x, y) -> x * y;
+  };
+}
+
+pub fn main() {
+  io.println(int.to_string(ints(0)));
+  io.println(int.to_string(ints(1)));
+  io.println(int.to_string(ints(2)));
+  io.println(int.to_string(ints(3)));
+  io.println(int.to_string(ints(4)));
+  io.println(int.to_string(ints(5)));
+  io.println(int.to_string(two(0)));
+  io.println(int.to_string(two(1)));
+  io.println(int.to_string(two(2)));
+  io.println(int.to_string(two(3)));
+  io.println(int.to_string(multi(5)));
+  io.println(int.to_string(multi(6)));
+  io.println(int.to_string(multi(7)));
+  io.println(int.to_string(multi(8)));
+  io.println(int.to_string(multi(9)));
+  io.println(int.to_string(result_alt(Ok(0))));
+  io.println(int.to_string(result_alt(Error(0))));
+  io.println(int.to_string(result_alt(Ok(5))));
+  io.println(int.to_string(result_alt(Error(5))));
+  io.println(int.to_string(tuple_alt(#(0, 7))));
+  io.println(int.to_string(tuple_alt(#(8, 0))));
+  io.println(int.to_string(tuple_alt(#(3, 4))));
+  Nil;
+}

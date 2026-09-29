@@ -1530,23 +1530,93 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
 
         for clause in clauses {
             self.push_scope();
-            // Alternatives (`p | q`): try each PatternRow until one matches.
-            // Checkpoint: support a single row (no or-patterns) covering all subjects.
-            let row = match clause.patterns.first() {
-                Some(r) => r,
-                None => {
-                    self.error(codes::E2011_LOWER, "empty clause patterns", span);
-                    return None;
-                }
-            };
-            if row.patterns.len() != scruts.len() {
-                self.error(codes::E2011_LOWER, "clause/subject arity mismatch", span);
+            if clause.patterns.is_empty() {
+                self.error(codes::E2011_LOWER, "empty clause patterns", span);
                 return None;
             }
-            let mut fail_jumps = Vec::new();
-            for (pat, scrut) in row.patterns.iter().zip(scruts.iter()) {
-                self.emit_pattern(pat, *scrut, &mut fail_jumps)?;
+            for row in &clause.patterns {
+                if row.patterns.len() != scruts.len() {
+                    self.error(codes::E2011_LOWER, "clause/subject arity mismatch", span);
+                    return None;
+                }
             }
+
+            let mut arm_fail_jumps = Vec::new();
+            if clause.patterns.len() == 1 {
+                // Common path: one pattern row, bindings live in the clause scope.
+                let row = &clause.patterns[0];
+                for (pat, scrut) in row.patterns.iter().zip(scruts.iter()) {
+                    self.emit_pattern(pat, *scrut, &mut arm_fail_jumps)?;
+                }
+            } else {
+                // Alternatives (`p | q`): each row matches in its own scope, copies
+                // bindings into shared registers, then joins the guard/body. The
+                // last row's failure goes to the next arm.
+                let mut bind_names = Vec::new();
+                let mut seen = HashSet::new();
+                for p in &clause.patterns[0].patterns {
+                    collect_alt_binds(p, &mut bind_names, &mut seen);
+                }
+                let mut shared: HashMap<String, Reg> = HashMap::new();
+                for name in &bind_names {
+                    let r = self.fresh()?;
+                    self.temps.remove(&r);
+                    shared.insert(name.clone(), r);
+                }
+                let mut body_jumps = Vec::new();
+                for (ri, row) in clause.patterns.iter().enumerate() {
+                    self.push_scope();
+                    let mut row_fail = Vec::new();
+                    for (pat, scrut) in row.patterns.iter().zip(scruts.iter()) {
+                        self.emit_pattern(pat, *scrut, &mut row_fail)?;
+                    }
+                    for name in &bind_names {
+                        let Some(src) = self.lookup(name) else {
+                            self.error(
+                                codes::E2011_LOWER,
+                                format!("alternative pattern is missing binding `{name}`"),
+                                row.span,
+                            );
+                            return None;
+                        };
+                        let dst = shared[name];
+                        if src != dst {
+                            self.emit(Op::Move { dst, src }, row.span);
+                        }
+                    }
+                    // Success: pop the row scope, then join the body.
+                    self.pop_scope();
+                    let to_body = self.code.len();
+                    self.emit(Op::Jump { target: 0 }, span);
+                    body_jumps.push(to_body);
+
+                    // Failure: row scope is still active (success pop was skipped).
+                    let fail_pc = self.code.len() as u32;
+                    for j in row_fail {
+                        match &mut self.code[j] {
+                            Op::JumpIfFalse { target, .. } => *target = fail_pc,
+                            Op::SwitchTag { default, .. } => *default = fail_pc,
+                            _ => {}
+                        }
+                    }
+                    self.pop_scope();
+                    if ri + 1 == clause.patterns.len() {
+                        let jmp = self.code.len();
+                        self.emit(Op::Jump { target: 0 }, span);
+                        arm_fail_jumps.push(jmp);
+                    }
+                }
+                let body_pc = self.code.len() as u32;
+                for j in body_jumps {
+                    if let Op::Jump { target } = &mut self.code[j] {
+                        *target = body_pc;
+                    }
+                }
+                for name in &bind_names {
+                    self.define(name.clone(), shared[name]);
+                }
+            }
+
             if let Some(g) = &clause.guard {
                 let gv = self.emit_expr(g, false)?;
                 let jmp = self.code.len();
@@ -1557,7 +1627,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     },
                     g.span,
                 );
-                fail_jumps.push(jmp);
+                arm_fail_jumps.push(jmp);
                 self.recycle(gv);
             }
             // Track whether *this* arm's body emitted a terminating op. Looking at
@@ -1579,10 +1649,11 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 end_jumps.push(end_jmp);
             }
             let fail_pc = self.code.len() as u32;
-            for j in fail_jumps {
+            for j in arm_fail_jumps {
                 match &mut self.code[j] {
                     Op::JumpIfFalse { target, .. } => *target = fail_pc,
                     Op::SwitchTag { default, .. } => *default = fail_pc,
+                    Op::Jump { target } => *target = fail_pc,
                     _ => {}
                 }
             }
@@ -2669,6 +2740,53 @@ fn last_uses_in_block(block: &Block) -> HashMap<String, usize> {
         }
     }
     last
+}
+
+/// Binding names introduced by an alternative pattern row (for shared regs).
+/// Matches step 2's or-pattern check: real variables and aliases only.
+fn collect_alt_binds(pat: &Pattern, names: &mut Vec<String>, seen: &mut HashSet<String>) {
+    match &pat.kind {
+        PatternKind::Var(n) => {
+            if seen.insert(n.text.clone()) {
+                names.push(n.text.clone());
+            }
+        }
+        PatternKind::Alias { pattern, name } => {
+            collect_alt_binds(pattern, names, seen);
+            if seen.insert(name.text.clone()) {
+                names.push(name.text.clone());
+            }
+        }
+        PatternKind::Tuple(ps) => {
+            for p in ps {
+                collect_alt_binds(p, names, seen);
+            }
+        }
+        PatternKind::List { items, spread } => {
+            for p in items {
+                collect_alt_binds(p, names, seen);
+            }
+            if let Some(s) = spread {
+                collect_alt_binds(s, names, seen);
+            }
+        }
+        PatternKind::Constructor {
+            args: Some(args), ..
+        } => {
+            for a in args {
+                if let Some(p) = &a.pattern {
+                    collect_alt_binds(p, names, seen);
+                }
+            }
+        }
+        PatternKind::StringPrefix { rest, .. } => collect_alt_binds(rest, names, seen),
+        PatternKind::BitArray(segs) => {
+            for s in segs {
+                collect_alt_binds(&s.pattern, names, seen);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn note_pat_binds(pat: &Pattern, bound: &mut HashSet<String>) {
