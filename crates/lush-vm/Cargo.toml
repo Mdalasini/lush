@@ -3,8 +3,7 @@ name = "lush-vm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Single-process bytecode interpreter for Lush"
+description = "Integer and control-flow bytecode interpreter foundation for Lush"
 
 [dependencies]
 lush-ir = { path = "../lush-ir" }
-lush-syntax = { workspace = true }

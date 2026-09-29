@@ -31,7 +31,6 @@ pub enum SliceResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VmError {
     InvalidProgram(Vec<VerifyError>),
-    InvalidEntry,
     InvalidArgumentCount { expected: usize, actual: usize },
 }
 
@@ -55,10 +54,7 @@ impl Vm {
     pub fn new(program: Program, arguments: &[Value]) -> Result<Self, VmError> {
         verify(&program).map_err(VmError::InvalidProgram)?;
         let function = program.entry as usize;
-        let entry = program
-            .functions
-            .get(function)
-            .ok_or(VmError::InvalidEntry)?;
+        let entry = &program.functions[function];
         if arguments.len() != entry.arity as usize {
             return Err(VmError::InvalidArgumentCount {
                 expected: entry.arity as usize,
@@ -94,99 +90,59 @@ impl Vm {
         }
         let mut spent = 0;
         while spent < quantum {
-            let function = &self.program.functions[self.function];
-            let instruction = function.code[self.pc].clone();
-            let location = function
-                .locations
-                .get(self.pc)
-                .copied()
-                .unwrap_or(SourceLoc { line: 0, column: 0 });
-            let name = function.name.clone();
+            let pc = self.pc;
+            let instruction = self.program.functions[self.function].code[pc];
             self.pc += 1;
             self.counters.reductions += 1;
             self.counters.instructions += 1;
             spent += 1;
-            let panic = |message: String| Panic {
-                message,
-                location,
-                function: name,
-            };
-            let read_int = |registers: &[Value], r: u8| -> Result<i64, String> {
-                match registers.get(r as usize) {
-                    Some(Value::Int(n)) => Ok(*n),
-                    Some(_) => Err("expected Int".into()),
-                    None => Err("invalid register".into()),
-                }
-            };
             match instruction {
                 Instruction::Move { dst, src } => {
-                    self.registers[dst as usize] = self.registers[src as usize].clone()
+                    self.registers[dst as usize] = self.registers[src as usize].clone();
                 }
                 Instruction::LoadInt { dst, value } => {
-                    self.registers[dst as usize] = Value::Int(value)
+                    self.registers[dst as usize] = Value::Int(value);
                 }
-                Instruction::AddInt { dst, lhs, rhs } => {
-                    let result = read_int(&self.registers, lhs).and_then(|a| {
-                        read_int(&self.registers, rhs)
-                            .and_then(|b| a.checked_add(b).ok_or_else(|| "integer overflow".into()))
+                Instruction::LoadBool { dst, value } => {
+                    self.registers[dst as usize] = Value::Bool(value);
+                }
+                Instruction::AddInt { dst, lhs, rhs }
+                | Instruction::SubInt { dst, lhs, rhs }
+                | Instruction::MulInt { dst, lhs, rhs }
+                | Instruction::DivInt { dst, lhs, rhs }
+                | Instruction::RemInt { dst, lhs, rhs } => {
+                    let result = self.read_int(lhs).and_then(|a| {
+                        self.read_int(rhs)
+                            .and_then(|b| checked_binary(instruction, a, b))
                     });
                     match result {
-                        Ok(n) => self.registers[dst as usize] = Value::Int(n),
-                        Err(m) => return self.finish(Exit::Panicked(panic(m))),
+                        Ok(value) => self.registers[dst as usize] = Value::Int(value),
+                        Err(message) => return self.fail(pc, message),
                     }
                 }
-                Instruction::SubInt { dst, lhs, rhs } => {
-                    let result = read_int(&self.registers, lhs).and_then(|a| {
-                        read_int(&self.registers, rhs)
-                            .and_then(|b| a.checked_sub(b).ok_or_else(|| "integer overflow".into()))
-                    });
-                    match result {
-                        Ok(n) => self.registers[dst as usize] = Value::Int(n),
-                        Err(m) => return self.finish(Exit::Panicked(panic(m))),
-                    }
-                }
-                Instruction::MulInt { dst, lhs, rhs } => {
-                    let result = read_int(&self.registers, lhs).and_then(|a| {
-                        read_int(&self.registers, rhs)
-                            .and_then(|b| a.checked_mul(b).ok_or_else(|| "integer overflow".into()))
-                    });
-                    match result {
-                        Ok(n) => self.registers[dst as usize] = Value::Int(n),
-                        Err(m) => return self.finish(Exit::Panicked(panic(m))),
-                    }
-                }
-                Instruction::DivInt { dst, lhs, rhs } | Instruction::RemInt { dst, lhs, rhs } => {
-                    let is_rem = matches!(instruction, Instruction::RemInt { .. });
-                    let result = read_int(&self.registers, lhs).and_then(|a| {
-                        read_int(&self.registers, rhs).and_then(|b| {
-                            if b == 0 {
-                                Err("division by zero".into())
-                            } else if a == i64::MIN && b == -1 {
-                                Err("integer overflow".into())
-                            } else if is_rem {
-                                Ok(a % b)
-                            } else {
-                                Ok(a / b)
-                            }
+                Instruction::EqInt { dst, lhs, rhs } | Instruction::LtInt { dst, lhs, rhs } => {
+                    let result = self.read_int(lhs).and_then(|a| {
+                        self.read_int(rhs).map(|b| match instruction {
+                            Instruction::EqInt { .. } => a == b,
+                            Instruction::LtInt { .. } => a < b,
+                            _ => unreachable!(),
                         })
                     });
                     match result {
-                        Ok(n) => self.registers[dst as usize] = Value::Int(n),
-                        Err(m) => return self.finish(Exit::Panicked(panic(m))),
+                        Ok(value) => self.registers[dst as usize] = Value::Bool(value),
+                        Err(message) => return self.fail(pc, message),
                     }
                 }
                 Instruction::Jump { target } => self.pc = target as usize,
-                Instruction::JumpIfFalse { condition, target } => match self.registers
-                    [condition as usize]
-                {
-                    Value::Bool(false) => self.pc = target as usize,
-                    Value::Bool(true) => {}
-                    _ => {
-                        return self.finish(Exit::Panicked(panic("expected Bool condition".into())))
+                Instruction::JumpIfFalse { condition, target } => {
+                    match self.registers[condition as usize] {
+                        Value::Bool(false) => self.pc = target as usize,
+                        Value::Bool(true) => {}
+                        _ => return self.fail(pc, "expected Bool condition"),
                     }
-                },
+                }
                 Instruction::Return { src } => {
-                    return self.finish(Exit::Returned(self.registers[src as usize].clone()))
+                    return self.finish(Exit::Returned(self.registers[src as usize].clone()));
                 }
             }
         }
@@ -201,9 +157,46 @@ impl Vm {
         }
     }
 
+    fn read_int(&self, register: u8) -> Result<i64, &'static str> {
+        match &self.registers[register as usize] {
+            Value::Int(n) => Ok(*n),
+            _ => Err("expected Int"),
+        }
+    }
+
+    fn fail(&mut self, pc: usize, message: impl Into<String>) -> SliceResult {
+        let function = &self.program.functions[self.function];
+        let panic = Panic {
+            message: message.into(),
+            location: function.locations[pc],
+            function: function.name.clone(),
+        };
+        self.finish(Exit::Panicked(panic))
+    }
+
     fn finish(&mut self, exit: Exit) -> SliceResult {
         self.done = Some(exit.clone());
         SliceResult::Done(exit)
+    }
+}
+
+fn checked_binary(instruction: Instruction, lhs: i64, rhs: i64) -> Result<i64, &'static str> {
+    match instruction {
+        Instruction::AddInt { .. } => lhs.checked_add(rhs).ok_or("integer overflow"),
+        Instruction::SubInt { .. } => lhs.checked_sub(rhs).ok_or("integer overflow"),
+        Instruction::MulInt { .. } => lhs.checked_mul(rhs).ok_or("integer overflow"),
+        Instruction::DivInt { .. } | Instruction::RemInt { .. } => {
+            if rhs == 0 {
+                Err("division by zero")
+            } else if lhs == i64::MIN && rhs == -1 {
+                Err("integer overflow")
+            } else if matches!(instruction, Instruction::DivInt { .. }) {
+                Ok(lhs / rhs)
+            } else {
+                Ok(lhs % rhs)
+            }
+        }
+        _ => unreachable!("checked_binary is only called for integer arithmetic"),
     }
 }
 
@@ -212,13 +205,18 @@ mod tests {
     use super::*;
     use lush_ir::{Function, Program};
 
-    fn program(code: Vec<Instruction>) -> Program {
-        let locations = vec![SourceLoc { line: 1, column: 1 }; code.len()];
+    fn program(code: Vec<Instruction>, arity: u8) -> Program {
+        let locations = (0..code.len())
+            .map(|pc| SourceLoc {
+                line: 1,
+                column: pc as u32 + 1,
+            })
+            .collect();
         Program {
             functions: vec![Function {
                 name: "main".into(),
-                arity: 0,
-                register_count: 2,
+                arity,
+                register_count: 4,
                 code,
                 locations,
             }],
@@ -226,18 +224,45 @@ mod tests {
         }
     }
 
+    fn run_binary(op: Instruction, lhs: i64, rhs: i64) -> Exit {
+        let (dst, left, right) = match op {
+            Instruction::AddInt { dst, lhs, rhs }
+            | Instruction::SubInt { dst, lhs, rhs }
+            | Instruction::MulInt { dst, lhs, rhs }
+            | Instruction::DivInt { dst, lhs, rhs }
+            | Instruction::RemInt { dst, lhs, rhs } => (dst, lhs, rhs),
+            _ => panic!("expected binary arithmetic instruction"),
+        };
+        let code = vec![
+            Instruction::LoadInt {
+                dst: left,
+                value: lhs,
+            },
+            Instruction::LoadInt {
+                dst: right,
+                value: rhs,
+            },
+            op,
+            Instruction::Return { src: dst },
+        ];
+        Vm::new(program(code, 0), &[]).unwrap().run_to_completion()
+    }
+
     #[test]
     fn quantum_yields_and_resume_returns_value() {
-        let p = program(vec![
-            Instruction::LoadInt { dst: 0, value: 40 },
-            Instruction::LoadInt { dst: 1, value: 2 },
-            Instruction::AddInt {
-                dst: 0,
-                lhs: 0,
-                rhs: 1,
-            },
-            Instruction::Return { src: 0 },
-        ]);
+        let p = program(
+            vec![
+                Instruction::LoadInt { dst: 0, value: 40 },
+                Instruction::LoadInt { dst: 1, value: 2 },
+                Instruction::AddInt {
+                    dst: 0,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Instruction::Return { src: 0 },
+            ],
+            0,
+        );
         let mut vm = Vm::new(p, &[]).unwrap();
         assert_eq!(vm.run_slice(1), SliceResult::Yielded);
         assert_eq!(vm.counters().reductions, 1);
@@ -246,25 +271,271 @@ mod tests {
     }
 
     #[test]
-    fn checked_overflow_panics_at_instruction_location() {
-        let p = program(vec![
-            Instruction::LoadInt {
-                dst: 0,
-                value: i64::MAX,
-            },
-            Instruction::LoadInt { dst: 1, value: 1 },
-            Instruction::AddInt {
-                dst: 0,
-                lhs: 0,
-                rhs: 1,
-            },
-            Instruction::Return { src: 0 },
-        ]);
+    fn arithmetic_uses_checked_integer_semantics() {
+        let cases = [
+            (
+                Instruction::SubInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                9,
+                4,
+                Exit::Returned(Value::Int(5)),
+            ),
+            (
+                Instruction::MulInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                6,
+                -7,
+                Exit::Returned(Value::Int(-42)),
+            ),
+            (
+                Instruction::DivInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                -7,
+                2,
+                Exit::Returned(Value::Int(-3)),
+            ),
+            (
+                Instruction::RemInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                -7,
+                2,
+                Exit::Returned(Value::Int(-1)),
+            ),
+            (
+                Instruction::DivInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                7,
+                -2,
+                Exit::Returned(Value::Int(-3)),
+            ),
+            (
+                Instruction::RemInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                7,
+                -2,
+                Exit::Returned(Value::Int(1)),
+            ),
+            (
+                Instruction::SubInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                i64::MIN,
+                1,
+                Exit::Panicked(panic_value("integer overflow")),
+            ),
+            (
+                Instruction::MulInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                i64::MIN,
+                -1,
+                Exit::Panicked(panic_value("integer overflow")),
+            ),
+            (
+                Instruction::DivInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                7,
+                0,
+                Exit::Panicked(panic_value("division by zero")),
+            ),
+            (
+                Instruction::DivInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                i64::MIN,
+                -1,
+                Exit::Panicked(panic_value("integer overflow")),
+            ),
+            (
+                Instruction::RemInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                i64::MIN,
+                -1,
+                Exit::Panicked(panic_value("integer overflow")),
+            ),
+        ];
+        for (instruction, lhs, rhs, expected) in cases {
+            let actual = run_binary(instruction, lhs, rhs);
+            match (actual, expected) {
+                (Exit::Panicked(actual), Exit::Panicked(expected)) => {
+                    assert_eq!(actual.message, expected.message)
+                }
+                (actual, expected) => assert_eq!(actual, expected),
+            }
+        }
+    }
+
+    fn panic_value(message: &str) -> Panic {
+        Panic {
+            message: message.into(),
+            location: SourceLoc { line: 1, column: 3 },
+            function: "main".into(),
+        }
+    }
+
+    #[test]
+    fn comparison_and_conditional_jump_cover_both_branches() {
+        let branch = |condition| {
+            program(
+                vec![
+                    Instruction::LoadBool {
+                        dst: 0,
+                        value: condition,
+                    },
+                    Instruction::JumpIfFalse {
+                        condition: 0,
+                        target: 3,
+                    },
+                    Instruction::LoadInt { dst: 1, value: 10 },
+                    Instruction::Return { src: 1 },
+                ],
+                0,
+            )
+        };
+        assert_eq!(
+            Vm::new(branch(true), &[]).unwrap().run_to_completion(),
+            Exit::Returned(Value::Int(10))
+        );
+        assert_eq!(
+            Vm::new(branch(false), &[]).unwrap().run_to_completion(),
+            Exit::Returned(Value::Nil)
+        );
+
+        let compare = program(
+            vec![
+                Instruction::LoadInt { dst: 0, value: 2 },
+                Instruction::LoadInt { dst: 1, value: 3 },
+                Instruction::LtInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Instruction::Return { src: 2 },
+            ],
+            0,
+        );
+        assert_eq!(
+            Vm::new(compare, &[]).unwrap().run_to_completion(),
+            Exit::Returned(Value::Bool(true))
+        );
+        let equal = program(
+            vec![
+                Instruction::LoadInt { dst: 0, value: 3 },
+                Instruction::LoadInt { dst: 1, value: 3 },
+                Instruction::EqInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Instruction::Return { src: 2 },
+            ],
+            0,
+        );
+        assert_eq!(
+            Vm::new(equal, &[]).unwrap().run_to_completion(),
+            Exit::Returned(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn jump_loop_resumes_without_repeating_work() {
+        let p = program(
+            vec![
+                Instruction::LoadInt { dst: 0, value: 0 },
+                Instruction::LoadInt { dst: 1, value: 3 },
+                Instruction::LoadInt { dst: 2, value: 1 },
+                Instruction::LtInt {
+                    dst: 3,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Instruction::JumpIfFalse {
+                    condition: 3,
+                    target: 7,
+                },
+                Instruction::AddInt {
+                    dst: 0,
+                    lhs: 0,
+                    rhs: 2,
+                },
+                Instruction::Jump { target: 3 },
+                Instruction::Return { src: 0 },
+            ],
+            0,
+        );
         let mut vm = Vm::new(p, &[]).unwrap();
-        let Exit::Panicked(panic) = vm.run_to_completion() else {
+        while vm.run_slice(2) == SliceResult::Yielded {}
+        assert_eq!(vm.run_to_completion(), Exit::Returned(Value::Int(3)));
+        assert_eq!(vm.counters().reductions, 18);
+    }
+
+    #[test]
+    fn arguments_are_installed_in_parameter_registers() {
+        let p = program(
+            vec![
+                Instruction::Move { dst: 1, src: 0 },
+                Instruction::Return { src: 1 },
+            ],
+            1,
+        );
+        assert_eq!(
+            Vm::new(p, &[Value::Int(17)]).unwrap().run_to_completion(),
+            Exit::Returned(Value::Int(17))
+        );
+    }
+
+    #[test]
+    fn arithmetic_panic_uses_the_operator_location() {
+        let p = program(
+            vec![
+                Instruction::LoadInt {
+                    dst: 0,
+                    value: i64::MAX,
+                },
+                Instruction::LoadInt { dst: 1, value: 1 },
+                Instruction::AddInt {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Instruction::Return { src: 2 },
+            ],
+            0,
+        );
+        let Exit::Panicked(panic) = Vm::new(p, &[]).unwrap().run_to_completion() else {
             panic!("expected panic")
         };
         assert_eq!(panic.message, "integer overflow");
-        assert_eq!(panic.location, SourceLoc { line: 1, column: 1 });
+        assert_eq!(panic.location, SourceLoc { line: 1, column: 3 });
     }
 }

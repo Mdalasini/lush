@@ -98,7 +98,6 @@ name = "lush-ir"
 version = "0.1.0"
 dependencies = [
  "lush-syntax",
- "lush-types",
 ]
 
 [[package]]
@@ -132,7 +131,6 @@ name = "lush-vm"
 version = "0.1.0"
 dependencies = [
  "lush-ir",
- "lush-syntax",
 ]
 
 [[package]]
