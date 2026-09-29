@@ -292,6 +292,11 @@ fn alt_patterns_e2e() {
     common::assert_case("alt_patterns");
 }
 
+#[test]
+fn string_literal_pattern_e2e() {
+    common::assert_case("string_literal_pattern");
+}
+
 /// #24 §5: a long chain of small `case` statements must not trip E2001.
 #[test]
 fn case_statements_reuse_registers() {

@@ -372,6 +372,18 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
         id
     }
 
+    fn intern_float(&mut self, v: f64) -> ConstId {
+        if let Some(i) = self.m.constants.iter().position(|c| match c {
+            Constant::Float(t) => t.to_bits() == v.to_bits(),
+            _ => false,
+        }) {
+            return i as ConstId;
+        }
+        let id = self.m.constants.len() as ConstId;
+        self.m.constants.push(Constant::Float(v));
+        id
+    }
+
     fn emit_block(&mut self, block: &Block, tail: bool) -> Option<Reg> {
         self.push_scope();
         let last_use = last_uses_in_block(block);
@@ -1934,6 +1946,31 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             PatternKind::BitArray(segs) => {
                 self.emit_bit_array_pattern(pat, segs, scrut, fail_jumps)?;
             }
+            PatternKind::String(lit) => {
+                let expected = self.fresh()?;
+                let idx = self.intern_string(lit.value.clone());
+                self.emit(Op::LoadConst { dst: expected, idx }, pat.span);
+                let ok = self.fresh()?;
+                self.emit(
+                    Op::Eq {
+                        dst: ok,
+                        a: scrut,
+                        b: expected,
+                    },
+                    pat.span,
+                );
+                let jmp = self.code.len();
+                self.emit(
+                    Op::JumpIfFalse {
+                        cond: ok,
+                        target: 0,
+                    },
+                    pat.span,
+                );
+                fail_jumps.push(jmp);
+                self.recycle(expected);
+                self.recycle(ok);
+            }
             PatternKind::StringPrefix { prefix, rest } => {
                 let expected = self.fresh()?;
                 let idx = self.intern_string(prefix.value.clone());
@@ -1962,6 +1999,32 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 self.recycle(ok);
                 self.emit_pattern(rest, rest_r, fail_jumps)?;
                 self.recycle(rest_r);
+            }
+            PatternKind::Float(lit) => {
+                let v = numeric::parse_float_literal(&lit.raw).ok()?;
+                let expected = self.fresh()?;
+                let idx = self.intern_float(v);
+                self.emit(Op::LoadConst { dst: expected, idx }, pat.span);
+                let ok = self.fresh()?;
+                self.emit(
+                    Op::Eq {
+                        dst: ok,
+                        a: scrut,
+                        b: expected,
+                    },
+                    pat.span,
+                );
+                let jmp = self.code.len();
+                self.emit(
+                    Op::JumpIfFalse {
+                        cond: ok,
+                        target: 0,
+                    },
+                    pat.span,
+                );
+                fail_jumps.push(jmp);
+                self.recycle(expected);
+                self.recycle(ok);
             }
             other => {
                 let msg = match other {
@@ -2664,6 +2727,12 @@ fn collect_free_vars_expr(expr: &Expr, bound: &mut HashSet<String>, on_free: &mu
                     stack.push(s);
                 }
                 for c in clauses {
+                    // Size vars in patterns refer to the outer scope, before arm binds.
+                    for row in &c.patterns {
+                        for p in &row.patterns {
+                            collect_pat_free_vars(p, bound, on_free);
+                        }
+                    }
                     let mut arm_bound = bound.clone();
                     for row in &c.patterns {
                         for p in &row.patterns {
@@ -2740,6 +2809,47 @@ fn last_uses_in_block(block: &Block) -> HashMap<String, usize> {
         }
     }
     last
+}
+
+/// Free variables referenced from patterns (bit-array `:size(k)`, nested).
+fn collect_pat_free_vars(pat: &Pattern, bound: &HashSet<String>, on_free: &mut dyn FnMut(&str)) {
+    match &pat.kind {
+        PatternKind::Alias { pattern, .. } => collect_pat_free_vars(pattern, bound, on_free),
+        PatternKind::Tuple(ps) => {
+            for p in ps {
+                collect_pat_free_vars(p, bound, on_free);
+            }
+        }
+        PatternKind::List { items, spread } => {
+            for p in items {
+                collect_pat_free_vars(p, bound, on_free);
+            }
+            if let Some(s) = spread {
+                collect_pat_free_vars(s, bound, on_free);
+            }
+        }
+        PatternKind::Constructor {
+            args: Some(args), ..
+        } => {
+            for a in args {
+                if let Some(p) = &a.pattern {
+                    collect_pat_free_vars(p, bound, on_free);
+                }
+            }
+        }
+        PatternKind::StringPrefix { rest, .. } => collect_pat_free_vars(rest, bound, on_free),
+        PatternKind::BitArray(segs) => {
+            for s in segs {
+                collect_pat_free_vars(&s.pattern, bound, on_free);
+                for opt in &s.options {
+                    if let BitOption::Size(e) = opt {
+                        collect_free_vars_expr(e, &mut bound.clone(), on_free);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Binding names introduced by an alternative pattern row (for shared regs).
@@ -2892,6 +3002,11 @@ fn note_var_uses(
                     stack.push(s);
                 }
                 for c in clauses {
+                    for row in &c.patterns {
+                        for p in &row.patterns {
+                            note_pat_var_uses(p, stmt_i, bound, last);
+                        }
+                    }
                     if let Some(g) = &c.guard {
                         stack.push(g);
                     }
@@ -2907,10 +3022,61 @@ fn note_var_uses(
             ExprKind::BitArray(segs) => {
                 for s in segs {
                     stack.push(&s.value);
+                    for opt in &s.options {
+                        if let BitOption::Size(e) = opt {
+                            stack.push(e);
+                        }
+                    }
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// Record uses of outer locals inside patterns (e.g. bit-array `:size(k)`).
+fn note_pat_var_uses(
+    pat: &Pattern,
+    stmt_i: usize,
+    bound: &HashSet<String>,
+    last: &mut HashMap<String, usize>,
+) {
+    match &pat.kind {
+        PatternKind::Alias { pattern, .. } => note_pat_var_uses(pattern, stmt_i, bound, last),
+        PatternKind::Tuple(ps) => {
+            for p in ps {
+                note_pat_var_uses(p, stmt_i, bound, last);
+            }
+        }
+        PatternKind::List { items, spread } => {
+            for p in items {
+                note_pat_var_uses(p, stmt_i, bound, last);
+            }
+            if let Some(s) = spread {
+                note_pat_var_uses(s, stmt_i, bound, last);
+            }
+        }
+        PatternKind::Constructor {
+            args: Some(args), ..
+        } => {
+            for a in args {
+                if let Some(p) = &a.pattern {
+                    note_pat_var_uses(p, stmt_i, bound, last);
+                }
+            }
+        }
+        PatternKind::StringPrefix { rest, .. } => note_pat_var_uses(rest, stmt_i, bound, last),
+        PatternKind::BitArray(segs) => {
+            for s in segs {
+                note_pat_var_uses(&s.pattern, stmt_i, bound, last);
+                for opt in &s.options {
+                    if let BitOption::Size(e) = opt {
+                        note_var_uses(e, stmt_i, bound, last);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 

@@ -1,0 +1,41 @@
+import lush/io;
+import lush/int;
+
+pub fn classify(s) {
+  case s {
+    "" -> 0;
+    "ab" -> 1;
+    "ab" <> rest -> 2;
+    _ -> 3;
+  };
+}
+
+pub fn float_lit(x) {
+  case x {
+    0.0 -> 1;
+    1.5 -> 2;
+    _ -> 0;
+  };
+}
+
+pub fn sized_from_outer(bits) {
+  let k = 8;
+  case bits {
+    <<x:size(k)>> -> x;
+    _ -> -1;
+  };
+}
+
+pub fn main() {
+  io.println(int.to_string(classify("")));
+  io.println(int.to_string(classify("ab")));
+  io.println(int.to_string(classify("abcd")));
+  io.println(int.to_string(classify("z")));
+  io.println(int.to_string(float_lit(0.0)));
+  io.println(int.to_string(float_lit(-0.0)));
+  io.println(int.to_string(float_lit(1.5)));
+  io.println(int.to_string(float_lit(2.0)));
+  io.println(int.to_string(sized_from_outer(<<255>>)));
+  io.println(int.to_string(sized_from_outer(<<1, 2>>)));
+  Nil;
+}
