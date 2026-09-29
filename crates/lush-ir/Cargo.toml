@@ -1,0 +1,9 @@
+[package]
+name = "lush-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Register bytecode representation and verifier foundation for Lush"
+
+[dependencies]
+lush-syntax = { workspace = true }

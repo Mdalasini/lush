@@ -1,0 +1,9 @@
+[package]
+name = "lush-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Integer and control-flow bytecode interpreter foundation for Lush"
+
+[dependencies]
+lush-ir = { workspace = true }
