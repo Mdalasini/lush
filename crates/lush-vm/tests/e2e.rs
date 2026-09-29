@@ -209,6 +209,11 @@ fn opt_live_local_e2e() {
 }
 
 #[test]
+fn use_callback_e2e() {
+    common::assert_case("use_callback");
+}
+
+#[test]
 fn numeric_imm_boundary_e2e() {
     common::assert_case("numeric_imm");
 }

@@ -1,0 +1,17 @@
+import lush/io;
+import lush/int;
+
+fn with(x: Int, f: fn(Int) -> Nil) -> Nil {
+  f(x);
+}
+
+fn pair(x: Int, y: Int, f: fn(Int, Int) -> Nil) -> Nil {
+  f(x, y);
+}
+
+pub fn main() -> Nil {
+  use n <- with(7);
+  io.println(int.to_string(n));
+  use a, b <- pair(10, 20);
+  io.println(int.to_string(a + b));
+}
