@@ -205,56 +205,75 @@ fn count_block_nodes(b: &lush_syntax::ast::Block) -> usize {
 
 fn count_expr_nodes(e: &lush_syntax::ast::Expr) -> usize {
     use lush_syntax::ast::ExprKind;
-    let mut n = 1usize;
-    match &e.kind {
-        ExprKind::Tuple(xs) | ExprKind::List { items: xs, .. } => {
-            for x in xs {
-                n = n.saturating_add(count_expr_nodes(x));
-            }
+    // Iterative so a left-nested 4096-term chain does not blow the native stack.
+    let mut n = 0usize;
+    let mut stack: Vec<&lush_syntax::ast::Expr> = vec![e];
+    while let Some(e) = stack.pop() {
+        n = n.saturating_add(1);
+        if n > limits::MAX_NODES_PER_MODULE {
+            return n;
         }
-        ExprKind::Call { callee, args } => {
-            n = n.saturating_add(count_expr_nodes(callee));
-            for a in args {
-                if let lush_syntax::ast::ArgValue::Expr(e) = &a.value {
-                    n = n.saturating_add(count_expr_nodes(e));
+        match &e.kind {
+            ExprKind::Tuple(xs) => {
+                for x in xs {
+                    stack.push(x);
                 }
             }
-        }
-        ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
-            n = n.saturating_add(count_expr_nodes(left));
-            n = n.saturating_add(count_expr_nodes(right));
-        }
-        ExprKind::Unary { expr, .. }
-        | ExprKind::Paren(expr)
-        | ExprKind::Echo(expr)
-        | ExprKind::Field { base: expr, .. }
-        | ExprKind::Assert { expr, .. } => {
-            n = n.saturating_add(count_expr_nodes(expr));
-        }
-        ExprKind::Fn { body, .. } | ExprKind::Block(body) => {
-            n = n.saturating_add(count_block_nodes(body));
-        }
-        ExprKind::Case { subjects, clauses } => {
-            for s in subjects {
-                n = n.saturating_add(count_expr_nodes(s));
+            ExprKind::List { items, spread } => {
+                for x in items {
+                    stack.push(x);
+                }
+                if let Some(s) = spread {
+                    stack.push(s);
+                }
             }
-            for c in clauses {
-                n = n.saturating_add(count_expr_nodes(&c.body));
-                n = n.saturating_add(c.patterns.len());
+            ExprKind::Call { callee, args } => {
+                stack.push(callee);
+                for a in args {
+                    if let lush_syntax::ast::ArgValue::Expr(inner) = &a.value {
+                        stack.push(inner);
+                    }
+                }
             }
-        }
-        ExprKind::BitArray(segs) => {
-            for s in segs {
-                n = n.saturating_add(count_expr_nodes(&s.value));
+            ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
+                stack.push(right);
+                stack.push(left);
             }
-        }
-        ExprKind::RecordUpdate { base, fields, .. } => {
-            n = n.saturating_add(count_expr_nodes(base));
-            for (_, e) in fields {
-                n = n.saturating_add(count_expr_nodes(e));
+            ExprKind::Unary { expr, .. }
+            | ExprKind::Paren(expr)
+            | ExprKind::Echo(expr)
+            | ExprKind::Field { base: expr, .. }
+            | ExprKind::Assert { expr, .. } => {
+                stack.push(expr);
             }
+            ExprKind::Fn { body, .. } | ExprKind::Block(body) => {
+                n = n.saturating_add(count_block_nodes(body));
+            }
+            ExprKind::Case { subjects, clauses } => {
+                for s in subjects {
+                    stack.push(s);
+                }
+                for c in clauses {
+                    stack.push(&c.body);
+                    if let Some(g) = &c.guard {
+                        stack.push(g);
+                    }
+                    n = n.saturating_add(c.patterns.len());
+                }
+            }
+            ExprKind::BitArray(segs) => {
+                for s in segs {
+                    stack.push(&s.value);
+                }
+            }
+            ExprKind::RecordUpdate { base, fields, .. } => {
+                stack.push(base);
+                for (_, v) in fields {
+                    stack.push(v);
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
     n
 }

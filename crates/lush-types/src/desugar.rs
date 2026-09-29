@@ -360,9 +360,17 @@ fn desugar_expr(
                     }),
                 ),
             );
-            while let ExprKind::Pipe { left, right } = cur.kind {
-                stages.push(*right);
-                cur = *left;
+            loop {
+                match std::mem::replace(&mut cur.kind, ExprKind::Todo { message: None }) {
+                    ExprKind::Pipe { left, right } => {
+                        stages.push(*right);
+                        cur = *left;
+                    }
+                    other => {
+                        cur.kind = other;
+                        break;
+                    }
+                }
             }
             stages.reverse();
             desugar_expr(&mut cur, sink, used, gensyms);
@@ -498,9 +506,28 @@ fn desugar_expr(
                 }
             }
         }
-        ExprKind::Binary { left, right, .. } => {
-            desugar_expr(left, sink, used, gensyms);
-            desugar_expr(right, sink, used, gensyms);
+        ExprKind::Binary { .. } => {
+            // Walk a left-associative spine iteratively so a 4096-term chain
+            // does not recurse on the native stack.
+            let mut rights: Vec<*mut Expr> = Vec::new();
+            let mut cur: *mut Expr = expr;
+            loop {
+                // SAFETY: pointers are unique exclusive borrows into this tree.
+                let e = unsafe { &mut *cur };
+                match &mut e.kind {
+                    ExprKind::Binary { left, right, .. } => {
+                        rights.push(right.as_mut() as *mut Expr);
+                        cur = left.as_mut() as *mut Expr;
+                    }
+                    _ => {
+                        rights.push(cur);
+                        break;
+                    }
+                }
+            }
+            for ptr in rights.into_iter().rev() {
+                desugar_expr(unsafe { &mut *ptr }, sink, used, gensyms);
+            }
         }
         ExprKind::Field { base: left, .. } => {
             desugar_expr(left, sink, used, gensyms);
@@ -551,34 +578,45 @@ fn desugar_expr(
 }
 
 fn contains_hole(e: &Expr) -> bool {
-    match &e.kind {
-        ExprKind::Call { args, callee } => {
-            args.iter().any(|a| matches!(a.value, ArgValue::Hole))
-                || contains_hole(callee)
-                || args.iter().any(|a| {
-                    if let ArgValue::Expr(e) = &a.value {
-                        contains_hole(e)
-                    } else {
-                        false
+    let mut stack: Vec<&Expr> = vec![e];
+    while let Some(e) = stack.pop() {
+        match &e.kind {
+            ExprKind::Call { args, callee } => {
+                if args.iter().any(|a| matches!(a.value, ArgValue::Hole)) {
+                    return true;
+                }
+                stack.push(callee);
+                for a in args {
+                    if let ArgValue::Expr(inner) = &a.value {
+                        stack.push(inner);
                     }
-                })
+                }
+            }
+            ExprKind::Pipe { left, right } | ExprKind::Binary { left, right, .. } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            ExprKind::Unary { expr, .. }
+            | ExprKind::Paren(expr)
+            | ExprKind::Echo(expr)
+            | ExprKind::Field { base: expr, .. } => stack.push(expr),
+            ExprKind::Tuple(xs) | ExprKind::List { items: xs, .. } => {
+                for x in xs {
+                    stack.push(x);
+                }
+            }
+            ExprKind::Fn { .. } => {}
+            _ => {}
         }
-        ExprKind::Pipe { left, right } => contains_hole(left) || contains_hole(right),
-        ExprKind::Binary { left, right, .. } => contains_hole(left) || contains_hole(right),
-        ExprKind::Unary { expr, .. }
-        | ExprKind::Paren(expr)
-        | ExprKind::Echo(expr)
-        | ExprKind::Field { base: expr, .. } => contains_hole(expr),
-        ExprKind::Tuple(xs) | ExprKind::List { items: xs, .. } => xs.iter().any(contains_hole),
-        ExprKind::Fn { .. } => false,
-        _ => false,
     }
+    false
 }
 
-fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
+fn pipe_apply(value: Expr, mut right: Expr, sink: &mut TypeSink) -> Expr {
     let value_span = value.span;
     let span = Span::new(value_span.start.as_usize(), right.span.end.as_usize());
-    match right.kind {
+    let right_span = right.span;
+    match std::mem::replace(&mut right.kind, ExprKind::Todo { message: None }) {
         ExprKind::Call { callee, mut args } => {
             let hole_idx: Vec<usize> = args
                 .iter()
@@ -609,25 +647,29 @@ fn pipe_apply(value: Expr, right: Expr, sink: &mut TypeSink) -> Expr {
             }
             Expr::new(span, ExprKind::Call { callee, args })
         }
-        ExprKind::Var(_)
+        other @ (ExprKind::Var(_)
         | ExprKind::Field { .. }
         | ExprKind::Constructor(_)
-        | ExprKind::Fn { .. } => Expr::new(
-            span,
-            ExprKind::Call {
-                callee: Box::new(right),
-                args: vec![Arg {
-                    label: None,
-                    value: ArgValue::Expr(value),
-                    span: value_span,
-                }],
-            },
-        ),
-        _ => {
+        | ExprKind::Fn { .. }) => {
+            right.kind = other;
+            Expr::new(
+                span,
+                ExprKind::Call {
+                    callee: Box::new(right),
+                    args: vec![Arg {
+                        label: None,
+                        value: ArgValue::Expr(value),
+                        span: value_span,
+                    }],
+                },
+            )
+        }
+        other => {
+            right.kind = other;
             sink.error(
                 codes::E1105_BAD_PIPE_RHS,
                 "pipe right-hand side must be a function, constructor, or call",
-                right.span,
+                right_span,
                 None,
             );
             Expr::new(

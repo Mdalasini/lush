@@ -4,6 +4,7 @@
 //! lexical forms in §3.
 
 pub mod ast;
+mod ast_mem;
 pub mod codes;
 pub mod diagnostic;
 pub mod formatter;

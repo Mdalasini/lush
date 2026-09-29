@@ -174,7 +174,7 @@ pub struct UseStmt {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
@@ -748,7 +748,10 @@ pub mod equiv {
             ExprKind::Echo(e) => ExprKind::Echo(Box::new(strip_expr(e))),
             ExprKind::Block(b) => ExprKind::Block(strip_block(b)),
             // Handled by strip_expr before this match.
-            ExprKind::Paren(inner) => strip_expr(inner).kind,
+            ExprKind::Paren(inner) => {
+                let mut e = strip_expr(inner);
+                std::mem::replace(&mut e.kind, ExprKind::Todo { message: None })
+            }
         }
     }
 

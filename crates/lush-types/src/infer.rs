@@ -866,9 +866,20 @@ fn walk_expr_names_scoped_expr<'a>(
                 }
             }
         }
-        ExprKind::Pipe { left, right } | ExprKind::Binary { left, right, .. } => {
-            walk_expr_names_scoped_expr(left, out, locals);
-            walk_expr_names_scoped_expr(right, out, locals);
+        ExprKind::Pipe { .. } | ExprKind::Binary { .. } => {
+            // Flatten left-assoc spines iteratively (4096-term chains).
+            let mut rights: Vec<&Expr> = Vec::new();
+            let mut cur = e;
+            while let ExprKind::Pipe { left, right } | ExprKind::Binary { left, right, .. } =
+                &cur.kind
+            {
+                rights.push(right.as_ref());
+                cur = left.as_ref();
+            }
+            walk_expr_names_scoped_expr(cur, out, locals);
+            for r in rights.into_iter().rev() {
+                walk_expr_names_scoped_expr(r, out, locals);
+            }
         }
         ExprKind::Unary { expr, .. }
         | ExprKind::Paren(expr)
@@ -1987,7 +1998,16 @@ fn infer_expr_inner(ctx: &mut InferCtx<'_>, expr: &Expr) -> Type {
                 }
             }
         }
-        ExprKind::Binary { left, op, right } => infer_binop(ctx, left, *op, right, expr.span),
+        ExprKind::Binary { op, .. } => {
+            if is_left_assoc_chainable(*op) {
+                infer_left_assoc_binop_chain(ctx, expr, *op)
+            } else {
+                let ExprKind::Binary { left, right, .. } = &expr.kind else {
+                    unreachable!()
+                };
+                infer_binop(ctx, left, *op, right, expr.span)
+            }
+        }
         ExprKind::Call { callee, args } => infer_call(ctx, callee, args, expr.span),
         ExprKind::Field { base, field } => infer_field(ctx, base, field, expr.span),
         ExprKind::RecordUpdate {
@@ -2102,12 +2122,70 @@ fn infer_constructor(ctx: &mut InferCtx<'_>, c: &ConstructorRef, span: Span) -> 
     }
 }
 
+fn is_left_assoc_chainable(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Add
+            | BinOp::AddFloat
+            | BinOp::Sub
+            | BinOp::SubFloat
+            | BinOp::Mul
+            | BinOp::MulFloat
+            | BinOp::Div
+            | BinOp::DivFloat
+            | BinOp::Rem
+            | BinOp::Concat
+    )
+}
+
+/// Infer a left-associative operator spine iteratively so a 4096-term chain does
+/// not recurse on the native stack. Intermediate binary nodes are recorded in
+/// the typed handoff; the outermost node's type is returned to `infer_expr_shared`.
+fn infer_left_assoc_binop_chain(ctx: &mut InferCtx<'_>, expr: &Expr, op: BinOp) -> Type {
+    let mut spine: Vec<&Expr> = Vec::new();
+    let mut cur = expr;
+    while let ExprKind::Binary { op: o, left, .. } = &cur.kind {
+        if *o != op {
+            break;
+        }
+        spine.push(cur);
+        cur = left.as_ref();
+    }
+    let mut acc = infer_expr(ctx, cur);
+    for (i, bin) in spine.iter().copied().rev().enumerate() {
+        let ExprKind::Binary { left, right, .. } = &bin.kind else {
+            unreachable!()
+        };
+        let rt = infer_expr(ctx, right);
+        let result = apply_binop(ctx, op, &acc, left.span, &rt, right.span, bin.span);
+        // Outermost is finished by `infer_expr_shared`; record inners here.
+        if i + 1 != spine.len() && !bin.id.is_none() {
+            ctx.typed.begin_expr(bin.id, bin.span);
+            ctx.typed.finish_expr(bin.id, result.clone());
+        }
+        acc = result;
+    }
+    acc
+}
+
 fn infer_binop(ctx: &mut InferCtx<'_>, left: &Expr, op: BinOp, right: &Expr, span: Span) -> Type {
     let lt = infer_expr(ctx, left);
     let rt = infer_expr(ctx, right);
+    apply_binop(ctx, op, &lt, left.span, &rt, right.span, span)
+}
+
+fn apply_binop(
+    ctx: &mut InferCtx<'_>,
+    op: BinOp,
+    lt: &Type,
+    left_span: Span,
+    rt: &Type,
+    right_span: Span,
+    span: Span,
+) -> Type {
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-            let lz = ctx.store.zonk(&lt);
+            let lz = ctx.store.zonk(lt);
             if matches!(lz, Type::Float) {
                 ctx.sink.error(
                     codes::E1352_OP_TYPE,
@@ -2119,44 +2197,44 @@ fn infer_binop(ctx: &mut InferCtx<'_>, left: &Expr, op: BinOp, right: &Expr, spa
             }
             {
                 let mut u = Unifier::new(ctx.store, ctx.sink);
-                u.unify(&lt, &Type::Int, left.span, None);
-                u.unify(&rt, &Type::Int, right.span, None);
+                u.unify(lt, &Type::Int, left_span, None);
+                u.unify(rt, &Type::Int, right_span, None);
             }
             Type::Int
         }
         BinOp::AddFloat | BinOp::SubFloat | BinOp::MulFloat | BinOp::DivFloat => {
             let mut u = Unifier::new(ctx.store, ctx.sink);
-            u.unify(&lt, &Type::Float, left.span, None);
-            u.unify(&rt, &Type::Float, right.span, None);
+            u.unify(lt, &Type::Float, left_span, None);
+            u.unify(rt, &Type::Float, right_span, None);
             Type::Float
         }
         BinOp::Concat => {
             let mut u = Unifier::new(ctx.store, ctx.sink);
-            u.unify(&lt, &Type::String, left.span, None);
-            u.unify(&rt, &Type::String, right.span, None);
+            u.unify(lt, &Type::String, left_span, None);
+            u.unify(rt, &Type::String, right_span, None);
             Type::String
         }
         BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
             let mut u = Unifier::new(ctx.store, ctx.sink);
-            u.unify(&lt, &Type::Int, left.span, None);
-            u.unify(&rt, &Type::Int, right.span, None);
+            u.unify(lt, &Type::Int, left_span, None);
+            u.unify(rt, &Type::Int, right_span, None);
             Type::Bool
         }
         BinOp::LtFloat | BinOp::LtEqFloat | BinOp::GtFloat | BinOp::GtEqFloat => {
             let mut u = Unifier::new(ctx.store, ctx.sink);
-            u.unify(&lt, &Type::Float, left.span, None);
-            u.unify(&rt, &Type::Float, right.span, None);
+            u.unify(lt, &Type::Float, left_span, None);
+            u.unify(rt, &Type::Float, right_span, None);
             Type::Bool
         }
         BinOp::Eq | BinOp::NotEq => {
             {
                 let mut u = Unifier::new(ctx.store, ctx.sink);
-                u.unify(&lt, &rt, span, None);
+                u.unify(lt, rt, span, None);
             }
-            let z = ctx.store.zonk(&lt);
+            let z = ctx.store.zonk(lt);
             match &z {
                 Type::Var(_) | Type::Rigid(_) => {
-                    unify::add_constraint(ctx.store, &lt, ConstraintSet::eq());
+                    unify::add_constraint(ctx.store, lt, ConstraintSet::eq());
                 }
                 other if !eq_capability::has_eq(ctx.store, other) => {
                     ctx.sink.error(
@@ -2175,8 +2253,8 @@ fn infer_binop(ctx: &mut InferCtx<'_>, left: &Expr, op: BinOp, right: &Expr, spa
         }
         BinOp::And | BinOp::Or => {
             let mut u = Unifier::new(ctx.store, ctx.sink);
-            u.unify(&lt, &Type::Bool, left.span, None);
-            u.unify(&rt, &Type::Bool, right.span, None);
+            u.unify(lt, &Type::Bool, left_span, None);
+            u.unify(rt, &Type::Bool, right_span, None);
             Type::Bool
         }
     }
@@ -3028,9 +3106,19 @@ fn mark_const_refs_used(ctx: &mut InferCtx<'_>, e: &Expr) {
                 mark_const_refs_used(ctx, s);
             }
         }
-        ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
-            mark_const_refs_used(ctx, left);
-            mark_const_refs_used(ctx, right);
+        ExprKind::Binary { .. } | ExprKind::Pipe { .. } => {
+            let mut rights: Vec<&Expr> = Vec::new();
+            let mut cur = e;
+            while let ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } =
+                &cur.kind
+            {
+                rights.push(right.as_ref());
+                cur = left.as_ref();
+            }
+            mark_const_refs_used(ctx, cur);
+            for r in rights.into_iter().rev() {
+                mark_const_refs_used(ctx, r);
+            }
         }
         ExprKind::Unary { expr, .. }
         | ExprKind::Paren(expr)

@@ -3,6 +3,9 @@
 //! Walks the desugared module in source preorder and writes a dense id into every
 //! [`Expr`] and [`Pattern`]. Ids start at 0; [`NodeId::NONE`] (`u32::MAX`) is never
 //! assigned, so a valid id never collides with the sentinel.
+//!
+//! The walk is iterative (explicit stack) so a left-nested 4096-term `+` chain
+//! does not overflow the native stack.
 
 use lush_syntax::ast::*;
 
@@ -51,83 +54,93 @@ fn assign_statement(stmt: &mut Statement, next_expr: &mut u32, next_pat: &mut u3
 }
 
 fn assign_expr(expr: &mut Expr, next_expr: &mut u32, next_pat: &mut u32) {
-    debug_assert_eq!(
-        expr.id,
-        NodeId::NONE,
-        "expression already numbered: {:?}",
-        expr.id
-    );
-    expr.id = NodeId(*next_expr);
-    *next_expr = next_expr.saturating_add(1);
-    match &mut expr.kind {
-        ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::String(_)
-        | ExprKind::Var(_)
-        | ExprKind::Constructor(_)
-        | ExprKind::Todo { .. }
-        | ExprKind::Panic { .. } => {}
-        ExprKind::Paren(e) | ExprKind::Echo(e) | ExprKind::Unary { expr: e, .. } => {
-            assign_expr(e, next_expr, next_pat);
-        }
-        ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
-            assign_expr(left, next_expr, next_pat);
-            assign_expr(right, next_expr, next_pat);
-        }
-        ExprKind::Call { callee, args } => {
-            assign_expr(callee, next_expr, next_pat);
-            for a in args {
-                if let ArgValue::Expr(e) = &mut a.value {
-                    assign_expr(e, next_expr, next_pat);
-                }
+    // Preorder: number a node, then push children so the left spine is processed
+    // next (stack is LIFO — push right then left).
+    let mut stack: Vec<*mut Expr> = vec![expr as *mut Expr];
+    while let Some(ptr) = stack.pop() {
+        // SAFETY: every pointer was taken from a unique `&mut Expr` in this
+        // module tree; we never alias two live mutable refs.
+        let expr = unsafe { &mut *ptr };
+        debug_assert_eq!(
+            expr.id,
+            NodeId::NONE,
+            "expression already numbered: {:?}",
+            expr.id
+        );
+        expr.id = NodeId(*next_expr);
+        *next_expr = next_expr.saturating_add(1);
+        match &mut expr.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::Var(_)
+            | ExprKind::Constructor(_)
+            | ExprKind::Todo { .. }
+            | ExprKind::Panic { .. } => {}
+            ExprKind::Paren(e) | ExprKind::Echo(e) | ExprKind::Unary { expr: e, .. } => {
+                stack.push(e.as_mut() as *mut Expr);
             }
-        }
-        ExprKind::Field { base, .. } => assign_expr(base, next_expr, next_pat),
-        ExprKind::Tuple(xs) => {
-            for x in xs {
-                assign_expr(x, next_expr, next_pat);
+            ExprKind::Binary { left, right, .. } | ExprKind::Pipe { left, right } => {
+                stack.push(right.as_mut() as *mut Expr);
+                stack.push(left.as_mut() as *mut Expr);
             }
-        }
-        ExprKind::List { items, spread } => {
-            for x in items {
-                assign_expr(x, next_expr, next_pat);
-            }
-            if let Some(s) = spread {
-                assign_expr(s, next_expr, next_pat);
-            }
-        }
-        ExprKind::Block(b) => assign_block(b, next_expr, next_pat),
-        ExprKind::Case { subjects, clauses } => {
-            for s in subjects {
-                assign_expr(s, next_expr, next_pat);
-            }
-            for cl in clauses {
-                for row in &mut cl.patterns {
-                    for p in &mut row.patterns {
-                        assign_pattern(p, next_expr, next_pat);
+            ExprKind::Call { callee, args } => {
+                for a in args.iter_mut().rev() {
+                    if let ArgValue::Expr(e) = &mut a.value {
+                        stack.push(e as *mut Expr);
                     }
                 }
-                if let Some(g) = &mut cl.guard {
-                    assign_expr(g, next_expr, next_pat);
+                stack.push(callee.as_mut() as *mut Expr);
+            }
+            ExprKind::Field { base, .. } => stack.push(base.as_mut() as *mut Expr),
+            ExprKind::Tuple(xs) => {
+                for x in xs.iter_mut().rev() {
+                    stack.push(x as *mut Expr);
                 }
-                assign_expr(&mut cl.body, next_expr, next_pat);
             }
-        }
-        ExprKind::Assert { expr: e, .. } => assign_expr(e, next_expr, next_pat),
-        ExprKind::Fn { body, .. } => assign_block(body, next_expr, next_pat),
-        ExprKind::RecordUpdate { base, fields, .. } => {
-            assign_expr(base, next_expr, next_pat);
-            for (_, v) in fields {
-                assign_expr(v, next_expr, next_pat);
+            ExprKind::List { items, spread } => {
+                if let Some(s) = spread {
+                    stack.push(s.as_mut() as *mut Expr);
+                }
+                for x in items.iter_mut().rev() {
+                    stack.push(x as *mut Expr);
+                }
             }
-        }
-        ExprKind::BitArray(segs) => {
-            for s in segs {
-                assign_expr(&mut s.value, next_expr, next_pat);
-                for opt in &mut s.options {
-                    if let BitOption::Size(e) = opt {
-                        assign_expr(e, next_expr, next_pat);
+            ExprKind::Block(b) => assign_block(b, next_expr, next_pat),
+            ExprKind::Case { subjects, clauses } => {
+                // Patterns / guards / bodies interleave with subjects in source
+                // order: subjects first, then each clause's patterns, guard, body.
+                for cl in clauses.iter_mut().rev() {
+                    stack.push(&mut cl.body as *mut Expr);
+                    if let Some(g) = &mut cl.guard {
+                        stack.push(g as *mut Expr);
                     }
+                    for row in cl.patterns.iter_mut().rev() {
+                        for p in row.patterns.iter_mut().rev() {
+                            assign_pattern(p, next_expr, next_pat);
+                        }
+                    }
+                }
+                for s in subjects.iter_mut().rev() {
+                    stack.push(s as *mut Expr);
+                }
+            }
+            ExprKind::Assert { expr: e, .. } => stack.push(e.as_mut() as *mut Expr),
+            ExprKind::Fn { body, .. } => assign_block(body, next_expr, next_pat),
+            ExprKind::RecordUpdate { base, fields, .. } => {
+                for (_, v) in fields.iter_mut().rev() {
+                    stack.push(v as *mut Expr);
+                }
+                stack.push(base.as_mut() as *mut Expr);
+            }
+            ExprKind::BitArray(segs) => {
+                for s in segs.iter_mut().rev() {
+                    for opt in s.options.iter_mut().rev() {
+                        if let BitOption::Size(e) = opt {
+                            stack.push(e as *mut Expr);
+                        }
+                    }
+                    stack.push(&mut s.value as *mut Expr);
                 }
             }
         }
@@ -135,54 +148,62 @@ fn assign_expr(expr: &mut Expr, next_expr: &mut u32, next_pat: &mut u32) {
 }
 
 fn assign_pattern(pat: &mut Pattern, next_expr: &mut u32, next_pat: &mut u32) {
-    debug_assert_eq!(
-        pat.id,
-        NodeId::NONE,
-        "pattern already numbered: {:?}",
-        pat.id
-    );
-    pat.id = NodeId(*next_pat);
-    *next_pat = next_pat.saturating_add(1);
-    match &mut pat.kind {
-        PatternKind::Int(_)
-        | PatternKind::Float(_)
-        | PatternKind::String(_)
-        | PatternKind::Var(_)
-        | PatternKind::Discard
-        | PatternKind::UnderscoreName(_) => {}
-        PatternKind::Constructor { args, .. } => {
-            if let Some(pargs) = args {
-                for a in pargs {
-                    if let Some(p) = &mut a.pattern {
-                        assign_pattern(p, next_expr, next_pat);
+    let mut stack: Vec<*mut Pattern> = vec![pat as *mut Pattern];
+    while let Some(ptr) = stack.pop() {
+        let pat = unsafe { &mut *ptr };
+        debug_assert_eq!(
+            pat.id,
+            NodeId::NONE,
+            "pattern already numbered: {:?}",
+            pat.id
+        );
+        pat.id = NodeId(*next_pat);
+        *next_pat = next_pat.saturating_add(1);
+        match &mut pat.kind {
+            PatternKind::Int(_)
+            | PatternKind::Float(_)
+            | PatternKind::String(_)
+            | PatternKind::Var(_)
+            | PatternKind::Discard
+            | PatternKind::UnderscoreName(_) => {}
+            PatternKind::Constructor { args, .. } => {
+                if let Some(pargs) = args {
+                    for a in pargs.iter_mut().rev() {
+                        if let Some(p) = &mut a.pattern {
+                            stack.push(p as *mut Pattern);
+                        }
                     }
                 }
             }
-        }
-        PatternKind::Tuple(ps) => {
-            for p in ps {
-                assign_pattern(p, next_expr, next_pat);
-            }
-        }
-        PatternKind::List { items, spread } => {
-            for p in items {
-                assign_pattern(p, next_expr, next_pat);
-            }
-            if let Some(s) = spread {
-                assign_pattern(s, next_expr, next_pat);
-            }
-        }
-        PatternKind::BitArray(segs) => {
-            for s in segs {
-                assign_pattern(&mut s.pattern, next_expr, next_pat);
-                for opt in &mut s.options {
-                    if let BitOption::Size(e) = opt {
-                        assign_expr(e, next_expr, next_pat);
-                    }
+            PatternKind::Tuple(ps) => {
+                for p in ps.iter_mut().rev() {
+                    stack.push(p as *mut Pattern);
                 }
             }
+            PatternKind::List { items, spread } => {
+                if let Some(s) = spread {
+                    stack.push(s.as_mut() as *mut Pattern);
+                }
+                for p in items.iter_mut().rev() {
+                    stack.push(p as *mut Pattern);
+                }
+            }
+            PatternKind::BitArray(segs) => {
+                for s in segs.iter_mut().rev() {
+                    for opt in s.options.iter_mut().rev() {
+                        if let BitOption::Size(e) = opt {
+                            assign_expr(e, next_expr, next_pat);
+                        }
+                    }
+                    stack.push(&mut s.pattern as *mut Pattern);
+                }
+            }
+            PatternKind::StringPrefix { rest, .. } => {
+                stack.push(rest.as_mut() as *mut Pattern);
+            }
+            PatternKind::Alias { pattern, .. } => {
+                stack.push(pattern.as_mut() as *mut Pattern);
+            }
         }
-        PatternKind::StringPrefix { rest, .. } => assign_pattern(rest, next_expr, next_pat),
-        PatternKind::Alias { pattern, .. } => assign_pattern(pattern, next_expr, next_pat),
     }
 }
