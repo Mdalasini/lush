@@ -8,7 +8,10 @@ fn dump() {
     match compile_source("app/main", src) {
         Ok(p) => {
             for (i, f) in p.functions.iter().enumerate() {
-                println!("=== [{i}] {}::{} arity={} regs={} ===", f.module, f.name, f.arity, f.regs);
+                println!(
+                    "=== [{i}] {}::{} arity={} regs={} ===",
+                    f.module, f.name, f.arity, f.regs
+                );
                 for (j, op) in f.code.iter().enumerate() {
                     println!("  {j}: {op:?}");
                 }

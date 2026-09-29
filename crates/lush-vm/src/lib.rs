@@ -1,7 +1,7 @@
 //! Single-process bytecode interpreter for Lush (build step 3).
 
-pub mod arena;
 pub mod builtin;
+pub mod heap;
 pub mod interp;
 pub mod panic_report;
 pub mod value;

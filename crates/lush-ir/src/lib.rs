@@ -24,7 +24,7 @@ pub fn compile_graph(
     compile_graph_with_sources(modules, prefixes, entry, BTreeMap::new())
 }
 
-/// Like [`compile_graph`], attaching module sources for debug info.
+/// Like [`compile_graph`], attaching module sources for panic line/column info.
 pub fn compile_graph_with_sources(
     modules: &[(String, Module)],
     prefixes: &[String],
@@ -40,14 +40,14 @@ pub fn compile_graph_with_sources(
         return Err(diags);
     }
 
-    let mut typed: Vec<(String, lush_types::typed::TypedModule)> = Vec::new();
+    let mut typed_modules: Vec<(String, lush_types::typed::TypedModule)> = Vec::new();
     for (path, result) in results {
         if path.starts_with("lush/") {
             continue;
         }
-        typed.push((path, result.typed));
+        typed_modules.push((path, result.typed));
     }
-    typed.sort_by(|a, b| {
+    typed_modules.sort_by(|a, b| {
         if a.0 == entry {
             std::cmp::Ordering::Less
         } else if b.0 == entry {
@@ -57,14 +57,15 @@ pub fn compile_graph_with_sources(
         }
     });
 
-    match emit::emit_program(&typed, entry) {
+    match emit::emit_program(&typed_modules, entry) {
         Ok(mut program) => {
             program.sources = sources;
             Ok(program)
         }
         Err(cdiags) => {
-            diags.extend(cdiags);
-            Err(diags)
+            let mut all = diags;
+            all.extend(cdiags);
+            Err(all)
         }
     }
 }

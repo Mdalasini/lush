@@ -3,8 +3,8 @@
 use lush_ir::bytecode::{Constant, Op, Program};
 use lush_types::numeric;
 
-use crate::arena::Arena;
 use crate::builtin;
+use crate::heap::{Heap, ObjectKind};
 use crate::panic_report::{self, FrameInfo};
 use crate::value::Value;
 
@@ -51,7 +51,7 @@ struct Frame {
 pub struct Vm {
     program: Program,
     config: VmConfig,
-    arena: Arena,
+    heap: Heap,
     frames: Vec<Frame>,
     pub reductions: u64,
     pub instructions: u64,
@@ -70,7 +70,7 @@ impl Vm {
         Self {
             program,
             config,
-            arena: Arena::new(),
+            heap: Heap::new(),
             frames: vec![Frame {
                 func: entry,
                 pc: 0,
@@ -86,13 +86,6 @@ impl Vm {
             stderr: Vec::new(),
             done: None,
         }
-    }
-
-    pub fn stdout_bytes(&self) -> &[u8] {
-        &self.stdout
-    }
-    pub fn stderr_bytes(&self) -> &[u8] {
-        &self.stderr
     }
 
     pub fn run_to_completion(&mut self) -> RunResult {
@@ -163,51 +156,86 @@ impl Vm {
                 self.set_reg(fi, dst, v);
             }
             Op::LoadInt { dst, value } => {
-                let v = self.arena.canonicalize_int(value);
+                let v = Value::int(&mut self.heap, value);
                 self.set_reg(fi, dst, v);
             }
             Op::LoadBool { dst, value } => self.set_reg(fi, dst, Value::from_bool(value)),
             Op::LoadNil { dst } => self.set_reg(fi, dst, Value::nil()),
             Op::Add { dst, a, b } => {
-                let r = self.binop_num(self.reg(fi, a), self.reg(fi, b), numeric::int_add, numeric::float_add)?;
+                let r = self.binop_num(
+                    self.reg(fi, a),
+                    self.reg(fi, b),
+                    numeric::int_add,
+                    numeric::float_add,
+                )?;
                 self.set_reg(fi, dst, r);
             }
             Op::Sub { dst, a, b } => {
-                let r = self.binop_num(self.reg(fi, a), self.reg(fi, b), numeric::int_sub, numeric::float_sub)?;
+                let r = self.binop_num(
+                    self.reg(fi, a),
+                    self.reg(fi, b),
+                    numeric::int_sub,
+                    numeric::float_sub,
+                )?;
                 self.set_reg(fi, dst, r);
             }
             Op::Mul { dst, a, b } => {
-                let r = self.binop_num(self.reg(fi, a), self.reg(fi, b), numeric::int_mul, numeric::float_mul)?;
+                let r = self.binop_num(
+                    self.reg(fi, a),
+                    self.reg(fi, b),
+                    numeric::int_mul,
+                    numeric::float_mul,
+                )?;
                 self.set_reg(fi, dst, r);
             }
             Op::Div { dst, a, b } => {
-                let r = self.binop_num(self.reg(fi, a), self.reg(fi, b), numeric::int_div, numeric::float_div)?;
+                let r = self.binop_num(
+                    self.reg(fi, a),
+                    self.reg(fi, b),
+                    numeric::int_div,
+                    numeric::float_div,
+                )?;
                 self.set_reg(fi, dst, r);
             }
             Op::Rem { dst, a, b } => {
-                let ai = self.arena.read_int(self.reg(fi, a)).ok_or("rem expects Int")?;
-                let bi = self.arena.read_int(self.reg(fi, b)).ok_or("rem expects Int")?;
+                let ai = self
+                    .reg(fi, a)
+                    .as_int(&self.heap)
+                    .ok_or("rem expects Int")?;
+                let bi = self
+                    .reg(fi, b)
+                    .as_int(&self.heap)
+                    .ok_or("rem expects Int")?;
                 let n = numeric::int_rem(ai, bi).map_err(|e| e.to_string())?;
-                self.set_reg(fi, dst, self.arena.canonicalize_int(n));
+                let r = Value::int(&mut self.heap, n);
+                self.set_reg(fi, dst, r);
             }
             Op::Neg { dst, src } => {
                 let v = self.reg(fi, src);
-                if let Some(n) = self.arena.read_int(v) {
+                if let Some(n) = v.as_int(&self.heap) {
                     let n = numeric::int_neg(n).map_err(|e| e.to_string())?;
-                    self.set_reg(fi, dst, self.arena.canonicalize_int(n));
-                } else if let Some(f) = self.arena.read_float(v) {
-                    self.set_reg(fi, dst, self.arena.alloc_float(-f));
+                    let r = Value::int(&mut self.heap, n);
+                    self.set_reg(fi, dst, r);
+                } else if let Some(f) = v.as_float(&self.heap) {
+                    let r = Value::float(&mut self.heap, -f);
+                    self.set_reg(fi, dst, r);
                 } else {
                     return Err("negation on non-numeric".into());
                 }
             }
             Op::Concat { dst, a, b } => {
-                let sa = self.arena.read_string(self.reg(fi, a)).ok_or("concat expects String")?.to_vec();
-                let sb = self.arena.read_string(self.reg(fi, b)).ok_or("concat expects String")?.to_vec();
-                let mut out = sa;
-                out.extend_from_slice(&sb);
+                let pa = self.reg(fi, a).as_ptr().ok_or("concat expects String")?;
+                let pb = self.reg(fi, b).as_ptr().ok_or("concat expects String")?;
+                if self.heap.kind(pa) != ObjectKind::String
+                    || self.heap.kind(pb) != ObjectKind::String
+                {
+                    return Err("concat expects String".into());
+                }
+                let mut out = self.heap.string_bytes(pa).to_vec();
+                out.extend_from_slice(self.heap.string_bytes(pb));
                 charge += out.len() as u64 / 8 + 1;
-                self.set_reg(fi, dst, self.arena.alloc_string(out));
+                let p = self.heap.alloc_string(&out);
+                self.set_reg(fi, dst, Value::from_ptr(p));
             }
             Op::Eq { dst, a, b } => {
                 let r = self.eq_values(self.reg(fi, a), self.reg(fi, b), &mut charge)?;
@@ -242,7 +270,7 @@ impl Vm {
                 }
             }
             Op::IsInt { dst, src, value } => {
-                let ok = self.arena.read_int(self.reg(fi, src)) == Some(value);
+                let ok = self.reg(fi, src).as_int(&self.heap) == Some(value);
                 self.set_reg(fi, dst, Value::from_bool(ok));
             }
             Op::Call { dst, func, args } => {
@@ -251,13 +279,8 @@ impl Vm {
             Op::TailCall { func, args } => {
                 self.call(fi, func as usize, &args, 0, true)?;
             }
-            Op::CallClosure { dst, clo, args } => {
-                let fun_id = self.closure_fun(self.reg(fi, clo))?;
-                self.call(fi, fun_id, &args, dst, false)?;
-            }
-            Op::TailCallClosure { clo, args } => {
-                let fun_id = self.closure_fun(self.reg(fi, clo))?;
-                self.call(fi, fun_id, &args, 0, true)?;
+            Op::CallClosure { .. } | Op::TailCallClosure { .. } => {
+                return Err("closure calls not yet supported".into());
             }
             Op::Return { src } => {
                 let v = self.reg(fi, src);
@@ -275,7 +298,7 @@ impl Vm {
                 let (v, extra) = builtin::call_builtin(
                     builtin,
                     &vals,
-                    &mut self.arena,
+                    &mut self.heap,
                     &mut self.stdout,
                     &mut self.stderr,
                 )?;
@@ -284,13 +307,17 @@ impl Vm {
             }
             Op::MakeTuple { dst, fields } => {
                 let fs: Vec<_> = fields.iter().map(|a| self.reg(fi, *a)).collect();
-                self.set_reg(fi, dst, self.arena.alloc_tuple(fs));
+                let p = self.heap.alloc_tuple(&fs);
+                self.set_reg(fi, dst, Value::from_ptr(p));
             }
             Op::MakeCons { dst, head, tail } => {
-                let v = self.arena.alloc_cons(self.reg(fi, head), self.reg(fi, tail));
-                self.set_reg(fi, dst, v);
+                let p = self.heap.alloc_cons(self.reg(fi, head), self.reg(fi, tail));
+                self.set_reg(fi, dst, Value::from_ptr(p));
             }
-            Op::MakeEmptyList { dst } => self.set_reg(fi, dst, Arena::empty_list()),
+            Op::MakeEmptyList { dst } => {
+                let p = self.heap.empty_list();
+                self.set_reg(fi, dst, Value::from_ptr(p));
+            }
             Op::MakeAdt {
                 dst,
                 type_tag,
@@ -298,11 +325,16 @@ impl Vm {
                 fields,
             } => {
                 let fs: Vec<_> = fields.iter().map(|a| self.reg(fi, *a)).collect();
-                self.set_reg(fi, dst, self.arena.alloc_adt(type_tag, variant, fs));
+                let p = self.heap.alloc_adt(type_tag, variant, &fs);
+                self.set_reg(fi, dst, Value::from_ptr(p));
             }
             Op::GetField { dst, base, index } => {
-                let obj = self.arena.get(self.reg(fi, base)).ok_or("get_field on non-heap")?;
-                let v = *obj.fields.get(index as usize).ok_or("field index out of range")?;
+                let p = self.reg(fi, base).as_ptr().ok_or("get_field on non-heap")?;
+                let v = match self.heap.kind(p) {
+                    ObjectKind::Tuple => self.heap.tuple_field(p, index as usize),
+                    ObjectKind::Adt => self.heap.adt_field(p, index as usize),
+                    _ => return Err("get_field on bad object".into()),
+                };
                 self.set_reg(fi, dst, v);
             }
             Op::SwitchTag {
@@ -324,14 +356,6 @@ impl Vm {
 
         self.reductions += charge;
         Ok(charge)
-    }
-
-    fn closure_fun(&self, c: Value) -> Result<usize, String> {
-        let obj = self.arena.get(c).ok_or("not a closure")?;
-        match obj.payload {
-            crate::arena::Payload::Fun(id) => Ok(id as usize),
-            _ => Err("not a closure".into()),
-        }
     }
 
     fn call(
@@ -429,13 +453,15 @@ impl Vm {
     }
 
     fn load_const(&mut self, idx: u32) -> Result<Value, String> {
-        match &self.program.constants[idx as usize] {
-            Constant::Int(n) => Ok(self.arena.canonicalize_int(*n)),
-            Constant::Float(f) => Ok(self.arena.alloc_float(*f)),
-            Constant::String(s) => Ok(self.arena.alloc_string(s.as_bytes().to_vec())),
-            Constant::Nullary { type_tag, variant } => {
-                Ok(self.arena.alloc_adt(*type_tag, *variant, vec![]))
-            }
+        match &self.program.constants[idx as usize].clone() {
+            Constant::Int(n) => Ok(Value::int(&mut self.heap, *n)),
+            Constant::Float(f) => Ok(Value::float(&mut self.heap, *f)),
+            Constant::String(s) => Ok(Value::from_ptr(self.heap.alloc_string(s.as_bytes()))),
+            Constant::Nullary { type_tag, variant } => Ok(Value::from_ptr(self.heap.alloc_adt(
+                *type_tag,
+                *variant,
+                &[],
+            ))),
         }
     }
 
@@ -446,20 +472,20 @@ impl Vm {
         int_op: fn(i64, i64) -> Result<i64, numeric::NumericError>,
         float_op: fn(f64, f64) -> Result<f64, numeric::NumericError>,
     ) -> Result<Value, String> {
-        if let (Some(x), Some(y)) = (self.arena.read_int(a), self.arena.read_int(b)) {
+        if let (Some(x), Some(y)) = (a.as_int(&self.heap), b.as_int(&self.heap)) {
             let n = int_op(x, y).map_err(|e| e.to_string())?;
-            return Ok(self.arena.canonicalize_int(n));
+            return Ok(Value::int(&mut self.heap, n));
         }
-        if let (Some(x), Some(y)) = (self.arena.read_float(a), self.arena.read_float(b)) {
+        if let (Some(x), Some(y)) = (a.as_float(&self.heap), b.as_float(&self.heap)) {
             let n = float_op(x, y).map_err(|e| e.to_string())?;
-            return Ok(self.arena.alloc_float(n));
+            return Ok(Value::float(&mut self.heap, n));
         }
         Err("numeric operation on incompatible values".into())
     }
 
     fn cmp_int(&self, a: Value, b: Value, op: fn(i64, i64) -> bool) -> Result<bool, String> {
-        let x = self.arena.read_int(a).ok_or("cmp expects Int")?;
-        let y = self.arena.read_int(b).ok_or("cmp expects Int")?;
+        let x = a.as_int(&self.heap).ok_or("cmp expects Int")?;
+        let y = b.as_int(&self.heap).ok_or("cmp expects Int")?;
         Ok(op(x, y))
     }
 
@@ -468,36 +494,58 @@ impl Vm {
         if a == b {
             return Ok(true);
         }
-        if let (Some(x), Some(y)) = (self.arena.read_int(a), self.arena.read_int(b)) {
+        if let (Some(x), Some(y)) = (a.as_int(&self.heap), b.as_int(&self.heap)) {
             return Ok(x == y);
         }
-        if let (Some(x), Some(y)) = (self.arena.read_float(a), self.arena.read_float(b)) {
+        if let (Some(x), Some(y)) = (a.as_float(&self.heap), b.as_float(&self.heap)) {
             return Ok(x == y);
         }
-        if let (Some(x), Some(y)) = (self.arena.read_string(a), self.arena.read_string(b)) {
-            *charge += x.len() as u64 / 8;
-            return Ok(x == y);
-        }
-        if let (Some(oa), Some(ob)) = (self.arena.get(a), self.arena.get(b)) {
-            if oa.kind != ob.kind || oa.fields.len() != ob.fields.len() {
+        if let (Some(pa), Some(pb)) = (a.as_ptr(), b.as_ptr()) {
+            if self.heap.kind(pa) != self.heap.kind(pb) {
                 return Ok(false);
             }
-            let fields_a = oa.fields.clone();
-            let fields_b = ob.fields.clone();
-            for (x, y) in fields_a.into_iter().zip(fields_b) {
-                if !self.eq_values(x, y, charge)? {
-                    return Ok(false);
+            match self.heap.kind(pa) {
+                ObjectKind::String => {
+                    let x = self.heap.string_bytes(pa);
+                    let y = self.heap.string_bytes(pb);
+                    *charge += x.len() as u64 / 8;
+                    return Ok(x == y);
                 }
+                ObjectKind::Tuple => {
+                    // Compare via field access up to a reasonable bound.
+                    for i in 0..255 {
+                        let x = self.heap.tuple_field(pa, i);
+                        let y = self.heap.tuple_field(pb, i);
+                        // Stop when both nil and past length — heuristic: if fields equal until mismatch.
+                        if x == Value::nil() && y == Value::nil() && i > 0 {
+                            // Can't know arity; compare first differing.
+                            break;
+                        }
+                        if !self.eq_values(x, y, charge)? {
+                            return Ok(false);
+                        }
+                        if x == Value::nil() && y == Value::nil() {
+                            break;
+                        }
+                    }
+                    return Ok(true);
+                }
+                ObjectKind::Adt => {
+                    if self.heap.adt_variant(pa) != self.heap.adt_variant(pb) {
+                        return Ok(false);
+                    }
+                    return Ok(true);
+                }
+                _ => {}
             }
-            return Ok(true);
         }
         Ok(false)
     }
 
     fn tag_of(&self, v: Value) -> u16 {
-        if let Some(obj) = self.arena.get(v) {
-            if let crate::arena::Payload::Adt { variant, .. } = obj.payload {
-                return variant;
+        if let Some(p) = v.as_ptr() {
+            if self.heap.kind(p) == ObjectKind::Adt {
+                return self.heap.adt_variant(p);
             }
         }
         0

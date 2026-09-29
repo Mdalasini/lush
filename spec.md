@@ -536,6 +536,8 @@ pub fn parallel_map(List(a), fn(a) -> b) -> Result(List(b), TaskError);
 
 Written in Lush wherever possible; hot paths as internal VM intrinsics (see §14). All modules under `lush/`. The `lush` package identity and `lush/` import namespace are reserved for the standard library bundled with the toolchain. Local modules, dependencies, and manifest declarations MUST NOT shadow or replace them; naming a module `lush/*` never grants intrinsic access.
 
+**Builtin surface in build step 3.** Until step 10 ships real `lush/*` source, only the following stub-backed builtins execute: `lush/io.print`, `lush/io.println`, `lush/io.eprintln`, and `lush/int.to_string`. They are bound by `(stub module, name)` under the reserved `lush/` namespace. Any other reachable `lush/*` function is a compile-stage `E2xxx` error naming the function and the step that provides it, never a runtime crash. "List operations" in step 3 means language features (literals, `[x, ..xs]`, list patterns, `==`) plus recursive functions written in Lush; no `lush/list` function runs in step 3.
+
 | Module | Contents |
 |---|---|
 | `bool`, `int`, `float`, `string`, `bit_array`, `order`, `nil` | Basics, parsing, conversions, math |
