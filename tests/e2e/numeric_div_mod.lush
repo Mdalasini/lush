@@ -1,0 +1,15 @@
+import lush/io;
+import lush/int;
+
+pub fn main() -> Nil {
+  io.println(int.to_string(-7 / 2));
+  io.println(int.to_string(-7 % 2));
+  io.println(int.to_string(7 / -2));
+  io.println(int.to_string(7 % -2));
+  let a = -7;
+  let b = 2;
+  case a == (a / b) * b + a % b {
+    True -> io.println("ok");
+    False -> io.println("bad");
+  };
+}

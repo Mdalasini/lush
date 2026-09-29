@@ -1,0 +1,5 @@
+pub fn main() -> Nil {
+  let m = -9223372036854775808;
+  let _x = m / -1;
+  Nil;
+}

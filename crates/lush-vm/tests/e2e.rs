@@ -183,3 +183,43 @@ fn echo_e2e() {
 fn user_adt_e2e() {
     common::assert_case("user_adt");
 }
+
+#[test]
+fn numeric_div_mod_e2e() {
+    common::assert_case("numeric_div_mod");
+}
+
+#[test]
+fn numeric_imm_boundary_e2e() {
+    common::assert_case("numeric_imm");
+}
+
+#[test]
+fn panic_todo_e2e() {
+    common::assert_case("panic_todo");
+}
+
+#[test]
+fn panic_min_int_div_e2e() {
+    common::assert_case("panic_min_int_div");
+}
+
+#[test]
+fn panic_rem_zero_e2e() {
+    common::assert_case("panic_rem_zero");
+}
+
+#[test]
+fn panic_div_golden_e2e() {
+    common::assert_case("panic_div");
+}
+
+#[test]
+fn panic_overflow_golden_e2e() {
+    common::assert_case("panic_overflow");
+}
+
+#[test]
+fn panic_assert_golden_e2e() {
+    common::assert_case("panic_assert");
+}

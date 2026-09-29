@@ -1,0 +1,17 @@
+import lush/io;
+import lush/int;
+
+pub fn main() -> Nil {
+  // Immediate Int range is ±2^62 (§7.1). Boundary values must round-trip.
+  let hi = 4611686018427387903;
+  let lo = -4611686018427387904;
+  io.println(int.to_string(hi));
+  io.println(int.to_string(lo));
+  // Crossing into the boxed range (and back) stays canonical for ==.
+  let boxed = hi + 1;
+  io.println(int.to_string(boxed));
+  case boxed - 1 == hi {
+    True -> io.println("eq");
+    False -> io.println("ne");
+  };
+}
