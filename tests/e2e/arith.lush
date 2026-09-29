@@ -1,0 +1,9 @@
+import lush/io;
+import lush/int;
+
+pub fn main() {
+  io.println(int.to_string(1 + 2 * 3));
+  io.println(int.to_string(10 - 4));
+  io.println(int.to_string(20 / 3));
+  io.println(int.to_string(20 % 3));
+}

@@ -7,4 +7,7 @@ pub mod panic_report;
 pub mod value;
 
 pub use interp::{RunResult, SliceResult, Vm, VmConfig, DEFAULT_QUANTUM, MAX_STACK_FRAMES};
-pub use lush_ir::{compile_graph, compile_source, compile_sources, Program};
+pub use lush_ir::{
+    compile_graph, compile_source, compile_source_with_opt, compile_sources,
+    compile_sources_with_opt, OptLevel, Program,
+};

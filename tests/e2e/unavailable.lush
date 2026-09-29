@@ -1,0 +1,5 @@
+import lush/list
+
+pub fn main() {
+  list.length([]);
+}

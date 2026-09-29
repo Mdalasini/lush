@@ -646,7 +646,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         }
                     };
                     let name = field_name(field);
-                    if module == "lush/io" || module == "lush/int" {
+                    if module.starts_with("lush/") {
                         return self.emit_builtin(&module, &name, arg_regs, span);
                     }
                     return self.emit_direct_call(&module, &name, arg_regs, span, tail);

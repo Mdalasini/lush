@@ -344,14 +344,133 @@ impl TypeStore {
     /// Zonk, then replace any remaining unbound unification variables with
     /// fresh rigid variables so the typed-AST handoff has no open `Var`s.
     ///
-    /// Uses a pointer-keyed memo so shared DAGs (let-doubling) stay linear.
+    /// Does not charge [`Self::work`] (handoff is additive to inference). Ground
+    /// DAGs skip rigidify entirely so let-doubling stays linear and stack-safe.
     pub fn zonk_closed(&mut self, ty: &Type) -> Type {
+        let saved = self.work;
         let z = self.zonk(ty);
-        // Always walk with a pointer memo: let-doubling DAGs must stay linear, and
-        // a pre-check via [`Type::is_zonked`] would itself explode without memo.
+        self.work = saved;
+        if !Self::contains_unbound_var(&z) {
+            return z;
+        }
         let mut memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
         let mut tv_map: HashMap<TvId, Type> = HashMap::new();
         (*self.rigidify_rc(&Rc::new(z), &mut memo, &mut tv_map)).clone()
+    }
+
+    /// Batch-close expression/pattern types for the typed-AST handoff.
+    /// Shared zonk memo keeps let-doubling O(n); work is not charged.
+    pub fn close_types_for_handoff(&mut self, types: &mut [Type]) {
+        let saved = self.work;
+        let mut memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
+        let mut tv_map: HashMap<TvId, Type> = HashMap::new();
+        let mut var_memo: HashMap<*const Type, bool> = HashMap::new();
+        // Keep roots alive for the whole batch so memo pointers stay valid.
+        let roots: Vec<Rc<Type>> = types.iter().map(|t| Rc::new(t.clone())).collect();
+        let mut closed: Vec<Type> = Vec::with_capacity(roots.len());
+        for root in &roots {
+            let zrc = self.zonk_rc(root, &mut memo);
+            if Self::rc_contains_var(&zrc, &mut var_memo) {
+                closed.push((*self.rigidify_rc(&zrc, &mut HashMap::new(), &mut tv_map)).clone());
+            } else {
+                closed.push((*zrc).clone());
+            }
+        }
+        drop(roots);
+        drop(memo);
+        for (ty, z) in types.iter_mut().zip(closed) {
+            *ty = z;
+        }
+        self.work = saved;
+    }
+
+    fn rc_contains_var(ty: &Rc<Type>, memo: &mut HashMap<*const Type, bool>) -> bool {
+        let mut stack = vec![ty.clone()];
+        let mut visiting: Vec<*const Type> = Vec::new();
+        while let Some(t) = stack.pop() {
+            let ptr = Rc::as_ptr(&t);
+            if let Some(&v) = memo.get(&ptr) {
+                if v {
+                    for p in visiting {
+                        memo.insert(p, true);
+                    }
+                    return true;
+                }
+                continue;
+            }
+            match t.as_ref() {
+                Type::Var(_) => {
+                    memo.insert(ptr, true);
+                    for p in visiting {
+                        memo.insert(p, true);
+                    }
+                    return true;
+                }
+                Type::List(c) => {
+                    visiting.push(ptr);
+                    stack.push(c.clone());
+                }
+                Type::Tuple(cs) | Type::App { args: cs, .. } => {
+                    visiting.push(ptr);
+                    for c in cs {
+                        stack.push(c.clone());
+                    }
+                }
+                Type::Fun { params, ret } => {
+                    visiting.push(ptr);
+                    for c in params {
+                        stack.push(c.clone());
+                    }
+                    stack.push(ret.clone());
+                }
+                _ => {
+                    memo.insert(ptr, false);
+                }
+            }
+        }
+        for p in visiting {
+            memo.entry(p).or_insert(false);
+        }
+        false
+    }
+
+    /// Iterative var scan with pointer memo (stack-safe on deep DAGs).
+    fn contains_unbound_var(ty: &Type) -> bool {
+        let mut stack: Vec<&Type> = vec![ty];
+        let mut seen: HashSet<*const Type> = HashSet::new();
+        while let Some(t) = stack.pop() {
+            match t {
+                Type::Var(_) => return true,
+                Type::List(c) => {
+                    let p = Rc::as_ptr(c);
+                    if seen.insert(p) {
+                        stack.push(c.as_ref());
+                    }
+                }
+                Type::Tuple(cs) | Type::App { args: cs, .. } => {
+                    for c in cs {
+                        let p = Rc::as_ptr(c);
+                        if seen.insert(p) {
+                            stack.push(c.as_ref());
+                        }
+                    }
+                }
+                Type::Fun { params, ret } => {
+                    for c in params {
+                        let p = Rc::as_ptr(c);
+                        if seen.insert(p) {
+                            stack.push(c.as_ref());
+                        }
+                    }
+                    let p = Rc::as_ptr(ret);
+                    if seen.insert(p) {
+                        stack.push(ret.as_ref());
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn rigidify_rc(

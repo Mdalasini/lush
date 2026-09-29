@@ -1,0 +1,3 @@
+panic: division by zero
+at src/main.lush:1:1
+  in main.main (src/main.lush:1:1)

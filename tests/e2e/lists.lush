@@ -1,0 +1,13 @@
+import lush/io;
+import lush/int;
+
+pub fn length(xs) {
+  case xs {
+    [] -> 0;
+    [_, ..rest] -> 1 + length(rest);
+  };
+}
+
+pub fn main() {
+  io.println(int.to_string(length([1, 2, 3, 4])));
+}

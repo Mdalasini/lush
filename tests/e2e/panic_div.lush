@@ -1,6 +1,4 @@
-import lush/io;
-
 pub fn main() {
-  let _ = 1 / 0;
-  io.println("unreachable");
+  let _x = 1 / 0;
+  Nil;
 }
