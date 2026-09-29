@@ -1,6 +1,6 @@
 //! Unification, occurs check, instantiation, and generalisation.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use lush_syntax::span::Span;
@@ -136,20 +136,21 @@ impl<'a> Unifier<'a> {
             .map(|v| v.constraints.clone())
             .unwrap_or_default();
         self.adjust_level(&ty, level);
-        if let Type::Var(other) = &ty {
+        let link = Rc::new(ty);
+        if let Type::Var(other) = link.as_ref() {
             if let Some(info) = self.store.vars.get_mut(other) {
                 info.constraints.merge(&constraints);
             }
             if let Some(info) = self.store.vars.get_mut(&id) {
-                info.link = Some(ty);
+                info.link = Some(link);
             }
             return;
         }
         if !constraints.is_empty() {
-            self.discharge_constraints(&ty, &constraints, span, expected_origin);
+            self.discharge_constraints(&link, &constraints, span, expected_origin);
         }
         if let Some(info) = self.store.vars.get_mut(&id) {
-            info.link = Some(ty);
+            info.link = Some(link);
         }
     }
 
@@ -173,7 +174,7 @@ impl<'a> Unifier<'a> {
             Type::Var(id) => {
                 if let Some(info) = self.store.vars.get(id) {
                     if let Some(link) = info.link.clone() {
-                        self.adjust_level_rc(&Rc::new(link), max_level, visited);
+                        self.adjust_level_rc(&link, max_level, visited);
                         return;
                     }
                 }
@@ -204,49 +205,46 @@ impl<'a> Unifier<'a> {
         }
     }
 
-    pub fn occurs(&mut self, id: TvId, ty: &Type, depth: usize) -> bool {
-        let mut visited: HashMap<*const Type, ()> = HashMap::new();
-        self.occurs_rc(id, &Rc::new(ty.clone()), depth, &mut visited)
-    }
-
-    fn occurs_rc(
-        &mut self,
-        id: TvId,
-        ty: &Rc<Type>,
-        depth: usize,
-        visited: &mut HashMap<*const Type, ()>,
-    ) -> bool {
-        if depth > MAX_DEPTH {
-            return true;
-        }
-        let ptr = Rc::as_ptr(ty);
-        if visited.contains_key(&ptr) {
-            return false;
-        }
-        visited.insert(ptr, ());
-        self.store.work = self.store.work.saturating_add(1);
-        match ty.as_ref() {
-            Type::Var(v) => {
-                if let Some(info) = self.store.vars.get(v) {
-                    if let Some(link) = info.link.clone() {
-                        return self.occurs_rc(id, &Rc::new(link), depth + 1, visited);
+    /// True when `id` occurs free inside `ty` (infinite type).
+    ///
+    /// Walks iteratively so Mairson-style types whose DAG spine is deep but
+    /// acyclic are not mis-reported as occurs failures. Depth limits belong to
+    /// [`Unifier::unify`]'s `E1305`, not to the occurs check.
+    pub fn occurs(&mut self, id: TvId, ty: &Type, _depth: usize) -> bool {
+        let mut visited: HashSet<*const Type> = HashSet::new();
+        let mut var_seen: HashSet<TvId> = HashSet::new();
+        let mut stack: Vec<Rc<Type>> = vec![Rc::new(ty.clone())];
+        while let Some(ty) = stack.pop() {
+            let ptr = Rc::as_ptr(&ty);
+            if !visited.insert(ptr) {
+                continue;
+            }
+            self.store.work = self.store.work.saturating_add(1);
+            match ty.as_ref() {
+                Type::Var(v) => {
+                    if *v == id {
+                        return true;
+                    }
+                    if !var_seen.insert(*v) {
+                        continue;
+                    }
+                    if let Some(info) = self.store.vars.get(v) {
+                        if let Some(link) = info.link.clone() {
+                            stack.push(link);
+                        }
                     }
                 }
-                *v == id
+                Type::List(t) => stack.push(t.clone()),
+                Type::Tuple(ts) => stack.extend(ts.iter().cloned()),
+                Type::Fun { params, ret } => {
+                    stack.extend(params.iter().cloned());
+                    stack.push(ret.clone());
+                }
+                Type::App { args, .. } => stack.extend(args.iter().cloned()),
+                _ => {}
             }
-            Type::List(t) => self.occurs_rc(id, t, depth + 1, visited),
-            Type::Tuple(ts) => ts.iter().any(|t| self.occurs_rc(id, t, depth + 1, visited)),
-            Type::Fun { params, ret } => {
-                params
-                    .iter()
-                    .any(|t| self.occurs_rc(id, t, depth + 1, visited))
-                    || self.occurs_rc(id, ret, depth + 1, visited)
-            }
-            Type::App { args, .. } => args
-                .iter()
-                .any(|t| self.occurs_rc(id, t, depth + 1, visited)),
-            _ => false,
         }
+        false
     }
 
     fn discharge_constraints(
@@ -337,7 +335,11 @@ pub fn instantiate(store: &mut TypeStore, scheme: &Scheme, level: u32) -> Type {
 
 fn apply_subst(store: &mut TypeStore, ty: &Type, subst: &HashMap<TvId, Type>) -> Type {
     let mut memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
-    (*apply_subst_rc(store, &Rc::new(ty.clone()), subst, &mut memo)).clone()
+    // Same quantified variable may appear under distinct Rc wrappers (e.g. the
+    // param slot vs body occurrences). Memoising by TvId keeps instantiate
+    // sharing intact for Mairson-style doubling.
+    let mut var_memo: HashMap<TvId, Rc<Type>> = HashMap::new();
+    (*apply_subst_rc(store, &Rc::new(ty.clone()), subst, &mut memo, &mut var_memo)).clone()
 }
 
 fn apply_subst_rc(
@@ -345,6 +347,7 @@ fn apply_subst_rc(
     ty: &Rc<Type>,
     subst: &HashMap<TvId, Type>,
     memo: &mut HashMap<*const Type, Rc<Type>>,
+    var_memo: &mut HashMap<TvId, Rc<Type>>,
 ) -> Rc<Type> {
     let ptr = Rc::as_ptr(ty);
     if let Some(z) = memo.get(&ptr) {
@@ -355,39 +358,55 @@ fn apply_subst_rc(
         Type::Var(id) => {
             if let Some(info) = store.vars.get(id) {
                 if let Some(link) = info.link.clone() {
-                    return apply_subst_rc(store, &Rc::new(link), subst, memo);
+                    return apply_subst_rc(store, &link, subst, memo, var_memo);
                 }
             }
             if let Some(t) = subst.get(id) {
-                Rc::new(t.clone())
+                if let Some(existing) = var_memo.get(id) {
+                    return existing.clone();
+                }
+                let fresh = Rc::new(t.clone());
+                var_memo.insert(*id, fresh.clone());
+                fresh
             } else {
                 ty.clone()
             }
         }
-        Type::List(t) => Rc::new(Type::List(apply_subst_rc(store, t, subst, memo))),
+        Type::List(t) => Rc::new(Type::List(apply_subst_rc(store, t, subst, memo, var_memo))),
         Type::Tuple(ts) => Rc::new(Type::Tuple(
             ts.iter()
-                .map(|t| apply_subst_rc(store, t, subst, memo))
+                .map(|t| apply_subst_rc(store, t, subst, memo, var_memo))
                 .collect(),
         )),
         Type::Fun { params, ret } => Rc::new(Type::Fun {
             params: params
                 .iter()
-                .map(|t| apply_subst_rc(store, t, subst, memo))
+                .map(|t| apply_subst_rc(store, t, subst, memo, var_memo))
                 .collect(),
-            ret: apply_subst_rc(store, ret, subst, memo),
+            ret: apply_subst_rc(store, ret, subst, memo, var_memo),
         }),
         Type::App { def, args } => Rc::new(Type::App {
             def: *def,
             args: args
                 .iter()
-                .map(|t| apply_subst_rc(store, t, subst, memo))
+                .map(|t| apply_subst_rc(store, t, subst, memo, var_memo))
                 .collect(),
         }),
         _ => ty.clone(),
     };
     memo.insert(ptr, result.clone());
     result
+}
+
+/// True when `scheme.body` mentions a free unification variable that is not
+/// among the quantified `scheme.vars` (after zonking). Used for the module
+/// interface escape check and its unit test.
+pub fn scheme_has_escaping_vars(store: &mut TypeStore, scheme: &Scheme) -> bool {
+    let body = store.zonk(&scheme.body);
+    let mut free = BTreeSet::new();
+    store.free_vars(&body, &mut free);
+    let quantified: BTreeSet<_> = scheme.vars.iter().copied().collect();
+    free.iter().any(|id| !quantified.contains(id))
 }
 
 /// Generalise type variables with level > current_level.
@@ -475,7 +494,7 @@ fn replace_rigids_rc(
         Type::Var(id) => {
             if let Some(info) = store.vars.get(id) {
                 if let Some(link) = info.link.clone() {
-                    return replace_rigids_rc(store, &Rc::new(link), subst, memo);
+                    return replace_rigids_rc(store, &link, subst, memo);
                 }
             }
             ty.clone()

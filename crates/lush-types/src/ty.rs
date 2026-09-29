@@ -154,7 +154,9 @@ impl Scheme {
 #[derive(Clone, Debug)]
 pub struct TypeVarInfo {
     pub level: u32,
-    pub link: Option<Type>,
+    /// Linked type, stored behind [`Rc`] so zonk/occurs/subst follow the same
+    /// node and preserve DAG sharing (Mairson-style doubling).
+    pub link: Option<Rc<Type>>,
     pub constraints: ConstraintSet,
 }
 
@@ -262,9 +264,11 @@ impl TypeStore {
             Type::Var(id) => {
                 if let Some(info) = self.vars.get(id) {
                     if let Some(link) = info.link.clone() {
-                        let z = self.zonk_rc(&Rc::new(link), memo);
+                        // Follow the shared link Rc so memoisation hits across
+                        // every occurrence of this variable.
+                        let z = self.zonk_rc(&link, memo);
                         if let Some(info) = self.vars.get_mut(id) {
-                            info.link = Some((*z).clone());
+                            info.link = Some(z.clone());
                         }
                         // Don't insert the Var node's ptr → linked type; callers see the link.
                         return z;
@@ -364,7 +368,7 @@ impl TypeStore {
             Type::Var(id) => {
                 if let Some(info) = self.vars.get(id) {
                     if let Some(link) = info.link.clone() {
-                        self.free_vars_rc(&Rc::new(link), out, visited);
+                        self.free_vars_rc(&link, out, visited);
                         return;
                     }
                 }
