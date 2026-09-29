@@ -3,7 +3,7 @@
 //! Compound types use [`Rc`] so DAG-shaped types (e.g. let-doubling) share
 //! structure; zonk / free_vars / display walk with a pointer-keyed memo.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -213,6 +213,9 @@ pub struct TypeStore {
     pub rigids: HashMap<RigidId, RigidInfo>,
     pub defs: HashMap<TypeDefId, TypeDefInfo>,
     pub work: u64,
+    /// Set when a type walk hits [`crate::limits::MAX_DEPTH`]; the checker
+    /// emits E1305 once and continues with `Type::Error` rather than aborting.
+    pub too_deep: bool,
 }
 
 impl TypeStore {
@@ -250,148 +253,196 @@ impl TypeStore {
         (*self.zonk_rc(&Rc::new(ty.clone()), &mut memo)).clone()
     }
 
-    /// Zonk a shared type node, memoising by `Rc` pointer so DAG walks are linear.
+    /// Zonk a shared type node with an explicit stack and pointer-keyed memo so
+    /// DAG spines (let-doubling) stay linear and never overflow the native
+    /// stack. A single-walk node budget yields E1305 for Mairson-sized trees.
+    /// Cross-call pointer caches are unsafe: ephemeral `Rc` roots are freed and
+    /// their addresses reused.
     pub fn zonk_rc(
         &mut self,
         ty: &Rc<Type>,
         memo: &mut HashMap<*const Type, Rc<Type>>,
     ) -> Rc<Type> {
-        let ptr = Rc::as_ptr(ty);
-        if let Some(z) = memo.get(&ptr) {
+        /// Unique nodes visited in one zonk before we report E1305.
+        const MAX_ZONK_NODES: usize = 32_768;
+        enum Frame {
+            Visit(Rc<Type>),
+            Build(Rc<Type>),
+        }
+        let root_ptr = Rc::as_ptr(ty);
+        if let Some(z) = memo.get(&root_ptr) {
             return z.clone();
         }
-        let result = match ty.as_ref() {
-            Type::Var(id) => {
-                if let Some(info) = self.vars.get(id) {
-                    if let Some(link) = info.link.clone() {
-                        // Follow the shared link Rc so memoisation hits across
-                        // every occurrence of this variable.
-                        let z = self.zonk_rc(&link, memo);
-                        if let Some(info) = self.vars.get_mut(id) {
-                            info.link = Some(z.clone());
+        let mut stack: Vec<Frame> = vec![Frame::Visit(ty.clone())];
+        let mut entered: HashSet<*const Type> = HashSet::new();
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Visit(ty) => {
+                    let ptr = Rc::as_ptr(&ty);
+                    if memo.contains_key(&ptr) {
+                        continue;
+                    }
+                    if !entered.insert(ptr) {
+                        continue;
+                    }
+                    if entered.len() > MAX_ZONK_NODES {
+                        self.too_deep = true;
+                        let err = Rc::new(Type::Error);
+                        memo.insert(ptr, err.clone());
+                        return err;
+                    }
+                    stack.push(Frame::Build(ty.clone()));
+                    match ty.as_ref() {
+                        Type::Var(id) => {
+                            if let Some(link) = self.vars.get(id).and_then(|i| i.link.clone()) {
+                                stack.push(Frame::Visit(link));
+                            }
                         }
-                        // Don't insert the Var node's ptr → linked type; callers see the link.
-                        return z;
+                        Type::List(t) => stack.push(Frame::Visit(t.clone())),
+                        Type::Tuple(ts) => {
+                            for t in ts.iter().rev() {
+                                stack.push(Frame::Visit(t.clone()));
+                            }
+                        }
+                        Type::Fun { params, ret } => {
+                            stack.push(Frame::Visit(ret.clone()));
+                            for p in params.iter().rev() {
+                                stack.push(Frame::Visit(p.clone()));
+                            }
+                        }
+                        Type::App { args, .. } => {
+                            for a in args.iter().rev() {
+                                stack.push(Frame::Visit(a.clone()));
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                ty.clone()
-            }
-            Type::List(t) => {
-                let zt = self.zonk_rc(t, memo);
-                if Rc::ptr_eq(&zt, t) {
-                    ty.clone()
-                } else {
-                    Rc::new(Type::List(zt))
-                }
-            }
-            Type::Tuple(ts) => {
-                let mut changed = false;
-                let mut zs = Vec::with_capacity(ts.len());
-                for t in ts {
-                    let z = self.zonk_rc(t, memo);
-                    if !Rc::ptr_eq(&z, t) {
-                        changed = true;
+                Frame::Build(ty) => {
+                    let ptr = Rc::as_ptr(&ty);
+                    if memo.contains_key(&ptr) {
+                        continue;
                     }
-                    zs.push(z);
-                }
-                if changed {
-                    Rc::new(Type::Tuple(zs))
-                } else {
-                    ty.clone()
+                    let lookup = |memo: &HashMap<*const Type, Rc<Type>>, t: &Rc<Type>| {
+                        memo.get(&Rc::as_ptr(t))
+                            .cloned()
+                            .unwrap_or_else(|| t.clone())
+                    };
+                    let result = match ty.as_ref() {
+                        Type::Var(id) => {
+                            if let Some(link) = self.vars.get(id).and_then(|i| i.link.clone()) {
+                                let z = lookup(memo, &link);
+                                if let Some(info) = self.vars.get_mut(id) {
+                                    info.link = Some(z.clone());
+                                }
+                                // Cache the var node too so later walks hit memo.
+                                memo.insert(ptr, z.clone());
+                                continue;
+                            }
+                            ty.clone()
+                        }
+                        Type::List(t) => {
+                            let zt = lookup(memo, t);
+                            if Rc::ptr_eq(&zt, t) {
+                                ty.clone()
+                            } else {
+                                Rc::new(Type::List(zt))
+                            }
+                        }
+                        Type::Tuple(ts) => {
+                            let mut changed = false;
+                            let mut zs = Vec::with_capacity(ts.len());
+                            for t in ts {
+                                let z = lookup(memo, t);
+                                if !Rc::ptr_eq(&z, t) {
+                                    changed = true;
+                                }
+                                zs.push(z);
+                            }
+                            if changed {
+                                Rc::new(Type::Tuple(zs))
+                            } else {
+                                ty.clone()
+                            }
+                        }
+                        Type::Fun { params, ret } => {
+                            let mut changed = false;
+                            let mut zs = Vec::with_capacity(params.len());
+                            for p in params {
+                                let z = lookup(memo, p);
+                                if !Rc::ptr_eq(&z, p) {
+                                    changed = true;
+                                }
+                                zs.push(z);
+                            }
+                            let zr = lookup(memo, ret);
+                            if !Rc::ptr_eq(&zr, ret) {
+                                changed = true;
+                            }
+                            if changed {
+                                Rc::new(Type::Fun {
+                                    params: zs,
+                                    ret: zr,
+                                })
+                            } else {
+                                ty.clone()
+                            }
+                        }
+                        Type::App { def, args } => {
+                            let mut changed = false;
+                            let mut zs = Vec::with_capacity(args.len());
+                            for a in args {
+                                let z = lookup(memo, a);
+                                if !Rc::ptr_eq(&z, a) {
+                                    changed = true;
+                                }
+                                zs.push(z);
+                            }
+                            if changed {
+                                Rc::new(Type::App {
+                                    def: *def,
+                                    args: zs,
+                                })
+                            } else {
+                                ty.clone()
+                            }
+                        }
+                        _ => ty.clone(),
+                    };
+                    memo.insert(ptr, result);
                 }
             }
-            Type::Fun { params, ret } => {
-                let mut changed = false;
-                let mut zs = Vec::with_capacity(params.len());
-                for p in params {
-                    let z = self.zonk_rc(p, memo);
-                    if !Rc::ptr_eq(&z, p) {
-                        changed = true;
-                    }
-                    zs.push(z);
-                }
-                let zr = self.zonk_rc(ret, memo);
-                if !Rc::ptr_eq(&zr, ret) {
-                    changed = true;
-                }
-                if changed {
-                    Rc::new(Type::Fun {
-                        params: zs,
-                        ret: zr,
-                    })
-                } else {
-                    ty.clone()
-                }
-            }
-            Type::App { def, args } => {
-                let mut changed = false;
-                let mut zs = Vec::with_capacity(args.len());
-                for a in args {
-                    let z = self.zonk_rc(a, memo);
-                    if !Rc::ptr_eq(&z, a) {
-                        changed = true;
-                    }
-                    zs.push(z);
-                }
-                if changed {
-                    Rc::new(Type::App {
-                        def: *def,
-                        args: zs,
-                    })
-                } else {
-                    ty.clone()
-                }
-            }
-            _ => ty.clone(),
-        };
-        memo.insert(ptr, result.clone());
-        result
+        }
+        memo.get(&root_ptr).cloned().unwrap_or_else(|| ty.clone())
     }
 
     pub fn free_vars(&mut self, ty: &Type, out: &mut BTreeSet<TvId>) {
-        let mut visited: HashMap<*const Type, ()> = HashMap::new();
-        self.free_vars_rc(&Rc::new(ty.clone()), out, &mut visited);
-    }
-
-    fn free_vars_rc(
-        &mut self,
-        ty: &Rc<Type>,
-        out: &mut BTreeSet<TvId>,
-        visited: &mut HashMap<*const Type, ()>,
-    ) {
-        let ptr = Rc::as_ptr(ty);
-        if visited.contains_key(&ptr) {
-            return;
-        }
-        visited.insert(ptr, ());
-        match ty.as_ref() {
-            Type::Var(id) => {
-                if let Some(info) = self.vars.get(id) {
-                    if let Some(link) = info.link.clone() {
-                        self.free_vars_rc(&link, out, visited);
-                        return;
+        let mut visited: HashSet<*const Type> = HashSet::new();
+        let mut stack: Vec<Rc<Type>> = vec![Rc::new(ty.clone())];
+        while let Some(ty) = stack.pop() {
+            let ptr = Rc::as_ptr(&ty);
+            if !visited.insert(ptr) {
+                continue;
+            }
+            match ty.as_ref() {
+                Type::Var(id) => {
+                    if let Some(info) = self.vars.get(id) {
+                        if let Some(link) = info.link.clone() {
+                            stack.push(link);
+                            continue;
+                        }
                     }
+                    out.insert(*id);
                 }
-                out.insert(*id);
-            }
-            Type::List(t) => self.free_vars_rc(t, out, visited),
-            Type::Tuple(ts) => {
-                for t in ts {
-                    self.free_vars_rc(t, out, visited);
+                Type::List(t) => stack.push(t.clone()),
+                Type::Tuple(ts) => stack.extend(ts.iter().cloned()),
+                Type::Fun { params, ret } => {
+                    stack.extend(params.iter().cloned());
+                    stack.push(ret.clone());
                 }
+                Type::App { args, .. } => stack.extend(args.iter().cloned()),
+                _ => {}
             }
-            Type::Fun { params, ret } => {
-                for p in params {
-                    self.free_vars_rc(p, out, visited);
-                }
-                self.free_vars_rc(ret, out, visited);
-            }
-            Type::App { args, .. } => {
-                for a in args {
-                    self.free_vars_rc(a, out, visited);
-                }
-            }
-            _ => {}
         }
     }
 

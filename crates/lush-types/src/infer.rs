@@ -268,6 +268,16 @@ pub fn infer_module(
     // Warnings: unused imports, unused private, unused values handled during infer
     warn_unused(&mut ctx, module);
 
+    // E1305: a type walk hit MAX_DEPTH (e.g. Mairson composition).
+    if ctx.store.too_deep {
+        ctx.sink.error(
+            codes::E1305_TOO_DEEP,
+            "type checking exceeded maximum nesting depth",
+            Span::default(),
+            Some("simplify nested types or expressions".into()),
+        );
+    }
+
     // E1306: inference work budget (distinct from exhaustiveness E1451).
     if ctx.store.work > crate::limits::MAX_EXHAUST_WORK.saturating_mul(4) {
         ctx.sink.error(
@@ -1156,10 +1166,16 @@ fn infer_block(ctx: &mut InferCtx<'_>, block: &Block, _is_fn_body: bool) -> Type
                 for n in &names {
                     ctx.binding_names.insert(n.clone());
                 }
-                // Infer the RHS one level up so its free variables can be generalised.
+                // Infer the RHS one level up so non-expansive bindings can be
+                // generalised. Expansive RHSs then have their free variables
+                // lowered back to the enclosing level (value restriction).
+                let expansive = is_expansive(&l.value);
                 ctx.level += 1;
                 let val_ty = infer_expr(ctx, &l.value);
                 ctx.level -= 1;
+                if expansive {
+                    unify::lower_levels(ctx.store, &val_ty, ctx.level);
+                }
                 for n in &names {
                     ctx.binding_names.remove(n);
                 }
@@ -1182,7 +1198,7 @@ fn infer_block(ctx: &mut InferCtx<'_>, block: &Block, _is_fn_body: bool) -> Type
                     work: 0,
                 };
                 ex.check_irrefutable(&l.pattern, &val_ty, l.assert);
-                infer_pattern(ctx, &l.pattern, &val_ty, is_expansive(&l.value));
+                infer_pattern(ctx, &l.pattern, &val_ty, expansive);
                 last_ty = Type::Nil;
             }
             Statement::Expr(e) => {

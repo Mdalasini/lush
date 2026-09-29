@@ -155,54 +155,7 @@ impl<'a> Unifier<'a> {
     }
 
     fn adjust_level(&mut self, ty: &Type, max_level: u32) {
-        let mut visited: HashMap<*const Type, ()> = HashMap::new();
-        self.adjust_level_rc(&Rc::new(ty.clone()), max_level, &mut visited);
-    }
-
-    fn adjust_level_rc(
-        &mut self,
-        ty: &Rc<Type>,
-        max_level: u32,
-        visited: &mut HashMap<*const Type, ()>,
-    ) {
-        let ptr = Rc::as_ptr(ty);
-        if visited.contains_key(&ptr) {
-            return;
-        }
-        visited.insert(ptr, ());
-        match ty.as_ref() {
-            Type::Var(id) => {
-                if let Some(info) = self.store.vars.get(id) {
-                    if let Some(link) = info.link.clone() {
-                        self.adjust_level_rc(&link, max_level, visited);
-                        return;
-                    }
-                }
-                if let Some(info) = self.store.vars.get_mut(id) {
-                    if info.level > max_level {
-                        info.level = max_level;
-                    }
-                }
-            }
-            Type::List(t) => self.adjust_level_rc(t, max_level, visited),
-            Type::Tuple(ts) => {
-                for t in ts {
-                    self.adjust_level_rc(t, max_level, visited);
-                }
-            }
-            Type::Fun { params, ret } => {
-                for p in params {
-                    self.adjust_level_rc(p, max_level, visited);
-                }
-                self.adjust_level_rc(ret, max_level, visited);
-            }
-            Type::App { args, .. } => {
-                for a in args {
-                    self.adjust_level_rc(a, max_level, visited);
-                }
-            }
-            _ => {}
-        }
+        lower_levels(self.store, ty, max_level);
     }
 
     /// True when `id` occurs free inside `ty` (infinite type).
@@ -339,7 +292,15 @@ fn apply_subst(store: &mut TypeStore, ty: &Type, subst: &HashMap<TvId, Type>) ->
     // param slot vs body occurrences). Memoising by TvId keeps instantiate
     // sharing intact for Mairson-style doubling.
     let mut var_memo: HashMap<TvId, Rc<Type>> = HashMap::new();
-    (*apply_subst_rc(store, &Rc::new(ty.clone()), subst, &mut memo, &mut var_memo)).clone()
+    (*apply_subst_rc(
+        store,
+        &Rc::new(ty.clone()),
+        subst,
+        &mut memo,
+        &mut var_memo,
+        0,
+    ))
+    .clone()
 }
 
 fn apply_subst_rc(
@@ -348,7 +309,14 @@ fn apply_subst_rc(
     subst: &HashMap<TvId, Type>,
     memo: &mut HashMap<*const Type, Rc<Type>>,
     var_memo: &mut HashMap<TvId, Rc<Type>>,
+    depth: usize,
 ) -> Rc<Type> {
+    // Bound native recursion; large Mairson spines hit this and become E1305.
+    // Let-doubling uses monomorphic schemes and does not instantiate deep DAGs.
+    if depth > MAX_DEPTH || memo.len() > 32_768 {
+        store.too_deep = true;
+        return Rc::new(Type::Error);
+    }
     let ptr = Rc::as_ptr(ty);
     if let Some(z) = memo.get(&ptr) {
         return z.clone();
@@ -358,7 +326,7 @@ fn apply_subst_rc(
         Type::Var(id) => {
             if let Some(info) = store.vars.get(id) {
                 if let Some(link) = info.link.clone() {
-                    return apply_subst_rc(store, &link, subst, memo, var_memo);
+                    return apply_subst_rc(store, &link, subst, memo, var_memo, depth + 1);
                 }
             }
             if let Some(t) = subst.get(id) {
@@ -372,30 +340,76 @@ fn apply_subst_rc(
                 ty.clone()
             }
         }
-        Type::List(t) => Rc::new(Type::List(apply_subst_rc(store, t, subst, memo, var_memo))),
+        Type::List(t) => Rc::new(Type::List(apply_subst_rc(
+            store,
+            t,
+            subst,
+            memo,
+            var_memo,
+            depth + 1,
+        ))),
         Type::Tuple(ts) => Rc::new(Type::Tuple(
             ts.iter()
-                .map(|t| apply_subst_rc(store, t, subst, memo, var_memo))
+                .map(|t| apply_subst_rc(store, t, subst, memo, var_memo, depth + 1))
                 .collect(),
         )),
         Type::Fun { params, ret } => Rc::new(Type::Fun {
             params: params
                 .iter()
-                .map(|t| apply_subst_rc(store, t, subst, memo, var_memo))
+                .map(|t| apply_subst_rc(store, t, subst, memo, var_memo, depth + 1))
                 .collect(),
-            ret: apply_subst_rc(store, ret, subst, memo, var_memo),
+            ret: apply_subst_rc(store, ret, subst, memo, var_memo, depth + 1),
         }),
         Type::App { def, args } => Rc::new(Type::App {
             def: *def,
             args: args
                 .iter()
-                .map(|t| apply_subst_rc(store, t, subst, memo, var_memo))
+                .map(|t| apply_subst_rc(store, t, subst, memo, var_memo, depth + 1))
                 .collect(),
         }),
         _ => ty.clone(),
     };
     memo.insert(ptr, result.clone());
     result
+}
+
+/// Lower every free unification variable in `ty` to at most `max_level`.
+///
+/// Used after inferring an expansive `let` RHS that was typed one level up:
+/// those variables are free in the environment and must not be generalised
+/// (§4.3 value restriction).
+pub fn lower_levels(store: &mut TypeStore, ty: &Type, max_level: u32) {
+    let mut visited: HashSet<*const Type> = HashSet::new();
+    let mut stack: Vec<Rc<Type>> = vec![Rc::new(ty.clone())];
+    while let Some(ty) = stack.pop() {
+        let ptr = Rc::as_ptr(&ty);
+        if !visited.insert(ptr) {
+            continue;
+        }
+        match ty.as_ref() {
+            Type::Var(id) => {
+                if let Some(info) = store.vars.get(id) {
+                    if let Some(link) = info.link.clone() {
+                        stack.push(link);
+                        continue;
+                    }
+                }
+                if let Some(info) = store.vars.get_mut(id) {
+                    if info.level > max_level {
+                        info.level = max_level;
+                    }
+                }
+            }
+            Type::List(t) => stack.push(t.clone()),
+            Type::Tuple(ts) => stack.extend(ts.iter().cloned()),
+            Type::Fun { params, ret } => {
+                stack.extend(params.iter().cloned());
+                stack.push(ret.clone());
+            }
+            Type::App { args, .. } => stack.extend(args.iter().cloned()),
+            _ => {}
+        }
+    }
 }
 
 /// True when `scheme.body` mentions a free unification variable that is not
