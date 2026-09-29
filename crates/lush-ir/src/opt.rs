@@ -52,9 +52,9 @@ fn const_fold(program: &mut Program) {
                 _ => None,
             };
             if let Some((dst, value)) = foldable {
-                f.code[i] = Op::LoadInt { dst, value };
-                f.code[i + 1] = Op::Move { dst, src: dst };
-                f.code[i + 2] = Op::Move { dst, src: dst };
+                // Replace only the binop. The operand LoadInts may still be live
+                // (e.g. `let a = -7; let b = 2; a == (a / b) * b + a % b`).
+                f.code[i + 2] = Op::LoadInt { dst, value };
                 i += 3;
             } else {
                 i += 1;
@@ -81,21 +81,65 @@ fn try_fold_binop(a_dst: u8, av: i64, b_dst: u8, bv: i64, op: &Op) -> Option<(u8
 }
 
 fn dce_pure_moves(program: &mut Program) {
-    // Remove `move rX, rX` no-ops introduced by folding.
+    // Remove `move rX, rX` no-ops introduced by folding, remapping jump targets
+    // so later instructions keep their relative control-flow edges.
     for f in &mut program.functions {
-        let mut out = Vec::with_capacity(f.code.len());
-        let mut lines = Vec::with_capacity(f.lines.len());
-        for (op, line) in f.code.drain(..).zip(f.lines.drain(..)) {
-            match op {
-                Op::Move { dst, src } if dst == src => continue,
-                other => {
-                    out.push(other);
-                    lines.push(line);
-                }
+        let keep: Vec<bool> = f
+            .code
+            .iter()
+            .map(|op| !matches!(op, Op::Move { dst, src } if dst == src))
+            .collect();
+        let mut new_index = vec![0u32; f.code.len() + 1];
+        let mut next = 0u32;
+        for (i, &kept) in keep.iter().enumerate() {
+            new_index[i] = next;
+            if kept {
+                next += 1;
             }
+        }
+        new_index[f.code.len()] = next;
+
+        let mut out = Vec::with_capacity(next as usize);
+        let mut lines = Vec::with_capacity(next as usize);
+        for (i, (op, line)) in f.code.drain(..).zip(f.lines.drain(..)).enumerate() {
+            if !keep[i] {
+                continue;
+            }
+            out.push(remap_op_targets(op, &new_index));
+            lines.push(line);
         }
         f.code = out;
         f.lines = lines;
+    }
+}
+
+fn remap_op_targets(op: Op, new_index: &[u32]) -> Op {
+    let map = |t: u32| -> u32 {
+        let i = t as usize;
+        if i < new_index.len() {
+            new_index[i]
+        } else {
+            t
+        }
+    };
+    match op {
+        Op::Jump { target } => Op::Jump {
+            target: map(target),
+        },
+        Op::JumpIfFalse { cond, target } => Op::JumpIfFalse {
+            cond,
+            target: map(target),
+        },
+        Op::SwitchTag {
+            scrutinee,
+            arms,
+            default,
+        } => Op::SwitchTag {
+            scrutinee,
+            arms: arms.into_iter().map(|(tag, pc)| (tag, map(pc))).collect(),
+            default: map(default),
+        },
+        other => other,
     }
 }
 
@@ -146,5 +190,23 @@ pub fn main() {
                 .any(|op| matches!(op, Op::Div { .. }));
             assert!(has_div, "1/0 must not be folded away");
         }
+    }
+
+    #[test]
+    fn dce_preserves_jump_targets() {
+        let src = r#"
+import lush/io;
+import lush/int;
+pub fn main() -> Nil {
+  io.println(int.to_string(1 + 2));
+  case True {
+    True -> io.println("ok");
+    False -> io.println("bad");
+  };
+}
+"#;
+        let prog =
+            compile_source_with_opt("main", src, OptLevel::O1).unwrap_or_else(|d| panic!("{d:?}"));
+        assert!(prog.verify().is_ok());
     }
 }
