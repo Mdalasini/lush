@@ -365,13 +365,14 @@ impl TypeStore {
         let mut memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
         let mut tv_map: HashMap<TvId, Type> = HashMap::new();
         let mut var_memo: HashMap<*const Type, bool> = HashMap::new();
+        let mut rigid_memo: HashMap<*const Type, Rc<Type>> = HashMap::new();
         // Keep roots alive for the whole batch so memo pointers stay valid.
         let roots: Vec<Rc<Type>> = types.iter().map(|t| Rc::new(t.clone())).collect();
         let mut closed: Vec<Type> = Vec::with_capacity(roots.len());
         for root in &roots {
             let zrc = self.zonk_rc(root, &mut memo);
             if Self::rc_contains_var(&zrc, &mut var_memo) {
-                closed.push((*self.rigidify_rc(&zrc, &mut HashMap::new(), &mut tv_map)).clone());
+                closed.push((*self.rigidify_rc(&zrc, &mut rigid_memo, &mut tv_map)).clone());
             } else {
                 closed.push((*zrc).clone());
             }
@@ -385,15 +386,13 @@ impl TypeStore {
     }
 
     fn rc_contains_var(ty: &Rc<Type>, memo: &mut HashMap<*const Type, bool>) -> bool {
+        // Iterative DAG walk: mark nodes as visited (false) before enqueueing
+        // children so shared structure is not re-expanded forever.
         let mut stack = vec![ty.clone()];
-        let mut visiting: Vec<*const Type> = Vec::new();
         while let Some(t) = stack.pop() {
             let ptr = Rc::as_ptr(&t);
             if let Some(&v) = memo.get(&ptr) {
                 if v {
-                    for p in visiting {
-                        memo.insert(p, true);
-                    }
                     return true;
                 }
                 continue;
@@ -401,23 +400,20 @@ impl TypeStore {
             match t.as_ref() {
                 Type::Var(_) => {
                     memo.insert(ptr, true);
-                    for p in visiting {
-                        memo.insert(p, true);
-                    }
                     return true;
                 }
                 Type::List(c) => {
-                    visiting.push(ptr);
+                    memo.insert(ptr, false);
                     stack.push(c.clone());
                 }
                 Type::Tuple(cs) | Type::App { args: cs, .. } => {
-                    visiting.push(ptr);
+                    memo.insert(ptr, false);
                     for c in cs {
                         stack.push(c.clone());
                     }
                 }
                 Type::Fun { params, ret } => {
-                    visiting.push(ptr);
+                    memo.insert(ptr, false);
                     for c in params {
                         stack.push(c.clone());
                     }
@@ -427,9 +423,6 @@ impl TypeStore {
                     memo.insert(ptr, false);
                 }
             }
-        }
-        for p in visiting {
-            memo.entry(p).or_insert(false);
         }
         false
     }
