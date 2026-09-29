@@ -33,10 +33,17 @@ pub fn optimise(program: &mut Program, level: OptLevel) -> Result<(), String> {
 
 fn const_fold(program: &mut Program) {
     for f in &mut program.functions {
+        let jump_targets = collect_jump_targets(&f.code);
         let mut i = 0;
         while i + 2 < f.code.len() {
-            // Pattern: LoadInt a; LoadInt b; BinOp dst,a,b  → LoadInt dst, folded
-            // only when numeric helpers succeed.
+            // Skip windows where a jump lands on the middle or last instruction:
+            // those LoadInts may be entry points, not a straight-line foldable pair.
+            if jump_targets.contains(&(i as u32 + 1)) || jump_targets.contains(&(i as u32 + 2)) {
+                i += 1;
+                continue;
+            }
+            // Pattern: LoadInt a; LoadInt b; BinOp dst,a,b  → keep loads, replace
+            // BinOp with LoadInt dst, folded — only when numeric helpers succeed.
             let foldable = match (&f.code[i], &f.code[i + 1], &f.code[i + 2]) {
                 (
                     Op::LoadInt {
@@ -62,6 +69,25 @@ fn const_fold(program: &mut Program) {
         }
         let _ = &program.constants;
     }
+}
+
+fn collect_jump_targets(code: &[Op]) -> std::collections::HashSet<u32> {
+    let mut targets = std::collections::HashSet::new();
+    for op in code {
+        match op {
+            Op::Jump { target } | Op::JumpIfFalse { target, .. } => {
+                targets.insert(*target);
+            }
+            Op::SwitchTag { arms, default, .. } => {
+                targets.insert(*default);
+                for (_, pc) in arms {
+                    targets.insert(*pc);
+                }
+            }
+            _ => {}
+        }
+    }
+    targets
 }
 
 #[allow(clippy::type_complexity)]
