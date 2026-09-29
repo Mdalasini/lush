@@ -242,6 +242,8 @@ pub struct Arg {
     pub label: Option<Name>,
     pub value: ArgValue,
     pub span: Span,
+    /// True only for the implicit callback appended by desugaring `use`.
+    pub implicit_use_callback: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -716,6 +718,7 @@ pub mod equiv {
                 ArgValue::Hole => ArgValue::Hole,
             },
             span: Span::default(),
+            implicit_use_callback: a.implicit_use_callback,
         }
     }
 

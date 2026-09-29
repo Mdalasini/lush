@@ -1,6 +1,7 @@
 //! Compile-time constant expression evaluation (§5.8 / §6).
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use lush_syntax::ast::*;
 use lush_syntax::span::Span;
@@ -18,11 +19,11 @@ pub enum ConstValue {
     String(String),
     Bool(bool),
     Nil,
-    Tuple(Vec<ConstValue>),
-    List(Vec<ConstValue>),
+    Tuple(Rc<Vec<ConstValue>>),
+    List(Rc<Vec<ConstValue>>),
     Adt {
         name: String,
-        fields: Vec<ConstValue>,
+        fields: Rc<Vec<ConstValue>>,
     },
 }
 
@@ -123,7 +124,7 @@ pub fn eval_const_expr(expr: &Expr, env: &mut ConstEnv, sink: &mut TypeSink) -> 
             "Nil" => Some(ConstValue::Nil),
             name => Some(ConstValue::Adt {
                 name: name.into(),
-                fields: vec![],
+                fields: Rc::new(vec![]),
             }),
         },
         ExprKind::Tuple(items) => {
@@ -131,7 +132,7 @@ pub fn eval_const_expr(expr: &Expr, env: &mut ConstEnv, sink: &mut TypeSink) -> 
             for e in items {
                 vals.push(eval_const_expr(e, env, sink)?);
             }
-            Some(ConstValue::Tuple(vals))
+            Some(ConstValue::Tuple(Rc::new(vals)))
         }
         ExprKind::List { items, spread } => {
             if spread.is_some() {
@@ -147,7 +148,7 @@ pub fn eval_const_expr(expr: &Expr, env: &mut ConstEnv, sink: &mut TypeSink) -> 
             for e in items {
                 vals.push(eval_const_expr(e, env, sink)?);
             }
-            Some(ConstValue::List(vals))
+            Some(ConstValue::List(Rc::new(vals)))
         }
         ExprKind::Unary {
             op: UnaryOp::Neg,

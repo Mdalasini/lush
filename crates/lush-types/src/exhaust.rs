@@ -45,7 +45,13 @@ pub struct ExhaustChecker<'a> {
 }
 
 impl<'a> ExhaustChecker<'a> {
-    pub fn check_case(&mut self, subjects: &[Type], clauses: &[Clause], span: Span) {
+    pub fn check_case(
+        &mut self,
+        subjects: &[Type],
+        clauses: &[Clause],
+        span: Span,
+        constructor_aliases: &std::collections::HashMap<String, String>,
+    ) {
         if subjects.is_empty() {
             return;
         }
@@ -62,14 +68,14 @@ impl<'a> ExhaustChecker<'a> {
         // String/BitArray). Hash literals so n arms are O(n), not O(n²).
         if subjects.len() == 1
             && is_infinite_lit_domain(self.store, &subjects[0])
-            && self.check_lit_column(clauses, span)
+            && self.check_lit_column(clauses, span, constructor_aliases)
         {
             return;
         }
 
         let mut matrix: Vec<Row> = Vec::new();
         for clause in clauses {
-            let rows = expand_clause(clause, subjects.len());
+            let rows = expand_clause(clause, subjects.len(), constructor_aliases);
             if clause.guard.is_some() {
                 continue; // guarded arms don't establish coverage
             }
@@ -119,7 +125,12 @@ impl<'a> ExhaustChecker<'a> {
     }
 
     /// Returns true when the fast path fully handled the match.
-    fn check_lit_column(&mut self, clauses: &[Clause], span: Span) -> bool {
+    fn check_lit_column(
+        &mut self,
+        clauses: &[Clause],
+        span: Span,
+        constructor_aliases: &std::collections::HashMap<String, String>,
+    ) -> bool {
         use std::collections::HashSet;
         let mut seen: HashSet<LitKind> = HashSet::new();
         let mut has_wild = false;
@@ -127,7 +138,7 @@ impl<'a> ExhaustChecker<'a> {
             if clause.guard.is_some() {
                 continue;
             }
-            let rows = expand_clause(clause, 1);
+            let rows = expand_clause(clause, 1, constructor_aliases);
             for row in rows {
                 self.tick().ok();
                 match &row[0].head {
@@ -454,10 +465,18 @@ fn ctor_fields(store: &TypeStore, ty: &Type, name: &str, arity: usize) -> Vec<Ty
     (0..arity).map(|_| Type::Error).collect()
 }
 
-fn expand_clause(clause: &Clause, n: usize) -> Vec<Row> {
+fn expand_clause(
+    clause: &Clause,
+    n: usize,
+    constructor_aliases: &std::collections::HashMap<String, String>,
+) -> Vec<Row> {
     let mut rows = Vec::new();
     for prow in &clause.patterns {
-        let mut nodes: Vec<Pat> = prow.patterns.iter().map(ast_pat).collect();
+        let mut nodes: Vec<Pat> = prow
+            .patterns
+            .iter()
+            .map(|pattern| ast_pat(pattern, constructor_aliases))
+            .collect();
         nodes.resize(
             n,
             Pat {
@@ -470,12 +489,12 @@ fn expand_clause(clause: &Clause, n: usize) -> Vec<Row> {
     rows
 }
 
-fn ast_pat(p: &Pattern) -> Pat {
+fn ast_pat(p: &Pattern, constructor_aliases: &std::collections::HashMap<String, String>) -> Pat {
     match &p.kind {
         PatternKind::Discard | PatternKind::Var(_) | PatternKind::UnderscoreName(_) => Pat {
             head: Head::Wildcard,
         },
-        PatternKind::Alias { pattern, .. } => ast_pat(pattern),
+        PatternKind::Alias { pattern, .. } => ast_pat(pattern, constructor_aliases),
         PatternKind::Int(lit) => Pat {
             head: Head::Lit(LitKind::Int(lit.digits.clone())),
         },
@@ -486,7 +505,11 @@ fn ast_pat(p: &Pattern) -> Pat {
             head: Head::Lit(LitKind::String(lit.value.clone())),
         },
         PatternKind::Tuple(ps) => Pat {
-            head: Head::Tuple(ps.iter().map(ast_pat).collect()),
+            head: Head::Tuple(
+                ps.iter()
+                    .map(|pattern| ast_pat(pattern, constructor_aliases))
+                    .collect(),
+            ),
         },
         PatternKind::List { items, spread } => {
             if items.is_empty() && spread.is_none() {
@@ -496,7 +519,10 @@ fn ast_pat(p: &Pattern) -> Pat {
             } else {
                 Pat {
                     head: Head::ListCons {
-                        heads: items.iter().map(ast_pat).collect(),
+                        heads: items
+                            .iter()
+                            .map(|pattern| ast_pat(pattern, constructor_aliases))
+                            .collect(),
                         has_spread: spread.is_some(),
                     },
                 }
@@ -508,16 +534,22 @@ fn ast_pat(p: &Pattern) -> Pat {
                     .iter()
                     .filter(|a| !a.spread)
                     .map(|a| {
-                        a.pattern.as_ref().map(ast_pat).unwrap_or(Pat {
-                            head: Head::Wildcard,
-                        })
+                        a.pattern
+                            .as_ref()
+                            .map(|pattern| ast_pat(pattern, constructor_aliases))
+                            .unwrap_or(Pat {
+                                head: Head::Wildcard,
+                            })
                     })
                     .collect(),
                 None => vec![],
             };
             Pat {
                 head: Head::Ctor {
-                    name: constructor.name.text.clone(),
+                    name: constructor_aliases
+                        .get(&constructor.name.text)
+                        .cloned()
+                        .unwrap_or_else(|| constructor.name.text.clone()),
                     fields,
                 },
             }

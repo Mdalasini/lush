@@ -16,6 +16,7 @@ pub mod numeric;
 pub mod resolve;
 pub mod stubs;
 pub mod ty;
+pub mod typed;
 pub mod unify;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -34,6 +35,8 @@ pub struct CheckResult {
     pub interface: ModuleInterface,
     /// Desugared module (captures/pipes/use rewritten).
     pub module: Module,
+    /// Additive semantic annotations for the desugared module.
+    pub typed: typed::TypedModule,
     pub diagnostics: Vec<Diagnostic>,
     pub work: u64,
 }
@@ -91,6 +94,7 @@ fn check_module_with_budget(
         return CheckResult {
             interface: ModuleInterface::empty(path),
             module: module.clone(),
+            typed: typed::TypedModule::default(),
             diagnostics: sink.into_diagnostics(),
             work: 0,
         };
@@ -109,7 +113,7 @@ fn check_module_with_budget(
     }
 
     let mut module = module.clone();
-    crate::desugar::desugar_module(&mut module, &mut sink);
+    let generated_names = crate::desugar::desugar_module(&mut module, &mut sink);
 
     let mut ctx = resolve::ResolveCtx {
         store: &mut store,
@@ -119,9 +123,8 @@ fn check_module_with_budget(
         prefixes,
     };
     let mut resolved = resolve::resolve_module(path, &module, &mut ctx);
-
-    // Qualified access is only via the module alias table (no bare enrichment).
-    let _ = &mut resolved;
+    let mut typed = typed::index_module(&module);
+    typed.generated_names = generated_names.into_iter().collect();
 
     let interface = infer::infer_module(
         path,
@@ -130,13 +133,17 @@ fn check_module_with_budget(
         &mut store,
         &mut sink,
         deps,
-        opts.entry,
+        infer::InferModuleOptions {
+            entry: opts.entry,
+            typed: &mut typed,
+        },
     );
 
     let work = store.work;
     CheckResult {
         interface,
         module,
+        typed,
         diagnostics: sink.into_diagnostics(),
         work,
     }
@@ -384,6 +391,7 @@ pub fn check_graph(
                             items: vec![],
                             span: Span::default(),
                         }),
+                    typed: typed::TypedModule::default(),
                     diagnostics: vec![],
                     work: 0,
                 },
@@ -424,6 +432,7 @@ pub fn check_graph(
                 CheckResult {
                     interface: ModuleInterface::empty(path),
                     module: (*module).clone(),
+                    typed: typed::TypedModule::default(),
                     diagnostics: vec![diag],
                     work: 0,
                 },
@@ -552,6 +561,7 @@ pub fn check_source(path: &str, source: &str, entry: bool) -> CheckResult {
                 items: vec![],
                 span: Span::default(),
             }),
+            typed: typed::TypedModule::default(),
             diagnostics: prior,
             work: 0,
         };
@@ -565,6 +575,7 @@ pub fn check_source(path: &str, source: &str, entry: bool) -> CheckResult {
                     items: vec![],
                     span: Span::default(),
                 },
+                typed: typed::TypedModule::default(),
                 diagnostics: prior,
                 work: 0,
             };

@@ -22,6 +22,8 @@ pub enum ValueBinding {
 pub struct ResolvedModule {
     pub path: String,
     pub values: HashMap<String, ValueInfo>,
+    /// Imported binding name to the original exported name (for `as` aliases).
+    pub value_origins: HashMap<String, String>,
     pub types: HashMap<String, TypeInfo>,
     pub imports_used: HashSet<String>,
     pub import_keys: Vec<(String, Span)>, // for unused warnings
@@ -58,6 +60,7 @@ pub fn resolve_module(path: &str, module: &Module, ctx: &mut ResolveCtx<'_>) -> 
     let mut resolved = ResolvedModule {
         path: path.to_string(),
         values: HashMap::new(),
+        value_origins: HashMap::new(),
         types: HashMap::new(),
         imports_used: HashSet::new(),
         import_keys: Vec::new(),
@@ -239,6 +242,7 @@ fn resolve_import(imp: &Import, resolved: &mut ResolvedModule, ctx: &mut Resolve
             } else {
                 match iface.values.get(&name) {
                     Some(v) => {
+                        resolved.value_origins.insert(bind_as.clone(), name.clone());
                         resolved.values.insert(
                             bind_as.clone(),
                             ValueInfo {
