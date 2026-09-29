@@ -1,0 +1,36 @@
+import lush/io;
+import lush/int;
+
+pub fn main() -> Nil {
+  case 7 {
+    n as m -> io.println(int.to_string(n + m));
+  };
+  case Ok(42) {
+    Ok(v) as whole -> {
+      io.println(int.to_string(v));
+      case whole {
+        Ok(x) -> io.println(int.to_string(x));
+        Error(_) -> io.println("e");
+      };
+    };
+    Error(_) -> io.println("e");
+  };
+  case #(1, 2) {
+    #(a, b) as pair -> {
+      io.println(int.to_string(a));
+      io.println(int.to_string(b));
+      case pair {
+        #(x, y) -> io.println(int.to_string(x + y));
+      };
+    };
+  };
+  case Ok(1) {
+    Ok(_) as whole -> {
+      case whole {
+        Ok(x) -> io.println(int.to_string(x));
+        Error(_) -> io.println("e");
+      };
+    };
+    Error(_) -> io.println("e");
+  };
+}

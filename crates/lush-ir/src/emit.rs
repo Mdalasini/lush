@@ -465,6 +465,14 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 self.recycle(src);
                 Some(())
             }
+            PatternKind::Alias { pattern, name } => {
+                // Bind the alias to `src`, then bind the inner pattern (which may
+                // consume/promote `src` if it is still a temp).
+                let alias_r = self.fresh()?;
+                self.emit(Op::Move { dst: alias_r, src }, pat.span);
+                self.define(name.text.clone(), alias_r);
+                self.bind_pattern(pattern, src)
+            }
             PatternKind::Tuple(ps) => {
                 for (i, p) in ps.iter().enumerate() {
                     let r = self.fresh()?;
@@ -1537,6 +1545,14 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             }
             let mut fail_jumps = Vec::new();
             for (pat, scrut) in row.patterns.iter().zip(scruts.iter()) {
+                // Unwrap `inner as name` layers; bind aliases to the scrutinee
+                // after the inner pattern has matched.
+                let mut alias_binds: Vec<(String, Span)> = Vec::new();
+                let mut pat = pat;
+                while let PatternKind::Alias { pattern, name } = &pat.kind {
+                    alias_binds.push((name.text.clone(), pat.span));
+                    pat = pattern.as_ref();
+                }
                 match &pat.kind {
                     PatternKind::Int(lit) => {
                         let base = match lit.base {
@@ -1902,7 +1918,25 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                             }
                         }
                     }
-                    _ => {}
+                    other => {
+                        let msg = match other {
+                            PatternKind::Alias { .. } => "alias patterns are not yet lowered",
+                            _ => "this pattern form is not yet lowered",
+                        };
+                        self.error(codes::E2011_LOWER, msg, pat.span);
+                        return None;
+                    }
+                }
+                for (name, span) in alias_binds {
+                    let r = self.fresh()?;
+                    self.emit(
+                        Op::Move {
+                            dst: r,
+                            src: *scrut,
+                        },
+                        span,
+                    );
+                    self.define(name, r);
                 }
             }
             if let Some(g) = &clause.guard {
