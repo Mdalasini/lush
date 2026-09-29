@@ -176,6 +176,11 @@ pub enum Op {
         src: Reg,
         value: i64,
     },
+    /// `dst = src` is the empty list.
+    IsEmptyList {
+        dst: Reg,
+        src: Reg,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -291,7 +296,7 @@ fn verify_op(prog: &Program, f: &Function, fi: usize, pi: usize, op: &Op) -> Res
             reg_ok(f, *a)?;
             reg_ok(f, *b)?;
         }
-        Op::Neg { dst, src } | Op::IsInt { dst, src, .. } => {
+        Op::Neg { dst, src } | Op::IsInt { dst, src, .. } | Op::IsEmptyList { dst, src } => {
             reg_ok(f, *dst)?;
             reg_ok(f, *src)?;
         }

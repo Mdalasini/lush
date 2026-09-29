@@ -891,6 +891,168 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                         );
                         fail_jumps.push(jmp);
                     }
+                    PatternKind::List { items, spread } => {
+                        // Nested list patterns beyond one cons cell are lowered
+                        // by walking items then the optional spread tail.
+                        let mut cur = *scrut;
+                        for item in items {
+                            let is_empty = self.fresh()?;
+                            self.emit(
+                                Op::IsEmptyList {
+                                    dst: is_empty,
+                                    src: cur,
+                                },
+                                pat.span,
+                            );
+                            // fail if empty when expecting a cons
+                            // Fail when empty while expecting a cons cell.
+                            let f = self.fresh()?;
+                            self.emit(
+                                Op::LoadBool {
+                                    dst: f,
+                                    value: false,
+                                },
+                                pat.span,
+                            );
+                            let ok = self.fresh()?;
+                            self.emit(
+                                Op::Eq {
+                                    dst: ok,
+                                    a: is_empty,
+                                    b: f,
+                                },
+                                pat.span,
+                            );
+                            let jmp = self.code.len();
+                            self.emit(
+                                Op::JumpIfFalse {
+                                    cond: ok,
+                                    target: 0,
+                                },
+                                pat.span,
+                            );
+                            fail_jumps.push(jmp);
+                            let head = self.fresh()?;
+                            self.emit(
+                                Op::GetField {
+                                    dst: head,
+                                    base: cur,
+                                    index: 0,
+                                },
+                                pat.span,
+                            );
+                            let tail = self.fresh()?;
+                            self.emit(
+                                Op::GetField {
+                                    dst: tail,
+                                    base: cur,
+                                    index: 1,
+                                },
+                                pat.span,
+                            );
+                            // Bind item pattern against head (var / discard only for now).
+                            match &item.kind {
+                                PatternKind::Var(n) => {
+                                    self.define(n.text.clone(), head);
+                                }
+                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
+                                PatternKind::Int(lit) => {
+                                    let base = match lit.base {
+                                        IntBase::Decimal => 10,
+                                        IntBase::Hex => 16,
+                                        IntBase::Octal => 8,
+                                        IntBase::Binary => 2,
+                                    };
+                                    let v = numeric::int_literal_value(&lit.digits, base).ok()?;
+                                    let ok = self.fresh()?;
+                                    self.emit(
+                                        Op::IsInt {
+                                            dst: ok,
+                                            src: head,
+                                            value: v,
+                                        },
+                                        item.span,
+                                    );
+                                    let jmp = self.code.len();
+                                    self.emit(
+                                        Op::JumpIfFalse {
+                                            cond: ok,
+                                            target: 0,
+                                        },
+                                        item.span,
+                                    );
+                                    fail_jumps.push(jmp);
+                                }
+                                _ => {
+                                    self.error(
+                                        codes::E2011_LOWER,
+                                        "nested list item pattern not supported yet",
+                                        item.span,
+                                    );
+                                    return None;
+                                }
+                            }
+                            cur = tail;
+                        }
+                        match spread {
+                            None => {
+                                let is_empty = self.fresh()?;
+                                self.emit(
+                                    Op::IsEmptyList {
+                                        dst: is_empty,
+                                        src: cur,
+                                    },
+                                    pat.span,
+                                );
+                                let jmp = self.code.len();
+                                self.emit(
+                                    Op::JumpIfFalse {
+                                        cond: is_empty,
+                                        target: 0,
+                                    },
+                                    pat.span,
+                                );
+                                fail_jumps.push(jmp);
+                            }
+                            Some(sp) => match &sp.kind {
+                                PatternKind::Var(n) => self.define(n.text.clone(), cur),
+                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
+                                _ => {
+                                    self.error(
+                                        codes::E2011_LOWER,
+                                        "complex list spread pattern not supported yet",
+                                        sp.span,
+                                    );
+                                    return None;
+                                }
+                            },
+                        }
+                    }
+                    PatternKind::Tuple(elems) => {
+                        for (i, ep) in elems.iter().enumerate() {
+                            let field = self.fresh()?;
+                            self.emit(
+                                Op::GetField {
+                                    dst: field,
+                                    base: *scrut,
+                                    index: i as u16,
+                                },
+                                ep.span,
+                            );
+                            match &ep.kind {
+                                PatternKind::Var(n) => self.define(n.text.clone(), field),
+                                PatternKind::Discard | PatternKind::UnderscoreName(_) => {}
+                                _ => {
+                                    self.error(
+                                        codes::E2011_LOWER,
+                                        "nested tuple pattern not supported yet",
+                                        ep.span,
+                                    );
+                                    return None;
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }

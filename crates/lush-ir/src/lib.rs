@@ -4,8 +4,10 @@
 
 pub mod bytecode;
 pub mod codes;
+pub mod dump;
 pub mod emit;
 pub mod limits;
+pub mod lushc;
 
 use std::collections::BTreeMap;
 
@@ -102,3 +104,6 @@ pub fn compile_sources(
 pub fn compile_source(path: &str, source: &str) -> Result<Program, Vec<Diagnostic>> {
     compile_sources(&[(path.to_string(), source.to_string())], path)
 }
+
+pub use dump::dump_program;
+pub use lushc::{decode as decode_lushc, encode as encode_lushc};

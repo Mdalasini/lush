@@ -273,6 +273,13 @@ impl Vm {
                 let ok = self.reg(fi, src).as_int(&self.heap) == Some(value);
                 self.set_reg(fi, dst, Value::from_bool(ok));
             }
+            Op::IsEmptyList { dst, src } => {
+                let ok = match self.reg(fi, src).as_ptr() {
+                    Some(p) => self.heap.kind(p) == ObjectKind::EmptyList,
+                    None => false,
+                };
+                self.set_reg(fi, dst, Value::from_bool(ok));
+            }
             Op::Call { dst, func, args } => {
                 self.call(fi, func as usize, &args, dst, false)?;
             }
@@ -333,6 +340,11 @@ impl Vm {
                 let v = match self.heap.kind(p) {
                     ObjectKind::Tuple => self.heap.tuple_field(p, index as usize),
                     ObjectKind::Adt => self.heap.adt_field(p, index as usize),
+                    ObjectKind::Cons => match index {
+                        0 => self.heap.cons_head(p),
+                        1 => self.heap.cons_tail(p),
+                        _ => return Err("cons field index out of range".into()),
+                    },
                     _ => return Err("get_field on bad object".into()),
                 };
                 self.set_reg(fi, dst, v);
