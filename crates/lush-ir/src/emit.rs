@@ -1932,22 +1932,6 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             );
             return None;
         }
-        // Reject dynamic sizes for this slice.
-        for seg in segs {
-            for opt in &seg.options {
-                if let BitOption::Size(e) = opt {
-                    if !matches!(e.kind, ExprKind::Int(_)) {
-                        self.error(
-                            codes::E2011_LOWER,
-                            "dynamic bit-array pattern sizes are not yet lowered",
-                            e.span,
-                        );
-                        return None;
-                    }
-                }
-            }
-        }
-
         let mut cur = scrut;
         let mut consumed_all = false;
         for (i, (seg, kind)) in segs.iter().zip(kinds.iter()).enumerate() {
@@ -1958,6 +1942,8 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     signed,
                     little,
                 } => {
+                    let (size_reg, size_temp) =
+                        self.emit_bit_pattern_size(seg, Some(i64::from(*size)))?;
                     let ok = self.fresh()?;
                     let value = self.fresh()?;
                     let rest = self.fresh()?;
@@ -1967,7 +1953,7 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                             value,
                             rest,
                             src: cur,
-                            size: *size,
+                            size_reg,
                             signed: *signed,
                             little: *little,
                         },
@@ -1983,6 +1969,9 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                     );
                     fail_jumps.push(jmp);
                     self.recycle(ok);
+                    if size_temp {
+                        self.recycle(size_reg);
+                    }
                     self.bind_bit_int_pattern(&seg.pattern, value, fail_jumps)?;
                     if cur != scrut {
                         self.recycle(cur);
@@ -2030,61 +2019,107 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
                 }
                 BitSegmentKind::Bytes { size } | BitSegmentKind::Bits { size } => {
                     let require_aligned = matches!(kind, BitSegmentKind::Bytes { .. });
-                    if size.is_some() {
-                        self.error(
-                            codes::E2011_LOWER,
-                            "sized bytes/bits bit-array patterns are not yet lowered",
+                    let unit_is_bytes = matches!(kind, BitSegmentKind::Bytes { .. });
+                    let sized = size.is_some()
+                        || seg.options.iter().any(|o| matches!(o, BitOption::Size(_)));
+                    if sized {
+                        let fallback = size.map(i64::from);
+                        let (size_reg, size_temp) = self.emit_bit_pattern_size(seg, fallback)?;
+                        let ok = self.fresh()?;
+                        let value = self.fresh()?;
+                        let rest = self.fresh()?;
+                        self.emit(
+                            Op::BitArrayTakeSlice {
+                                ok,
+                                value,
+                                rest,
+                                src: cur,
+                                size_reg,
+                                unit_is_bytes,
+                                require_byte_aligned: require_aligned,
+                            },
                             seg.span,
                         );
-                        return None;
-                    }
-                    if !is_last {
-                        self.error(
-                            codes::E2011_LOWER,
-                            "unsized bytes/bits must be the final bit-array pattern segment",
+                        let jmp = self.code.len();
+                        self.emit(
+                            Op::JumpIfFalse {
+                                cond: ok,
+                                target: 0,
+                            },
                             seg.span,
                         );
-                        return None;
-                    }
-                    let ok = self.fresh()?;
-                    let value = self.fresh()?;
-                    self.emit(
-                        Op::BitArrayTakeRest {
-                            ok,
-                            value,
-                            src: cur,
-                            require_byte_aligned: require_aligned,
-                        },
-                        seg.span,
-                    );
-                    let jmp = self.code.len();
-                    self.emit(
-                        Op::JumpIfFalse {
-                            cond: ok,
-                            target: 0,
-                        },
-                        seg.span,
-                    );
-                    fail_jumps.push(jmp);
-                    self.recycle(ok);
-                    match &seg.pattern.kind {
-                        PatternKind::Var(n) => self.define(n.text.clone(), value),
-                        PatternKind::Discard | PatternKind::UnderscoreName(_) => {
-                            self.recycle(value);
+                        fail_jumps.push(jmp);
+                        self.recycle(ok);
+                        if size_temp {
+                            self.recycle(size_reg);
                         }
-                        _ => {
+                        match &seg.pattern.kind {
+                            PatternKind::Var(n) => self.define(n.text.clone(), value),
+                            PatternKind::Discard | PatternKind::UnderscoreName(_) => {
+                                self.recycle(value);
+                            }
+                            _ => {
+                                self.error(
+                                    codes::E2011_LOWER,
+                                    "sized bytes/bits must bind a variable or `_`",
+                                    seg.pattern.span,
+                                );
+                                return None;
+                            }
+                        }
+                        if cur != scrut {
+                            self.recycle(cur);
+                        }
+                        cur = rest;
+                    } else {
+                        if !is_last {
                             self.error(
                                 codes::E2011_LOWER,
-                                "bytes/bits remainder must bind a variable or `_`",
-                                seg.pattern.span,
+                                "unsized bytes/bits must be the final bit-array pattern segment",
+                                seg.span,
                             );
                             return None;
                         }
+                        let ok = self.fresh()?;
+                        let value = self.fresh()?;
+                        self.emit(
+                            Op::BitArrayTakeRest {
+                                ok,
+                                value,
+                                src: cur,
+                                require_byte_aligned: require_aligned,
+                            },
+                            seg.span,
+                        );
+                        let jmp = self.code.len();
+                        self.emit(
+                            Op::JumpIfFalse {
+                                cond: ok,
+                                target: 0,
+                            },
+                            seg.span,
+                        );
+                        fail_jumps.push(jmp);
+                        self.recycle(ok);
+                        match &seg.pattern.kind {
+                            PatternKind::Var(n) => self.define(n.text.clone(), value),
+                            PatternKind::Discard | PatternKind::UnderscoreName(_) => {
+                                self.recycle(value);
+                            }
+                            _ => {
+                                self.error(
+                                    codes::E2011_LOWER,
+                                    "bytes/bits remainder must bind a variable or `_`",
+                                    seg.pattern.span,
+                                );
+                                return None;
+                            }
+                        }
+                        if cur != scrut {
+                            self.recycle(cur);
+                        }
+                        consumed_all = true;
                     }
-                    if cur != scrut {
-                        self.recycle(cur);
-                    }
-                    consumed_all = true;
                 }
             }
         }
@@ -2112,6 +2147,80 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             }
         }
         Some(())
+    }
+
+    /// Resolve a bit-array pattern segment's `:size(...)` to a register.
+    /// Returns `(reg, is_temp)` — temps (literal loads) may be recycled after the take.
+    fn emit_bit_pattern_size(
+        &mut self,
+        seg: &BitSegmentPat,
+        fallback_lit: Option<i64>,
+    ) -> Option<(Reg, bool)> {
+        let size_expr = seg.options.iter().find_map(|o| match o {
+            BitOption::Size(e) => Some(e),
+            _ => None,
+        });
+        match size_expr {
+            Some(e) => match &e.kind {
+                ExprKind::Int(lit) => {
+                    let base = match lit.base {
+                        IntBase::Decimal => 10,
+                        IntBase::Hex => 16,
+                        IntBase::Octal => 8,
+                        IntBase::Binary => 2,
+                    };
+                    let v = match numeric::int_literal_value(&lit.digits, base) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            self.error(
+                                codes::E2011_LOWER,
+                                "invalid bit-array size literal",
+                                e.span,
+                            );
+                            return None;
+                        }
+                    };
+                    let r = self.fresh()?;
+                    self.emit(Op::LoadInt { dst: r, value: v }, e.span);
+                    Some((r, true))
+                }
+                ExprKind::Var(n) => {
+                    let Some(r) = self.lookup(&n.text) else {
+                        self.error(
+                            codes::E2011_LOWER,
+                            format!(
+                                "bit-array size `{}` is not in scope for this pattern segment",
+                                n.text
+                            ),
+                            e.span,
+                        );
+                        return None;
+                    };
+                    Some((r, false))
+                }
+                _ => {
+                    self.error(
+                        codes::E2011_LOWER,
+                        "bit-array pattern size must be a literal or previously bound variable",
+                        e.span,
+                    );
+                    None
+                }
+            },
+            None => {
+                let Some(v) = fallback_lit else {
+                    self.error(
+                        codes::E2011_LOWER,
+                        "bit-array pattern segment is missing a size",
+                        seg.span,
+                    );
+                    return None;
+                };
+                let r = self.fresh()?;
+                self.emit(Op::LoadInt { dst: r, value: v }, seg.span);
+                Some((r, true))
+            }
+        }
     }
 
     fn bind_bit_int_pattern(

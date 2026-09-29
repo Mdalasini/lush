@@ -325,6 +325,16 @@ impl<'a> BitCursor<'a> {
     pub fn rest_aligned(&self, require_byte_aligned: bool) -> bool {
         !require_byte_aligned || self.offset.is_multiple_of(8)
     }
+
+    /// Take exactly `n_bits` from the cursor; returns `(taken_off, taken_len)`.
+    pub fn take_n_bits(&mut self, n_bits: u64) -> Option<(u64, u64)> {
+        if n_bits > self.remaining() {
+            return None;
+        }
+        let off = self.offset;
+        self.offset += n_bits;
+        Some((off, n_bits))
+    }
 }
 
 pub fn cursor_from_value<'a>(heap: &'a Heap, v: Value) -> Option<BitCursor<'a>> {

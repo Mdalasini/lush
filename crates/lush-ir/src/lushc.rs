@@ -492,7 +492,7 @@ fn encode_op(w: &mut Writer, op: &Op) {
             value,
             rest,
             src,
-            size,
+            size_reg,
             signed,
             little,
         } => {
@@ -501,7 +501,7 @@ fn encode_op(w: &mut Writer, op: &Op) {
             w.u8(*value);
             w.u8(*rest);
             w.u8(*src);
-            w.u8(*size);
+            w.u8(*size_reg);
             let mut flags = 0u8;
             if *signed {
                 flags |= 1;
@@ -522,6 +522,30 @@ fn encode_op(w: &mut Writer, op: &Op) {
             w.u8(*rest);
             w.u8(*src);
             w.u8(*expected);
+        }
+        Op::BitArrayTakeSlice {
+            ok,
+            value,
+            rest,
+            src,
+            size_reg,
+            unit_is_bytes,
+            require_byte_aligned,
+        } => {
+            w.u16(66);
+            w.u8(*ok);
+            w.u8(*value);
+            w.u8(*rest);
+            w.u8(*src);
+            w.u8(*size_reg);
+            let mut flags = 0u8;
+            if *unit_is_bytes {
+                flags |= 1;
+            }
+            if *require_byte_aligned {
+                flags |= 2;
+            }
+            w.u8(flags);
         }
         Op::BitArrayTakeRest {
             ok,
@@ -803,14 +827,14 @@ fn decode_op(r: &mut Reader<'_>) -> Result<Op, String> {
             let value = r.u8()?;
             let rest = r.u8()?;
             let src = r.u8()?;
-            let size = r.u8()?;
+            let size_reg = r.u8()?;
             let flags = r.u8()?;
             Ok(Op::BitArrayTakeInt {
                 ok,
                 value,
                 rest,
                 src,
-                size,
+                size_reg,
                 signed: flags & 1 != 0,
                 little: flags & 2 != 0,
             })
@@ -837,6 +861,23 @@ fn decode_op(r: &mut Reader<'_>) -> Result<Op, String> {
             src: r.u8()?,
             expected: r.u8()?,
         }),
+        66 => {
+            let ok = r.u8()?;
+            let value = r.u8()?;
+            let rest = r.u8()?;
+            let src = r.u8()?;
+            let size_reg = r.u8()?;
+            let flags = r.u8()?;
+            Ok(Op::BitArrayTakeSlice {
+                ok,
+                value,
+                rest,
+                src,
+                size_reg,
+                unit_is_bytes: flags & 1 != 0,
+                require_byte_aligned: flags & 2 != 0,
+            })
+        }
         t => Err(format!("unknown opcode {t}")),
     }
 }

@@ -282,6 +282,11 @@ fn nested_patterns_e2e() {
     common::assert_case("nested_patterns");
 }
 
+#[test]
+fn bitarray_sized_e2e() {
+    common::assert_case("bitarray_sized");
+}
+
 /// #24 §5: a long chain of small `case` statements must not trip E2001.
 #[test]
 fn case_statements_reuse_registers() {

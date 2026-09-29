@@ -425,23 +425,85 @@ impl Vm {
                 value,
                 rest,
                 src,
-                size,
+                size_reg,
                 signed,
                 little,
             } => {
-                let src_v = self.reg(fi, src);
-                let taken = bitarray::cursor_from_value(&self.heap, src_v).and_then(|mut cur| {
-                    let n = cur.take_int(size, signed, little)?;
-                    let (off, len) = cur.rest_view();
-                    Some((n, off, len))
+                let size_ok = self.reg(fi, size_reg).as_int(&self.heap).and_then(|sz| {
+                    if (1..=64).contains(&sz) {
+                        let size = sz as u8;
+                        if little && !size.is_multiple_of(8) {
+                            None
+                        } else {
+                            Some(size)
+                        }
+                    } else {
+                        None
+                    }
                 });
-                if let Some((n, off, len)) = taken {
+                let src_v = self.reg(fi, src);
+                let taken = size_ok.and_then(|size| {
+                    bitarray::cursor_from_value(&self.heap, src_v).and_then(|mut cur| {
+                        let n = cur.take_int(size, signed, little)?;
+                        let (off, len) = cur.rest_view();
+                        Some((n, off, len, size))
+                    })
+                });
+                if let Some((n, off, len, size)) = taken {
                     if let Some(bits) = src_v.as_ptr().and_then(|p| self.heap.bit_array_rc(p)) {
                         charge += (size as u64).div_ceil(8);
                         let iv = Value::int(&mut self.heap, n);
                         let p = self.heap.alloc_bit_array_view(bits, off, len);
                         self.set_reg(fi, value, iv);
                         self.set_reg(fi, rest, Value::from_ptr(p));
+                        self.set_reg(fi, ok, Value::from_bool(true));
+                    } else {
+                        self.set_reg(fi, ok, Value::from_bool(false));
+                    }
+                } else {
+                    self.set_reg(fi, ok, Value::from_bool(false));
+                }
+            }
+            Op::BitArrayTakeSlice {
+                ok,
+                value,
+                rest,
+                src,
+                size_reg,
+                unit_is_bytes,
+                require_byte_aligned,
+            } => {
+                let src_v = self.reg(fi, src);
+                let taken = self.reg(fi, size_reg).as_int(&self.heap).and_then(|count| {
+                    if count < 0 {
+                        return None;
+                    }
+                    let n_bits = if unit_is_bytes {
+                        let bytes = count as u64;
+                        bytes.checked_mul(8)?
+                    } else {
+                        count as u64
+                    };
+                    let mut cur = bitarray::cursor_from_value(&self.heap, src_v)?;
+                    if require_byte_aligned && !cur.absolute_offset().is_multiple_of(8) {
+                        return None;
+                    }
+                    let (taken_off, taken_len) = cur.take_n_bits(n_bits)?;
+                    if require_byte_aligned && !taken_len.is_multiple_of(8) {
+                        return None;
+                    }
+                    let (rest_off, rest_len) = cur.rest_view();
+                    Some((taken_off, taken_len, rest_off, rest_len))
+                });
+                if let Some((taken_off, taken_len, rest_off, rest_len)) = taken {
+                    if let Some(bits) = src_v.as_ptr().and_then(|p| self.heap.bit_array_rc(p)) {
+                        charge += taken_len.div_ceil(8).div_ceil(8).max(1);
+                        let vp = self
+                            .heap
+                            .alloc_bit_array_view(bits.clone(), taken_off, taken_len);
+                        let rp = self.heap.alloc_bit_array_view(bits, rest_off, rest_len);
+                        self.set_reg(fi, value, Value::from_ptr(vp));
+                        self.set_reg(fi, rest, Value::from_ptr(rp));
                         self.set_reg(fi, ok, Value::from_bool(true));
                     } else {
                         self.set_reg(fi, ok, Value::from_bool(false));

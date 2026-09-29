@@ -217,14 +217,15 @@ pub enum Op {
         values: Vec<Reg>,
         specs: Vec<BitSegEnc>,
     },
-    /// Read an integer segment; on success write `value` and `rest`, set `ok` true.
-    /// Insufficient input or an out-of-range unsigned-64 decode sets `ok` false (no panic).
+    /// Read an integer segment of width `size_reg` (Int, 1..=64); on success write
+    /// `value` and `rest`, set `ok` true. Invalid width, insufficient input, or an
+    /// out-of-range unsigned-64 decode sets `ok` false (no panic).
     BitArrayTakeInt {
         ok: Reg,
         value: Reg,
         rest: Reg,
         src: Reg,
-        size: u8,
+        size_reg: Reg,
         signed: bool,
         little: bool,
     },
@@ -234,6 +235,18 @@ pub enum Op {
         rest: Reg,
         src: Reg,
         expected: Reg,
+    },
+    /// Take a sized prefix as a bit-array view. `size_reg` is an Int count of bytes
+    /// when `unit_is_bytes`, else bits. On success write `value`/`rest` and set `ok`.
+    /// Negative/oversized counts, insufficient input, or alignment failure → `ok` false.
+    BitArrayTakeSlice {
+        ok: Reg,
+        value: Reg,
+        rest: Reg,
+        src: Reg,
+        size_reg: Reg,
+        unit_is_bytes: bool,
+        require_byte_aligned: bool,
     },
     /// Bind the remainder as a bit array. When `require_byte_aligned`, fail if not aligned.
     BitArrayTakeRest {
@@ -488,12 +501,14 @@ fn verify_op(prog: &Program, f: &Function, fi: usize, pi: usize, op: &Op) -> Res
             value,
             rest,
             src,
+            size_reg,
             ..
         } => {
             reg_ok(f, *ok)?;
             reg_ok(f, *value)?;
             reg_ok(f, *rest)?;
             reg_ok(f, *src)?;
+            reg_ok(f, *size_reg)?;
         }
         Op::BitArrayTakeUtf8 {
             ok,
@@ -505,6 +520,20 @@ fn verify_op(prog: &Program, f: &Function, fi: usize, pi: usize, op: &Op) -> Res
             reg_ok(f, *rest)?;
             reg_ok(f, *src)?;
             reg_ok(f, *expected)?;
+        }
+        Op::BitArrayTakeSlice {
+            ok,
+            value,
+            rest,
+            src,
+            size_reg,
+            ..
+        } => {
+            reg_ok(f, *ok)?;
+            reg_ok(f, *value)?;
+            reg_ok(f, *rest)?;
+            reg_ok(f, *src)?;
+            reg_ok(f, *size_reg)?;
         }
         Op::BitArrayTakeRest { ok, value, src, .. } => {
             reg_ok(f, *ok)?;
