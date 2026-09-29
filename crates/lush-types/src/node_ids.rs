@@ -161,6 +161,7 @@ fn assign_pattern(pat: &mut Pattern, next_expr: &mut u32, next_pat: &mut u32) {
         *next_pat = next_pat.saturating_add(1);
         match &mut pat.kind {
             PatternKind::Int(_)
+            | PatternKind::NegatedInt(_)
             | PatternKind::Float(_)
             | PatternKind::String(_)
             | PatternKind::Var(_)

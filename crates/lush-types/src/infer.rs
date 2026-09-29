@@ -1426,14 +1426,15 @@ fn infer_pattern(ctx: &mut InferCtx<'_>, pat: &Pattern, expected: &Type, expansi
                 .push((name.text.clone(), name.span, false));
             infer_pattern(ctx, pattern, expected, expansive);
         }
-        PatternKind::Int(lit) => {
+        PatternKind::Int(lit) | PatternKind::NegatedInt(lit) => {
             let base = match lit.base {
                 IntBase::Decimal => 10,
                 IntBase::Hex => 16,
                 IntBase::Octal => 8,
                 IntBase::Binary => 2,
             };
-            let _ = const_eval::check_int_lit(&lit.digits, base, false, pat.span, ctx.sink);
+            let negated = matches!(pat.kind, PatternKind::NegatedInt(_));
+            let _ = const_eval::check_int_lit(&lit.digits, base, negated, pat.span, ctx.sink);
             let mut u = Unifier::new(ctx.store, ctx.sink);
             u.unify(expected, &Type::Int, pat.span, None);
         }

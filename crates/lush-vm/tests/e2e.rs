@@ -297,6 +297,11 @@ fn string_literal_pattern_e2e() {
     common::assert_case("string_literal_pattern");
 }
 
+#[test]
+fn numeric_matrix_e2e() {
+    common::assert_case("numeric_matrix");
+}
+
 /// #24 §5: a long chain of small `case` statements must not trip E2001.
 #[test]
 fn case_statements_reuse_registers() {

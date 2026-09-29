@@ -1707,14 +1707,18 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             pat = pattern.as_ref();
         }
         match &pat.kind {
-            PatternKind::Int(lit) => {
+            PatternKind::Int(lit) | PatternKind::NegatedInt(lit) => {
                 let base = match lit.base {
                     IntBase::Decimal => 10,
                     IntBase::Hex => 16,
                     IntBase::Octal => 8,
                     IntBase::Binary => 2,
                 };
-                let v = numeric::int_literal_value(&lit.digits, base).ok()?;
+                let v = if matches!(pat.kind, PatternKind::NegatedInt(_)) {
+                    numeric::negated_int_literal_value(&lit.digits, base).ok()?
+                } else {
+                    numeric::int_literal_value(&lit.digits, base).ok()?
+                };
                 let ok = self.fresh()?;
                 self.emit(
                     Op::IsInt {
@@ -2370,14 +2374,18 @@ impl<'a, 'm> FnEmitter<'a, 'm> {
             PatternKind::Discard | PatternKind::UnderscoreName(_) => {
                 self.recycle(value);
             }
-            PatternKind::Int(lit) => {
+            PatternKind::Int(lit) | PatternKind::NegatedInt(lit) => {
                 let base = match lit.base {
                     IntBase::Decimal => 10,
                     IntBase::Hex => 16,
                     IntBase::Octal => 8,
                     IntBase::Binary => 2,
                 };
-                let v = numeric::int_literal_value(&lit.digits, base).ok()?;
+                let v = if matches!(pattern.kind, PatternKind::NegatedInt(_)) {
+                    numeric::negated_int_literal_value(&lit.digits, base).ok()?
+                } else {
+                    numeric::int_literal_value(&lit.digits, base).ok()?
+                };
                 let ok = self.fresh()?;
                 self.emit(
                     Op::IsInt {

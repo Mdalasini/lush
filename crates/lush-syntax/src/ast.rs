@@ -368,6 +368,9 @@ impl Pattern {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternKind {
     Int(IntLit),
+    /// Directly prefix-negated integer literal (`-1`, `-9223372036854775808`).
+    /// Magnitude may be `2^63` (denoting `MIN_INT`); see §5.8.
+    NegatedInt(IntLit),
     Float(FloatLit),
     String(StringLit),
     Var(Name),
@@ -804,6 +807,7 @@ pub mod equiv {
     fn strip_pattern_kind(kind: &PatternKind) -> PatternKind {
         match kind {
             PatternKind::Int(i) => PatternKind::Int(i.clone()),
+            PatternKind::NegatedInt(i) => PatternKind::NegatedInt(i.clone()),
             PatternKind::Float(f) => PatternKind::Float(f.clone()),
             PatternKind::String(s) => PatternKind::String(s.clone()),
             PatternKind::Var(n) => PatternKind::Var(strip_name(n)),

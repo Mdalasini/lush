@@ -758,6 +758,10 @@ impl<'a> Formatter<'a> {
     fn fmt_pattern(&mut self, pat: &Pattern) {
         match &pat.kind {
             PatternKind::Int(i) => self.push(&i.raw),
+            PatternKind::NegatedInt(i) => {
+                self.push("-");
+                self.push(&i.raw);
+            }
             PatternKind::Float(f) => self.push(&f.raw),
             PatternKind::String(s) => self.push(&s.raw),
             PatternKind::Var(n) | PatternKind::UnderscoreName(n) => self.push(&n.text),

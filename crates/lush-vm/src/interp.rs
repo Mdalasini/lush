@@ -842,20 +842,15 @@ impl Vm {
                     return Ok(x == y);
                 }
                 ObjectKind::Tuple => {
-                    // Compare via field access up to a reasonable bound.
-                    for i in 0..255 {
+                    let n = self.heap.tuple_len(pa);
+                    if n != self.heap.tuple_len(pb) {
+                        return Ok(false);
+                    }
+                    for i in 0..n {
                         let x = self.heap.tuple_field(pa, i);
                         let y = self.heap.tuple_field(pb, i);
-                        // Stop when both nil and past length — heuristic: if fields equal until mismatch.
-                        if x == Value::nil() && y == Value::nil() && i > 0 {
-                            // Can't know arity; compare first differing.
-                            break;
-                        }
                         if !self.eq_values(x, y, charge)? {
                             return Ok(false);
-                        }
-                        if x == Value::nil() && y == Value::nil() {
-                            break;
                         }
                     }
                     return Ok(true);
@@ -863,6 +858,17 @@ impl Vm {
                 ObjectKind::Adt => {
                     if self.heap.adt_variant(pa) != self.heap.adt_variant(pb) {
                         return Ok(false);
+                    }
+                    let n = self.heap.adt_len(pa);
+                    if n != self.heap.adt_len(pb) {
+                        return Ok(false);
+                    }
+                    for i in 0..n {
+                        let x = self.heap.adt_field(pa, i);
+                        let y = self.heap.adt_field(pb, i);
+                        if !self.eq_values(x, y, charge)? {
+                            return Ok(false);
+                        }
                     }
                     return Ok(true);
                 }

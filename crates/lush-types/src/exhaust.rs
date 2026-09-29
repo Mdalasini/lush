@@ -479,6 +479,9 @@ fn ast_pat(p: &Pattern) -> Pat {
         PatternKind::Int(lit) => Pat {
             head: Head::Lit(LitKind::Int(lit.digits.clone())),
         },
+        PatternKind::NegatedInt(lit) => Pat {
+            head: Head::Lit(LitKind::Int(format!("-{}", lit.digits))),
+        },
         PatternKind::Float(lit) => Pat {
             head: Head::Lit(LitKind::Float(lit.raw.clone())),
         },

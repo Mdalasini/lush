@@ -127,7 +127,7 @@ impl Heap {
     }
     pub fn tuple_field(&self, p: HeapPtr, i: usize) -> Value {
         match self.get(p) {
-            Object::Tuple(fs) => fs[i],
+            Object::Tuple(fs) => fs.get(i).copied().unwrap_or_else(Value::nil),
             _ => Value::nil(),
         }
     }
@@ -173,7 +173,7 @@ impl Heap {
     }
     pub fn adt_field(&self, p: HeapPtr, i: usize) -> Value {
         match self.get(p) {
-            Object::Adt { fields, .. } => fields[i],
+            Object::Adt { fields, .. } => fields.get(i).copied().unwrap_or_else(Value::nil),
             _ => Value::nil(),
         }
     }

@@ -1568,6 +1568,27 @@ impl<'a> Parser<'a> {
 
     fn parse_pattern_primary(&mut self) -> Pattern {
         match self.kind().clone() {
+            TokenKind::Minus => {
+                // Directly negated integer literal pattern (`-1`, `MIN_INT`).
+                let start = self.span();
+                self.bump();
+                match self.kind().clone() {
+                    TokenKind::Int(lit) => {
+                        let end = self.span();
+                        self.bump();
+                        Pattern::new(start.merge(end), PatternKind::NegatedInt(lit))
+                    }
+                    _ => {
+                        self.error(
+                            start,
+                            codes::E0150_EXPECTED_PATTERN,
+                            "expected integer literal after `-` in a pattern",
+                            Some("only directly negated integer literals are patterns; use a guard for other expressions".into()),
+                        );
+                        self.dummy_pattern()
+                    }
+                }
+            }
             TokenKind::Int(lit) => {
                 let span = self.span();
                 self.bump();

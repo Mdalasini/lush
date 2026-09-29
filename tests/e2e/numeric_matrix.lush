@@ -1,0 +1,61 @@
+import lush/io;
+import lush/int;
+
+pub fn pick_int(n) {
+  case n {
+    -9223372036854775808 -> 1;
+    -1 -> 2;
+    0 -> 3;
+    4611686018427387904 -> 4;
+    9223372036854775807 -> 5;
+    _ -> 0;
+  };
+}
+
+pub fn same(a, b) {
+  a == b;
+}
+
+pub fn neg(x) {
+  -x;
+}
+
+pub fn main() {
+  // Negated literal patterns, including MIN_INT and boxed-range values.
+  let min = 0 - 9223372036854775807 - 1;
+  io.println(int.to_string(pick_int(min)));
+  io.println(int.to_string(pick_int(-1)));
+  io.println(int.to_string(pick_int(0)));
+  io.println(int.to_string(pick_int(4611686018427387904)));
+  io.println(int.to_string(pick_int(9223372036854775807)));
+  io.println(int.to_string(pick_int(42)));
+  // Generic == / negation across tags.
+  case same(1, 1) {
+    True -> io.println("1");
+    False -> io.println("0");
+  };
+  case same(1.0, 1.0) {
+    True -> io.println("1");
+    False -> io.println("0");
+  };
+  case same("a", "a") {
+    True -> io.println("1");
+    False -> io.println("0");
+  };
+  case same(#(1, 2), #(1, 2)) {
+    True -> io.println("1");
+    False -> io.println("0");
+  };
+  io.println(int.to_string(neg(5)));
+  io.println(int.to_string(case neg(1.5) == -1.5 {
+    True -> 1;
+    False -> 0;
+  }));
+  // Checked overflow edges that succeed.
+  io.println(int.to_string(4611686018427387903 + 1));
+  io.println(int.to_string(-4611686018427387904 - 0));
+  // Div/mod sign matrix extras.
+  io.println(int.to_string(-7 / 2));
+  io.println(int.to_string(7 % -2));
+  Nil;
+}
